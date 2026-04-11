@@ -1,0 +1,27 @@
+name: MUZ
+main: dev.mumu.doudizhu.DoudizhuPlugin
+version: ${version}
+api-version: "1.21.11"
+folia-supported: true
+author: linmumua
+description: MUZ card table plugin for Paper and Purpur.
+softdepend:
+  - CraftEngine
+  - PlaceholderAPI
+  - Vault
+  - CMI
+  - CMILib
+  - EzEconomy
+  - XConomy
+commands:
+  muz:
+    aliases: [MUZ]
+    description: Manage MUZ tables and rounds.
+    usage: /muz help
+    permission: muz.command
+permissions:
+  muz.command:
+    default: true
+  muz.admin:
+    default: op
+

@@ -1,0 +1,147 @@
+# DouDizhuPaper 配置文件
+
+table:
+  # 放置桌子时的整体垂直偏移
+  spawn-offset-y: 0.18
+
+craftengine-items:
+  table:
+    # 桌子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
+    item-model: muz:furniture/table_visual
+    # 桌子显示名称，仅用于物品显示名
+    item-name: "Dou Dizhu Table"
+  chair:
+    # 椅子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
+    item-model: muz:furniture/seat_chair
+    # 板凳显示名称，仅用于物品显示名
+    item-name: "Dou Dizhu Chair"
+
+render:
+  # 玩家自己手牌区的牌模型缩放
+  private-card-scale: 0.50
+  private-hand-offset:
+    # 全体玩家私人手牌的全局横向偏移
+    lateral: 0.00
+    # 全体玩家私人手牌的全局竖向偏移
+    vertical: 0.00
+    # 全体玩家私人手牌的全局纵深偏移（正数更靠近桌子中心）
+    depth: 0.00
+  # 桌子中间公共出牌区的牌模型缩放
+  public-trick-card-scale: 0.58
+  # 手牌左右间距
+  hand-spacing: 0.21
+  # 公共出牌区左右间距
+  public-trick-spacing: 0.22
+  # 座位旁操作按钮的缩放
+  button-scale: 0.42
+  # 按钮图标旋转角度
+  button-roll-degrees: 90.0
+  button-offset:
+    # 按钮离桌子的远近
+    distance: 2.10
+    # 按钮高度
+    height: 1.02
+  chair-visual-offset:
+    # 椅子左右偏移
+    lateral: 0.00
+    # 椅子上下偏移
+    vertical: -0.04
+  chair-hitbox-offset:
+    # 椅子交互箱左右偏移
+    lateral: 0.00
+    # 椅子交互箱上下偏移
+    vertical: -0.18
+  chair-hitbox:
+    # 椅子交互箱宽度
+    width: 0.22
+    # 椅子交互箱高度
+    height: 0.30
+  button-hitbox-offset:
+    # 按钮交互箱左右偏移
+    lateral: 0.00
+    # 按钮交互箱前后偏移
+    depth: 0.00
+    # 按钮交互箱上下偏移
+    vertical: 0.02
+  button-hitbox:
+    # 按钮交互箱宽度
+    width: 0.22
+    # 按钮交互箱高度
+    height: 0.34
+  card-hitbox-offset:
+    # 扑克牌交互箱左右偏移
+    lateral: 0.00
+    # 扑克牌交互箱前后偏移
+    depth: 0.00
+    # 扑克牌交互箱上下偏移
+    vertical: -0.45
+  card-hitbox:
+    # 扑克牌交互箱宽度
+    width: 0.18
+    # 扑克牌交互箱高度
+    height: 0.62
+  # 相邻牌之间的前后错层，用来减少闪烁
+  card-depth-offset: 0.01
+  # 桌面状态文字高度
+  status-height: 3.10
+  # “上一手出牌详情”文字高度
+  play-detail-height: 2.35
+  # 公共出牌区整体高度
+  public-trick-height: 1.55
+
+cards:
+  hologram-labels:
+    # 牌面数字标签总开关
+    enabled: true
+    # 为 true 时只给重复点数牌显示标签；为 false 时所有牌都显示
+    duplicate-ranks-only: false
+
+audio:
+  # 对局中背景音乐音量
+  bgm-volume: 0.55
+  # 叫分、出牌、胜负等音效音量
+  effect-volume: 1.00
+
+actionbar:
+  # 当前操作玩家的持续提示倒计时秒数；0 为不显示倒计时
+  turn-countdown-seconds: 20
+  # 倒计时音效格式：音效名 [音量] [音高]
+  countdown-sound: "minecraft:block.note_block.hat 0.45 1.00"
+
+bot:
+  # 机器人每次行动前的最短延迟 tick
+  action-delay-min-ticks: 10
+  # 机器人每次行动前的最长延迟 tick
+  action-delay-max-ticks: 30
+
+hints:
+  # “提示”按钮循环的最大方案数
+  max-groups: 6
+
+player-options:
+  selection-sound-profiles:
+    profile-1:
+      label: "清脆提示"
+      spec: "minecraft:block.note_block.pling 0.35 1.18 0.92"
+    profile-2:
+      label: "告示牌提示"
+      spec: "minecraft:block.hanging_sign.place 0.35 1.12 0.92"
+    profile-3:
+      label: "洞穴提示"
+      spec: "minecraft:ambient.cave 0.25 1.00 0.90"
+    profile-4:
+      label: "静音"
+      spec: "minecraft:block.note_block.hat 0.00 1.00 1.00"
+  play-action-profiles:
+    profile-1:
+      label: "无操作"
+      spec: "type: none"
+    profile-2:
+      label: "聊天提示"
+      spec: "type: message; message: <yellow>你打出了 <arg:pattern></yellow>"
+    profile-3:
+      label: "动作栏提示"
+      spec: "type: actionbar; actionbar: <gold><arg:player.name></gold> 打出了 <yellow><arg:pattern></yellow>"
+    profile-4:
+      label: "播放音效"
+      spec: "type: play_sound; sound: minecraft:entity.player.levelup; volume: 0.35; pitch: 1.05; source: master"

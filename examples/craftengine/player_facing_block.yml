@@ -1,0 +1,77 @@
+# 基础 CE 方块示例
+# 目标：
+# 1. 使用原版风格的离散朝向：north / east / south / west
+# 2. 放下去以后，方块视觉正面和玩家当前水平朝向一致
+#
+# 说明：
+# CraftEngine 的硬编码属性名 `facing` 在放置时会自动写入“玩家水平朝向的相反方向”。
+# 所以这里把变体的模型旋转反着映射，最终显示出来的正面才会和玩家同向。
+
+templates:
+  muz:appearance/player_facing_block:
+    auto-state: solid
+    model:
+      path: muz:block/player_facing_block
+      generation:
+        parent: minecraft:block/orientable
+        textures:
+          front: muz:block/player_facing_block_front
+          side: muz:block/player_facing_block_side
+          top: muz:block/player_facing_block_top
+      y: ${y}
+
+items:
+  muz:player_facing_block:
+    material: paper
+    texture: muz:item/block/player_facing_block
+    data:
+      item-name: <!i><gold>Player Facing Block</gold>
+    behavior:
+      type: block_item
+      block: muz:player_facing_block
+
+blocks:
+  muz:player_facing_block:
+    loot:
+      template: default:loot_table/self
+    settings:
+      template:
+        - default:hardness/wood
+        - default:burn_data/planks
+        - default:sound/wood
+        - default:settings/solid_1x1x1
+      overrides:
+        item: muz:player_facing_block
+        tags:
+          - "minecraft:mineable/axe"
+    states:
+      properties:
+        facing:
+          type: horizontal_direction
+          default: north
+      appearances:
+        front_to_south:
+          template: [muz:appearance/player_facing_block]
+          arguments:
+            y: 180
+        front_to_west:
+          template: [muz:appearance/player_facing_block]
+          arguments:
+            y: 270
+        front_to_north:
+          template: [muz:appearance/player_facing_block]
+          arguments:
+            y: 0
+        front_to_east:
+          template: [muz:appearance/player_facing_block]
+          arguments:
+            y: 90
+      variants:
+        "facing=north":
+          appearance: front_to_south
+        "facing=east":
+          appearance: front_to_west
+        "facing=south":
+          appearance: front_to_north
+        "facing=west":
+          appearance: front_to_east

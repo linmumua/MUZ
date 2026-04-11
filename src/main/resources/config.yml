@@ -1,0 +1,430 @@
+# DouDizhuPaper 配置文件
+
+table:
+  # 放置桌子时的整体垂直偏移
+  spawn-offset-y: 0.18
+  # 放桌位置被方块挡住时播放的警告音格式：音效名 [音量] [音高]
+  placement-blocked-sound: "minecraft:block.note_block.bass 0.55 0.75"
+
+craftengine-items:
+  table:
+    # 桌子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
+    item-model: muz:furniture/table_visual
+    # 桌子显示名称，仅用于物品显示名
+    item-name: "Dou Dizhu Table"
+  chair:
+    # 椅子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
+    item-model: muz:furniture/seat_chair
+    # 板凳显示名称，仅用于物品显示名
+    item-name: "Dou Dizhu Chair"
+
+render:
+  furniture-scale:
+    # 桌子模型大小
+    table: 2.25
+    # 椅子模型大小
+    chair: 1.35
+  text-scale:
+    # 座位信息和上一手文字大小
+    small: 0.46
+    # 桌面主状态文字大小
+    status: 0.72
+    # 按钮和牌面上方的小标签大小
+    label: 0.40
+  # 玩家头像在牌桌文本中的显示倍率
+  player-head-scale: 1.00
+  status-avatar:
+    # 顶栏头像的单独缩放
+    scale: 1.00
+  status-avatar-offset:
+    # 顶栏头像左右偏移
+    lateral: 0.0
+    # 顶栏头像上下偏移
+    vertical: 0.82
+    # 顶栏头像前后偏移
+    depth: 0.0
+  seat-avatar:
+    # 椅子外侧头像的单独缩放
+    scale: 1.00
+  seat-avatar-offset:
+    # 椅子外侧头像左右偏移
+    lateral: 0.0
+    # 椅子外侧头像上下偏移
+    vertical: 0.18
+    # 椅子外侧头像前后偏移
+    depth: 0.0
+  # 玩家自己手牌区的牌整体基础大小
+  private-card-scale: 0.50
+  private-card-size:
+    # 只改手牌宽度
+    width: 0.50
+    # 只改手牌高度
+    height: 0.50
+    # 只改手牌厚度
+    depth: 0.50
+  private-hand-offset:
+    # 三家手牌一起左右平移
+    lateral: 0.00
+    # 三家手牌一起上下平移
+    vertical: 0.00
+    # 三家手牌一起朝桌心/远离桌心移动（正数更靠近桌子中心）
+    depth: 0.00
+  # 桌子中间公共出牌区的牌整体基础大小
+  public-trick-card-scale: 0.58
+  public-card-size:
+    # 只改预览牌宽度
+    width: 0.58
+    # 只改预览牌高度
+    height: 0.58
+    # 只改预览牌厚度
+    depth: 0.58
+  card-hover:
+    # 鼠标对准牌时的放大倍数
+    scale: 1.08
+    # 鼠标对准牌时的上移高度
+    lift: 0.06
+    # 牌预览动画时长（tick）
+    interpolation-ticks: 6
+    # 牌预览动画类型: 0=线性 1=缓出 2=缓入缓出 3=回弹
+    animation-type: 1
+  selected-card:
+    # 已选中的牌当前不再额外放大，保留此项仅兼容旧配置
+    scale: 1.00
+    # 已选中的牌会额外上移多少
+    lift: 0.18
+  hover-glow:
+    # 鼠标指向牌或按钮时是否发光
+    enabled: true
+    color:
+      red: 96
+      green: 180
+      blue: 255
+  selected-glow:
+    # 已预选的牌是否发光
+    enabled: true
+    color:
+      red: 255
+      green: 226
+      blue: 92
+  button-hover:
+    # 鼠标对准按钮时的放大倍数
+    scale: 1.06
+    # 鼠标对准按钮时的上移高度
+    lift: 0.03
+    # 按钮 hover 动画时长（tick）；更大更丝滑，但会稍微更拖尾
+    interpolation-ticks: 8
+    # 按钮预览动画类型: 0=线性 1=缓出 2=缓入缓出 3=回弹
+    animation-type: 3
+  # 牌面数字标签离牌面的高度
+  card-label-height: 0.34
+  card-label-offset:
+    # 牌面数字标签左右偏移
+    lateral: 0.00
+    # 牌面数字标签前后偏移
+    depth: 0.00
+  # 手牌左右间距
+  hand-spacing: 0.21
+  # 公共出牌区左右间距
+  public-trick-spacing: 0.22
+  # 座位旁操作按钮的缩放
+  button-scale: 0.42
+  # 按钮图标自身的翻转角度；正常建议保持 0
+  button-roll-degrees: 0.0
+  button-offset:
+    # 按钮离桌子的远近
+    distance: 2.10
+    # 按钮高度
+    height: 1.02
+  button-layout:
+    # 空座位“加入”文字离按钮的高度
+    join-label-height: 0.18
+    # 操作按钮文字离按钮的高度
+    action-label-height: 0.18
+    # 正前方座位按钮的基础距离
+    front-base-distance: 1.40
+    # 左右两侧座位按钮的基础距离
+    side-base-distance: 1.72
+    # 当 button-offset.distance 增大时，额外往外推的系数
+    distance-factor: 0.45
+    # 按钮沿弧线展开的疏密倍率
+    spacing-scale: 1.00
+    # 3 个按钮时使用的小弧度角
+    arc-angle-small: 30.0
+    # 4 个按钮时使用的大弧度角
+    arc-angle-large: 42.0
+    # 3 个按钮时使用的小弧形半径
+    arc-radius-small: 0.70
+    # 4 个按钮时使用的大弧形半径
+    arc-radius-large: 0.86
+  chair-visual-offset:
+    # 椅子朝向额外旋转多少度；方块类建议使用 90 的倍数
+    rotation-degrees: 0.0
+    # 椅子左右偏移
+    lateral: 0.00
+    # 椅子上下偏移
+    vertical: -0.04
+  chair-hitbox-offset:
+    # 椅子交互箱左右偏移
+    lateral: 0.00
+    # 椅子交互箱上下偏移
+    vertical: -0.18
+  chair-hitbox:
+    # 椅子交互箱宽度
+    width: 0.22
+    # 椅子交互箱高度
+    height: 0.30
+  button-hitbox-offset:
+    # 按钮点击范围左右偏移
+    lateral: 0.00
+    # 按钮点击范围前后偏移
+    depth: 0.00
+    # 按钮点击范围上下偏移
+    vertical: 0.02
+  button-hitbox:
+    # 按钮交互箱宽度
+    width: 0.22
+    # 按钮交互箱高度
+    height: 0.34
+  card-hitbox-offset:
+    # 手牌点击范围左右偏移
+    lateral: 0.00
+    # 手牌点击范围前后偏移（朝桌心/远离桌心）
+    depth: 0.00
+    # 手牌点击范围上下偏移
+    vertical: -0.45
+  card-hitbox:
+    # 扑克牌交互箱长度
+    length: 0.30
+    # 扑克牌交互箱宽度
+    width: 0.18
+    # 扑克牌交互箱高度
+    height: 0.62
+  # 相邻牌之间的前后错层，用来减少闪烁
+  card-depth-offset: 0.01
+  # 桌面状态文字高度
+  status-height: 3.10
+  # “上一手出牌详情”文字高度
+  play-detail-height: 2.35
+  # 公共出牌区整体高度
+  public-trick-height: 1.55
+  public-trick:
+    # 预览区每一行最多摆几张牌
+    cards-per-row: 6
+    # 当同时显示“上一手”和“你当前选中的牌”时，上一手那一排向上偏移多少
+    compare-row-offset: 0.28
+    # 当同时显示两排时，你当前选中的牌那一排向下偏移多少（负数会更低）
+    selected-row-offset: -0.24
+    # 多排预览时，第二维向桌心展开的深度间距
+    row-depth-spacing: 0.22
+    # 预览牌数字标签离牌面的高度
+    label-height: 0.22
+  layout:
+    # 桌面模型离锚点的高度
+    table-display-height: 0.55
+    # 桌面碰撞体离锚点的高度
+    table-collider-height: 0.72
+    # 椅子模型离锚点的基础高度
+    chair-base-height: 0.20
+    # 椅子碰撞体离椅子的高度
+    chair-collider-height: 0.18
+    # 玩家坐上去的挂载点高度
+    chair-seat-height: 0.18
+    # 椅子交互箱离椅子的基础高度
+    chair-interaction-height: 0.38
+    # 座位文字离椅子的高度
+    chair-label-height: 1.35
+    # 桌面状态文字的最大宽度
+    status-line-width: 250
+    hand-center:
+      # 三家手牌离桌心的距离
+      distance: 1.62
+      # 三家手牌离地面的基础高度
+      height: 1.23
+    # 三把椅子离桌心的距离；方块类椅子建议按整格调整
+    chair-distance: 2.35
+
+cards:
+  hologram-labels:
+    # 牌面数字标签总开关
+    enabled: true
+    # 为 true 时只给重复点数牌显示标签；为 false 时所有牌都显示
+    duplicate-ranks-only: false
+
+audio:
+  # 对局中背景音乐音量
+  bgm-volume: 0.55
+  # 叫分、出牌、胜负等音效音量
+  effect-volume: 1.00
+
+actionbar:
+  # 当前操作玩家的持续提示倒计时秒数；0 为不显示倒计时
+  turn-countdown-seconds: 20
+  # 倒计时音效格式：音效名 [音量] [音高]
+  countdown-sound: "minecraft:block.note_block.hat 0.5 1.0"
+  # 大厅阶段未准备玩家的提醒音效格式：音效名 [音量] [音高]
+  unready-warning-sound: "minecraft:block.note_block.didgeridoo 0.55 0.85"
+
+bot:
+  # 机器人每次行动前的最短延迟 tick
+  action-delay-min-ticks: 10
+  # 机器人每次行动前的最长延迟 tick
+  action-delay-max-ticks: 30
+  ai:
+    # true 时机器人会尝试调用外部 AI 决策；失败或超时会自动回退本地规则
+    enabled: true
+    # 单次机器人 AI 决策最多等待多久；超过后会直接回退本地规则
+    timeout-ms: 5000
+
+ai:
+  deepseek:
+    # Bot 调试聊天固定走 DeepSeek；留空密钥时不会真正发请求
+    enabled: true
+    # 展示名称，仅用于日志和调试提示
+    provider-name: "DeepSeek"
+    # OpenAI 兼容接口基础地址；DeepSeek 官方可直接使用 https://api.deepseek.com
+    # 如果要接别的兼容服务，也可以写成 https://your-host/v1
+    url: "https://api.deepseek.com"
+    # 对话补全接口路径；默认是 OpenAI 兼容格式
+    chat-completions-path: "/chat/completions"
+    # 模型列表接口路径；仅用于后续扩展或调试
+    models-path: "/models"
+    # 接口密钥；留空时即使 enabled=true 也不会发起请求
+    api-key: ""
+    # 默认模型；DeepSeek 官方常用值如 deepseek-chat / deepseek-reasoner
+    model: "deepseek-chat"
+    # 建立连接超时毫秒
+    connect-timeout-ms: 10000
+    # 单次请求总超时毫秒
+    request-timeout-ms: 45000
+    # 默认采样温度，建议 0.0 - 1.3
+    temperature: 0.7
+    # 默认最大输出 token；0 表示交给服务端默认策略
+    max-tokens: 0
+    # 每次请求前附加的系统提示词；留空则不注入
+    system-prompt: ""
+
+hints:
+  # “提示”按钮循环的最大方案数
+  max-groups: 6
+
+debug:
+  # /muz debug add 生成多张观察桌时，桌与桌之间的间距
+  table-spacing: 6.50
+
+economy:
+  payment:
+    # false=默认金币结算；true=改用全局筹码结算
+    use-chip: false
+    # 全局筹码物品建议使用命令 /muz chip setitem 直接设置主手物品
+  vault:
+    # 是否尝试接入 Vault；未安装 Vault 或经济插件时会自动回退
+    enabled: true
+    # 同时存在多个 Vault Economy Provider 时，按顺序优先选择
+    # 常见可填 EzEconomy、XConomy、CMI、Essentials 等
+    preferred-providers:
+      - EzEconomy
+      - XConomy
+      - CMI
+    doudizhu:
+      # 斗地主基础每分折算多少金币，实际结算会再乘房间倍率
+      currency-per-point: 1.0
+    texas:
+      # 是否让德州筹码直接接管 Vault 余额
+      enabled: true
+      # 基础多少经济货币单位折算 1 筹码；实际结算会再乘房间倍率
+      currency-per-chip: 1.0
+
+room-levels:
+  # /muz create doudizhu 或 /muz create texas 时默认使用的场次
+  default-create-level: low
+  low:
+    label: "低级场"
+    multiplier: 100.0
+    economy-enabled: true
+  mid:
+    label: "中级场"
+    multiplier: 1000.0
+    economy-enabled: true
+  high:
+    label: "高级场"
+    multiplier: 10000.0
+    economy-enabled: true
+  fun:
+    label: "娱乐场"
+    multiplier: 0.0
+    economy-enabled: false
+
+storage:
+  sql:
+    # sqlite 或 mysql，默认直接使用插件目录里的 sqlite 文件
+    type: sqlite
+    sqlite:
+      file: "storage/mumu-data.db"
+    mysql:
+      host: "127.0.0.1"
+      port: 3306
+      database: "muz"
+      username: "root"
+      password: ""
+      parameters: "useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
+
+texas:
+  render:
+    # 是否生成德州桌子和椅子实体；当前默认关闭，减少实体负担
+    spawn-furniture: false
+  layout:
+    # 德州一圈座位离中心的距离
+    seat-distance: 3.10
+    # 座位信息文字高度
+    seat-label-height: 1.35
+    # 空位加入按钮高度
+    join-button-height: 0.85
+    # 桌中央状态文字高度
+    status-height: 3.10
+    # 操作按钮所在一排的高度
+    action-button-height: 0.88
+    # 操作按钮之间的间距
+    action-button-step: 0.34
+    # 按钮位标记高度
+    dealer-marker-height: 1.56
+    # 按钮位标记离各座位的外扩系数
+    dealer-marker-radius-factor: 0.86
+  cards:
+    # 公共牌高度
+    community-height: 1.18
+    # 公共牌之间的间距
+    community-spacing: 0.42
+    # 玩家手牌高度
+    hole-height: 1.18
+    # 同一玩家两张手牌之间的间距
+    hole-spacing: 0.36
+    # 玩家手牌离各自座位的外扩系数
+    hole-radius-factor: 0.68
+
+player-options:
+  selection-sound-profiles:
+    profile-1:
+      label: "清脆提示"
+      spec: "minecraft:block.note_block.pling 0.4 1.2 0.9"
+    profile-2:
+      label: "告示牌提示"
+      spec: "minecraft:block.hanging_sign.place 0.4 1.1 0.9"
+    profile-3:
+      label: "洞穴提示"
+      spec: "minecraft:ambient.cave 0.3 1.0 0.9"
+    profile-4:
+      label: "静音"
+      spec: "minecraft:block.note_block.hat 0.0 1.0 1.0"
+  play-action-profiles:
+    profile-1:
+      label: "无操作"
+      spec: "type: none"
+    profile-2:
+      label: "聊天提示"
+      spec: "type: message; message: <#8FD4FF>出牌完成</#8FD4FF><dark_gray> · </dark_gray><#F1D398><arg:pattern></#F1D398>"
+    profile-3:
+      label: "动作栏提示"
+      spec: "type: actionbar; actionbar: <#9AA8B6><arg:player.name></#9AA8B6><dark_gray> · </dark_gray><#F1D398><arg:pattern></#F1D398>"
+    profile-4:
+      label: "播放音效"
+      spec: "type: play_sound; sound: minecraft:entity.player.levelup; volume: 0.35; pitch: 1.05; source: master"

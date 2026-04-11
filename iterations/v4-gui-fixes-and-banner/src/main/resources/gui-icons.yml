@@ -1,0 +1,58 @@
+icons:
+  common:
+    close: muz:ui/leave
+  settings:
+    summary: muz:ui/status
+    labels: muz:ui/inspect
+    selection_sound: muz:ui/play
+    selection_sound_picker: muz:ui/inspect
+    opponent_preview: muz:ui/status
+    reset: muz:ui/refresh
+  admin:
+    summary: muz:ui/status
+    reload: muz:ui/status
+    nav:
+      models: muz:ui/start
+      render: muz:ui/status
+      seat: muz:ui/hand
+      audio: muz:ui/inspect
+      bot: muz:ui/ready
+    models:
+      set_table: muz:ui/start
+      set_chair: muz:ui/ready
+      reset_table: muz:ui/refresh
+      reset_chair: muz:ui/refresh
+    seat:
+      visual_lateral: muz:ui/status
+      visual_vertical: muz:ui/status
+      hitbox_lateral: muz:ui/status
+      hitbox_vertical: muz:ui/status
+      hitbox_width: muz:ui/status
+      hitbox_height: muz:ui/status
+    render:
+      table_spawn: muz:ui/status
+      private_card_scale: muz:ui/status
+      public_trick_scale: muz:ui/status
+      hand_spacing: muz:ui/status
+      public_trick_spacing: muz:ui/status
+      button_scale: muz:ui/status
+      button_rotation: muz:ui/status
+      button_distance: muz:ui/status
+      button_height: muz:ui/status
+      card_depth: muz:ui/status
+      status_height: muz:ui/status
+      play_detail_height: muz:ui/status
+      public_trick_height: muz:ui/status
+      global_lateral: muz:ui/status
+      global_vertical: muz:ui/status
+      global_depth: muz:ui/status
+      labels_enabled: muz:ui/inspect
+      duplicate_only: muz:ui/inspect
+    audio:
+      bgm_volume: muz:ui/status
+      effect_volume: muz:ui/status
+      countdown_seconds: muz:ui/status
+      countdown_sound: muz:ui/inspect
+    bot:
+      delay: muz:ui/status
+      hint_limit: muz:ui/status
