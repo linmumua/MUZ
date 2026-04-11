@@ -150,25 +150,6 @@ public final class PhysicalTableManager {
         return null;
     }
 
-    public List<ObstructionMarker> placementObstructionMarkers(Location anchor, float yaw) {
-        if (anchor == null || anchor.getWorld() == null) {
-            return List.of();
-        }
-        ensureChunkReady(anchor);
-        List<ObstructionMarker> markers = new ArrayList<>();
-        Location tableCenter = previewTableCenter(anchor);
-        if (hasSolidObstruction(blockPlacementLocation(tableCenter), 0.95, -0.10, 0.95)) {
-            markers.add(new ObstructionMarker(tableCenter, 0.96));
-        }
-        List<Location> chairBases = previewChairBases(anchor, yaw);
-        for (Location chairBase : chairBases) {
-            if (hasSolidObstruction(blockPlacementLocation(chairBase), 0.55, -0.10, 1.05)) {
-                markers.add(new ObstructionMarker(chairBase.clone().add(0.0, 0.08, 0.0), 0.38));
-            }
-        }
-        return markers;
-    }
-
     private GameTable placeNewTableInternal(Player owner, String name, TableLevel roomLevel, Location anchor, float yaw) {
         String key = normalize(name);
         if (placedTables.containsKey(key)) {
@@ -1856,13 +1837,10 @@ public final class PhysicalTableManager {
     }
 
     private void forceRemoveEntityTree(Entity entity) {
-        if (entity == null || entity instanceof Player) {
+        if (entity == null) {
             return;
         }
         for (Entity passenger : new ArrayList<>(entity.getPassengers())) {
-            if (passenger instanceof Player) {
-                continue;
-            }
             forceRemoveEntityTree(passenger);
         }
         if (entity.isValid()) {
@@ -2867,13 +2845,7 @@ public final class PhysicalTableManager {
 
     private Location statusAvatarNameLocation(Location anchor, float yaw) {
         double gap = 0.26 + Math.max(0.0f, plugin.getStatusAvatarScale() - 1.0f) * 0.10;
-        return rotate(
-            anchor,
-            yaw,
-            plugin.getStatusAvatarLateralOffset(),
-            plugin.getStatusHeight() + plugin.getStatusAvatarVerticalOffset() - gap,
-            plugin.getStatusAvatarDepthOffset()
-        );
+        return statusAvatarLocation(anchor, yaw).clone().add(0.0, -gap, 0.0);
     }
 
     private Location seatAvatarLocation(Location seatBase, float yaw) {
@@ -2888,13 +2860,7 @@ public final class PhysicalTableManager {
 
     private Location seatInfoLocation(Location seatBase, float yaw) {
         double gap = 0.22 + Math.max(0.0f, plugin.getSeatAvatarScale() - 1.0f) * 0.08;
-        return offsetFromYaw(
-            seatBase,
-            yaw,
-            plugin.getSeatAvatarLateralOffset(),
-            plugin.getChairLabelHeight() + plugin.getSeatAvatarVerticalOffset() - gap,
-            plugin.getSeatAvatarDepthOffset()
-        );
+        return seatAvatarLocation(seatBase, yaw).clone().add(0.0, -gap, 0.0);
     }
 
     private Component statusAvatar(GameTable table) {
@@ -2906,16 +2872,11 @@ public final class PhysicalTableManager {
     }
 
     private Component statusAvatarName(GameTable table) {
-        if (table.getPhase() == GamePhase.LOBBY) {
-            return MuzTheme.muted("等待玩家");
+        UUID focus = statusFocusPlayer(table);
+        if (focus == null) {
+            return Component.empty();
         }
-        if (table.getCurrentTurn() != null) {
-            return MuzTheme.field("当前操作", MuzTheme.body("见座位信息"));
-        }
-        if (table.getLandlord() != null) {
-            return MuzTheme.field("地主", MuzTheme.body("见座位信息"));
-        }
-        return MuzTheme.muted("座位上方查看玩家信息");
+        return plugin.playerNameComponent(focus, table.displayName(focus), NamedTextColor.WHITE);
     }
 
     private UUID statusFocusPlayer(GameTable table) {
@@ -3533,9 +3494,6 @@ public final class PhysicalTableManager {
     }
 
     private record ButtonDefinition(String modelId, String label, ButtonAction action, double offsetX, double offsetY, double offsetZ) {
-    }
-
-    public record ObstructionMarker(Location center, double radius) {
     }
 
     private record ActionBinding(String tableName, ButtonAction action, Integer seatIndex) {

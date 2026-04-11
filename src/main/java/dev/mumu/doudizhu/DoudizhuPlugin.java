@@ -25,7 +25,6 @@ import dev.mumu.doudizhu.world.PhysicalTableManager;
 import dev.mumu.doudizhu.zhajinhua.ZjhManager;
 import dev.mumu.doudizhu.zhajinhua.ZjhPhysicalTableManager;
 import dev.mumu.doudizhu.zhajinhua.ZjhTable;
-import dev.mumu.doudizhu.config.ConfigManager;
 import java.util.ArrayList;
 import java.io.File;
 import java.io.IOException;
@@ -114,7 +113,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     );
 
     private TableManager tableManager;
-    private ConfigManager configManager;
     private ZjhManager zjhManager;
     private ZjhPhysicalTableManager zjhPhysicalTableManager;
     private HandGuiService handGuiService;
@@ -314,7 +312,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         ensureConfigIntegrity();
-        configManager = new ConfigManager(this);
         optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
         loadRenderSettings();
         loadAiSettings();
@@ -2689,37 +2686,28 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private void loadRenderSettings() {
-        // 使用ConfigManager获取配置
-        ConfigManager.RenderConfig renderConfig = configManager.getRenderConfig();
-        
         cardHologramLabelsEnabled = getConfig().getBoolean("cards.hologram-labels.enabled", true);
         duplicateOnlyCardLabels = getConfig().getBoolean("cards.hologram-labels.duplicate-ranks-only", false);
         tableSpawnOffsetY = getConfig().getDouble("table.spawn-offset-y", 0.18);
-        
-        // 使用ConfigManager获取渲染配置
-        privateCardScale = (float) renderConfig.getPrivateCardScale();
-        publicCardScale = (float) renderConfig.getPublicCardScale();
-        hoverCardScale = (float) renderConfig.getCardHoverScale();
-        hoverCardLift = renderConfig.getCardHoverLift();
-        buttonScale = (float) renderConfig.getButtonScale();
-        tableScale = (float) renderConfig.getTableScale();
-        chairScale = (float) renderConfig.getChairScale();
-        hoverGlowEnabled = renderConfig.isHoverGlowEnabled();
-        selectedGlowEnabled = renderConfig.isSelectedGlowEnabled();
-        
-        // 其他配置保持原样
+        privateCardScale = (float) getConfig().getDouble("render.private-card-scale", DEFAULT_PRIVATE_CARD_SCALE);
+        publicCardScale = (float) getConfig().getDouble("render.public-trick-card-scale", DEFAULT_PUBLIC_CARD_SCALE);
         privateCardWidthScale = (float) getConfig().getDouble("render.private-card-size.width", privateCardScale);
         privateCardHeightScale = (float) getConfig().getDouble("render.private-card-size.height", privateCardScale);
         privateCardDepthScale = (float) getConfig().getDouble("render.private-card-size.depth", privateCardScale);
         publicCardWidthScale = (float) getConfig().getDouble("render.public-card-size.width", publicCardScale);
         publicCardHeightScale = (float) getConfig().getDouble("render.public-card-size.height", publicCardScale);
         publicCardDepthScale = (float) getConfig().getDouble("render.public-card-size.depth", publicCardScale);
+        hoverCardScale = (float) getConfig().getDouble("render.card-hover.scale", 1.08);
+        hoverCardLift = getConfig().getDouble("render.card-hover.lift", 0.06);
         cardHoverInterpolationTicks = Math.max(1, getConfig().getInt("render.card-hover.interpolation-ticks", 6));
         cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, getConfig().getInt("render.card-hover.animation-type", 1)));
         hoverButtonScale = (float) getConfig().getDouble("render.button-hover.scale", 1.06);
         hoverButtonLift = getConfig().getDouble("render.button-hover.lift", 0.03);
         buttonHoverInterpolationTicks = Math.max(1, getConfig().getInt("render.button-hover.interpolation-ticks", 8));
         buttonHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, getConfig().getInt("render.button-hover.animation-type", 3)));
+        buttonScale = (float) getConfig().getDouble("render.button-scale", 0.42);
+        tableScale = (float) getConfig().getDouble("render.furniture-scale.table", 2.25);
+        chairScale = (float) getConfig().getDouble("render.furniture-scale.chair", 1.35);
         smallTextScale = (float) getConfig().getDouble("render.text-scale.small", 0.46);
         statusTextScale = (float) getConfig().getDouble("render.text-scale.status", 0.72);
         labelTextScale = (float) getConfig().getDouble("render.text-scale.label", 0.40);
@@ -2735,6 +2723,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         seatAvatarDepthOffset = getConfig().getDouble("render.seat-avatar-offset.depth", 0.0);
         selectedCardScale = (float) getConfig().getDouble("render.selected-card.scale", 1.00);
         selectedCardLift = getConfig().getDouble("render.selected-card.lift", 0.18);
+        hoverGlowEnabled = getConfig().getBoolean("render.hover-glow.enabled", true);
         Color loadedHoverGlow = parseRgbSpec(
             getConfig().getString("render.hover-glow.color"),
             Color.fromRGB(
@@ -2746,6 +2735,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hoverGlowRed = loadedHoverGlow.getRed();
         hoverGlowGreen = loadedHoverGlow.getGreen();
         hoverGlowBlue = loadedHoverGlow.getBlue();
+        selectedGlowEnabled = getConfig().getBoolean("render.selected-glow.enabled", true);
         Color loadedSelectedGlow = parseRgbSpec(
             getConfig().getString("render.selected-glow.color"),
             Color.fromRGB(
@@ -2798,21 +2788,39 @@ public final class DoudizhuPlugin extends JavaPlugin {
         handCenterDistance = getConfig().getDouble("render.layout.hand-center.distance", 1.62);
         handCenterHeight = getConfig().getDouble("render.layout.hand-center.height", 1.23);
         chairDistance = getConfig().getDouble("render.layout.chair-distance", 2.35);
-        joinLabelHeight = getConfig().getDouble("render.layout.join-label-height", 0.18);
-        actionLabelHeight = getConfig().getDouble("render.layout.action-label-height", 0.18);
-        buttonFrontBaseDistance = getConfig().getDouble("render.layout.button-front-base-distance", 1.40);
-        buttonSideBaseDistance = getConfig().getDouble("render.layout.button-side-base-distance", 1.72);
-        buttonDistanceFactor = getConfig().getDouble("render.layout.button-distance-factor", 0.45);
-        buttonSpacingScale = getConfig().getDouble("render.layout.button-spacing-scale", 1.00);
-        buttonArcSmallAngleDegrees = getConfig().getDouble("render.layout.button-arc-angle-small", 30.0);
-        buttonArcLargeAngleDegrees = getConfig().getDouble("render.layout.button-arc-angle-large", 42.0);
-        buttonArcSmallRadius = getConfig().getDouble("render.layout.button-arc-radius-small", 0.70);
-        buttonArcLargeRadius = getConfig().getDouble("render.layout.button-arc-radius-large", 0.86);
-        previewCardsPerRow = getConfig().getInt("render.preview-cards-per-row", 6);
-        publicPreviewCompareRowOffset = getConfig().getDouble("render.public-preview.compare-row-offset", 0.28);
-        publicPreviewSelectedRowOffset = getConfig().getDouble("render.public-preview.selected-row-offset", -0.24);
-        publicPreviewRowDepthSpacing = getConfig().getDouble("render.public-preview.row-depth-spacing", 0.22);
-        publicPreviewLabelHeight = getConfig().getDouble("render.public-preview.label-height", 0.22);
+        joinLabelHeight = getConfig().getDouble("render.button-layout.join-label-height", 0.18);
+        actionLabelHeight = getConfig().getDouble("render.button-layout.action-label-height", 0.18);
+        buttonFrontBaseDistance = getConfig().getDouble("render.button-layout.front-base-distance", 1.40);
+        buttonSideBaseDistance = getConfig().getDouble("render.button-layout.side-base-distance", 1.72);
+        buttonDistanceFactor = getConfig().getDouble("render.button-layout.distance-factor", 0.45);
+        buttonSpacingScale = getConfig().getDouble("render.button-layout.spacing-scale", 1.0);
+        buttonArcSmallAngleDegrees = getConfig().getDouble("render.button-layout.arc-angle-small", 30.0);
+        buttonArcLargeAngleDegrees = getConfig().getDouble("render.button-layout.arc-angle-large", 42.0);
+        buttonArcSmallRadius = getConfig().getDouble("render.button-layout.arc-radius-small", 0.70);
+        buttonArcLargeRadius = getConfig().getDouble("render.button-layout.arc-radius-large", 0.86);
+        previewCardsPerRow = Math.max(1, getConfig().getInt("render.public-trick.cards-per-row", 6));
+        publicPreviewCompareRowOffset = getConfig().getDouble("render.public-trick.compare-row-offset", 0.28);
+        publicPreviewSelectedRowOffset = getConfig().getDouble("render.public-trick.selected-row-offset", -0.24);
+        publicPreviewRowDepthSpacing = getConfig().getDouble("render.public-trick.row-depth-spacing", 0.22);
+        publicPreviewLabelHeight = getConfig().getDouble("render.public-trick.label-height", 0.22);
+        globalPrivateHandLateralOffset = getConfig().getDouble("render.private-hand-offset.lateral", 0.0);
+        globalPrivateHandVerticalOffset = getConfig().getDouble("render.private-hand-offset.vertical", 0.0);
+        globalPrivateHandDepthOffset = getConfig().getDouble("render.private-hand-offset.depth", 0.0);
+        bgmVolume = (float) getConfig().getDouble("audio.bgm-volume", 0.55);
+        effectVolume = (float) getConfig().getDouble("audio.effect-volume", 1.0);
+        turnCountdownSeconds = getConfig().getInt("actionbar.turn-countdown-seconds", 20);
+        countdownSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("actionbar.countdown-sound", DEFAULT_COUNTDOWN_SOUND_SPEC));
+        unreadyWarningSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("actionbar.unready-warning-sound", DEFAULT_UNREADY_WARNING_SOUND_SPEC));
+        placementBlockedSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC));
+        botActionDelayMinTicks = getConfig().getInt("bot.action-delay-min-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
+        botActionDelayMaxTicks = getConfig().getInt("bot.action-delay-max-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
+        botAiEnabled = getConfig().getBoolean("bot.ai.enabled", false);
+        botAiTimeoutMs = Math.max(1000, getConfig().getInt("bot.ai.timeout-ms", 5000));
+        if (botActionDelayMaxTicks < botActionDelayMinTicks) {
+            int swapped = botActionDelayMinTicks;
+            botActionDelayMinTicks = botActionDelayMaxTicks;
+            botActionDelayMaxTicks = swapped;
+        }
         hintGroupLimit = getConfig().getInt("hints.max-groups", 6);
         debugTableSpacing = getConfig().getDouble("debug.table-spacing", 6.5);
         vaultEconomyEnabled = getConfig().getBoolean("economy.vault.enabled", true);

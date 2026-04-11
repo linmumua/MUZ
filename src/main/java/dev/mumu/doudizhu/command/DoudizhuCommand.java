@@ -461,8 +461,7 @@ public final class DoudizhuCommand implements TabExecutor {
             lines.add("/muz forceend - 强制结束当前对局");
             lines.add("/muz debug add [数量] - 在你附近生成会自己打牌的观察桌");
             lines.add("/muz debug remove [1-50|all] - 移除最近的观察桌，或全部移除");
-            lines.add("/muz debug bot 信息 [bot数字id] - 查看 bot 当前绑定、牌桌和 AI 状态");
-            lines.add("/muz debug bot 信息 [bot数字id] [消息] - 直接给 bot 发一段话，测试 DeepSeek 回复链路");
+            lines.add("/muz debug bot 信息 [bot数字id] [消息] - 查看 bot 信息，或直接和 bot 聊天测试 DeepSeek");
         }
         sender.sendMessage(message("MUZ 常用命令", NamedTextColor.GOLD));
         lines.forEach(line -> sender.sendMessage(message(line, NamedTextColor.GRAY)));
@@ -653,30 +652,14 @@ public final class DoudizhuCommand implements TabExecutor {
     }
 
     private String defaultId() {
-        java.util.LinkedHashSet<Integer> used = collectUsedTableIds();
+        List<Integer> used = new ArrayList<>();
+        used.addAll(plugin.getTableManager().getTables().stream().map(GameTable::getName).map(this::parseNumericIdOrMinusOne).filter(value -> value > 0).toList());
+        used.addAll(plugin.getZjhManager().getTables().stream().map(ZjhTable::getName).map(this::parseNumericIdOrMinusOne).filter(value -> value > 0).toList());
         int index = 1;
         while (used.contains(index)) {
             index++;
         }
         return String.valueOf(index);
-    }
-
-    private java.util.LinkedHashSet<Integer> collectUsedTableIds() {
-        java.util.LinkedHashSet<Integer> used = new java.util.LinkedHashSet<>();
-        used.addAll(plugin.getTableManager().getTables().stream().map(GameTable::getName).map(this::parseNumericIdOrMinusOne).filter(value -> value > 0).toList());
-        used.addAll(plugin.getZjhManager().getTables().stream().map(ZjhTable::getName).map(this::parseNumericIdOrMinusOne).filter(value -> value > 0).toList());
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            for (ItemStack item : player.getInventory().getContents()) {
-                if (!plugin.isTablePlacer(item)) {
-                    continue;
-                }
-                int reserved = parseNumericIdOrMinusOne(plugin.doudizhuTablePlacerId(item));
-                if (reserved > 0) {
-                    used.add(reserved);
-                }
-            }
-        }
-        return used;
     }
 
     private boolean existingNameExists(List<String> existing, String candidate) {
@@ -690,21 +673,17 @@ public final class DoudizhuCommand implements TabExecutor {
         }
         boolean texas = isTexasType(args[1]);
         TableLevel level = plugin.defaultCreateRoomLevel();
-        String requestedId = null;
         String id = defaultId();
         if (args.length >= 3) {
             TableLevel parsedLevel = TableLevel.parse(args[2]);
             if (parsedLevel != null) {
                 level = parsedLevel;
                 if (args.length >= 4) {
-                    requestedId = validateNumericId(args[3]);
+                    id = validateNumericId(args[3]);
                 }
             } else {
-                requestedId = validateNumericId(args[2]);
+                id = validateNumericId(args[2]);
             }
-        }
-        if (requestedId != null) {
-            id = nextAvailableIdFrom(requestedId);
         }
         return new CreateRequest(texas, level, id);
     }
@@ -715,18 +694,6 @@ public final class DoudizhuCommand implements TabExecutor {
             throw new IllegalArgumentException("牌桌 id 必须是纯数字。");
         }
         return trimmed;
-    }
-
-    private String nextAvailableIdFrom(String token) {
-        int candidate = parseNumericIdOrMinusOne(validateNumericId(token));
-        if (candidate <= 0) {
-            return defaultId();
-        }
-        java.util.LinkedHashSet<Integer> used = collectUsedTableIds();
-        while (used.contains(candidate)) {
-            candidate++;
-        }
-        return String.valueOf(candidate);
     }
 
     private int parseNumericIdOrMinusOne(String token) {

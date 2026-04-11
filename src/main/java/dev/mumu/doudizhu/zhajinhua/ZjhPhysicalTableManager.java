@@ -648,25 +648,6 @@ public final class ZjhPhysicalTableManager {
         return null;
     }
 
-    public List<ObstructionMarker> placementObstructionMarkers(Location anchor, float yaw, int maxPlayers) {
-        if (anchor == null || anchor.getWorld() == null) {
-            return List.of();
-        }
-        ensureChunkReady(anchor);
-        List<ObstructionMarker> markers = new ArrayList<>();
-        Location tableCenter = previewTableCenter(anchor);
-        if (hasSolidObstruction(blockPlacementLocation(tableCenter), 1.05, -0.10, 0.95)) {
-            markers.add(new ObstructionMarker(tableCenter, 1.06));
-        }
-        List<Location> seatBases = previewSeatBases(anchor, yaw, maxPlayers);
-        for (Location seatBase : seatBases) {
-            if (hasSolidObstruction(blockPlacementLocation(seatBase), 0.60, -0.10, 1.05)) {
-                markers.add(new ObstructionMarker(seatBase.clone().add(0.0, 0.08, 0.0), 0.30));
-            }
-        }
-        return markers;
-    }
-
     private void reconcileSeatAssignments(ZjhTable table, PlacedTable placed) {
         placed.seatAssignments.entrySet().removeIf(entry ->
             entry.getKey() < 0
@@ -2071,9 +2052,6 @@ public final class ZjhPhysicalTableManager {
             this.ownerId = ownerId;
             this.ownerName = ownerName;
         }
-    }
-
-    public record ObstructionMarker(Location center, double radius) {
     }
 
     private record ChairPlacement(UUID entityId, Location seatBaseLocation, BlockRestore blockRestore, boolean craftEngineEntity) {

@@ -193,7 +193,6 @@ public final class WorldTableInteractionListener implements Listener {
             : plugin.getPhysicalTableManager().placementObstructionReason(anchor, yaw);
         if (obstruction != null) {
             tablePlacerPreviews.remove(player.getUniqueId());
-            spawnObstructionPreview(player, mode, anchor, yaw, maxPlayers);
             throw new IllegalStateException(obstruction);
         }
         long now = System.currentTimeMillis();
@@ -211,9 +210,7 @@ public final class WorldTableInteractionListener implements Listener {
             consumeMainHand(player);
             tablePlacerPreviews.remove(player.getUniqueId());
             ensurePlayerHasTableRemover(player, mode, tableId);
-            String modeLabel = mode == DoudizhuPlugin.TableMode.ZHAJINHUA ? "德州" : "斗地主";
             player.sendActionBar(MuzTheme.success("已放置 " + tableId + " 号桌"));
-            player.sendMessage(MuzTheme.success(modeLabel + " " + tableId + " 号桌已放置，场次 " + plugin.roomDisplayTag(level) + "，并已自动发放绑定拆桌棍。"));
             return;
         }
         tablePlacerPreviews.put(player.getUniqueId(), new TablePlacerPreview(mode, tableId, level, maxPlayers, anchor.clone(), yaw, now + 5000L));
@@ -274,8 +271,6 @@ public final class WorldTableInteractionListener implements Listener {
             }
             tableRemoverPreviews.remove(player.getUniqueId());
             player.sendActionBar(MuzTheme.success("已拆掉 " + target.tableName() + " 号桌"));
-            String modeLabel = target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA ? "德州" : "斗地主";
-            player.sendMessage(MuzTheme.success("已拆除 " + modeLabel + " " + target.tableName() + " 号桌，并返还对应场次的放桌器。"));
             return;
         }
         tableRemoverPreviews.put(player.getUniqueId(), new TableRemoverPreview(target.mode(), target.tableName(), now + 5000L));
@@ -318,12 +313,7 @@ public final class WorldTableInteractionListener implements Listener {
         while (iterator.hasNext()) {
             Map.Entry<UUID, TablePlacerPreview> entry = iterator.next();
             Player player = plugin.getServer().getPlayer(entry.getKey());
-            if (player == null || !player.isOnline()) {
-                iterator.remove();
-                continue;
-            }
-            if (now > entry.getValue().expiresAtMillis()) {
-                player.sendActionBar(MuzTheme.muted("预览已失效，请重新右键预览"));
+            if (player == null || !player.isOnline() || now > entry.getValue().expiresAtMillis()) {
                 iterator.remove();
                 continue;
             }
@@ -341,12 +331,7 @@ public final class WorldTableInteractionListener implements Listener {
         while (iterator.hasNext()) {
             Map.Entry<UUID, TableRemoverPreview> entry = iterator.next();
             Player player = plugin.getServer().getPlayer(entry.getKey());
-            if (player == null || !player.isOnline()) {
-                iterator.remove();
-                continue;
-            }
-            if (now > entry.getValue().expiresAtMillis()) {
-                player.sendActionBar(MuzTheme.muted("拆桌确认已失效，请重新对准牌桌"));
+            if (player == null || !player.isOnline() || now > entry.getValue().expiresAtMillis()) {
                 iterator.remove();
                 continue;
             }
@@ -408,18 +393,6 @@ public final class WorldTableInteractionListener implements Listener {
             drawRing(player, seat.clone().add(0.0, 0.08, 0.0), target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA ? 0.28 : 0.38, Color.fromRGB(255, 176, 104));
         }
         drawLine(player, tableCenter.clone().add(0.0, 0.08, 0.0), player.getEyeLocation(), Color.fromRGB(255, 215, 120));
-    }
-
-    private void spawnObstructionPreview(Player player, DoudizhuPlugin.TableMode mode, Location anchor, float yaw, int maxPlayers) {
-        if (mode == DoudizhuPlugin.TableMode.ZHAJINHUA) {
-            for (dev.mumu.doudizhu.zhajinhua.ZjhPhysicalTableManager.ObstructionMarker marker : plugin.getZjhPhysicalTableManager().placementObstructionMarkers(anchor, yaw, maxPlayers)) {
-                drawRing(player, marker.center(), marker.radius(), Color.fromRGB(255, 86, 106));
-            }
-            return;
-        }
-        for (dev.mumu.doudizhu.world.PhysicalTableManager.ObstructionMarker marker : plugin.getPhysicalTableManager().placementObstructionMarkers(anchor, yaw)) {
-            drawRing(player, marker.center(), marker.radius(), Color.fromRGB(255, 86, 106));
-        }
     }
 
     private void drawRing(Player player, Location center, double radius, Color color) {

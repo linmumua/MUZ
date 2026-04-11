@@ -78,7 +78,6 @@ public final class GameTable {
     private int botActionEpoch = 0;
     private String currentMusicKey;
     private int musicEpoch = 0;
-    private long roundStartedAtMillis;
     private long turnDeadlineMillis = -1L;
     private int lastCountdownSecond = Integer.MIN_VALUE;
     private long lastLobbyWarningSoundAt;
@@ -337,7 +336,6 @@ public final class GameTable {
     public void startRound(CommandSender sender) {
         // 开局前必须满足“刚好 3 个座位 + 全员准备”
         ensurePhase(GamePhase.LOBBY, "当前不是可开局状态。");
-        roundStartedAtMillis = System.currentTimeMillis();
         if (seats.size() != PLAYER_COUNT) {
             throw new IllegalStateException("斗地主需要刚好 3 位玩家。");
         }
@@ -358,8 +356,8 @@ public final class GameTable {
                 .append(MuzTheme.body("新一局已经开始"))
         ));
         announceAction("叫分顺序", MuzTheme.field("叫分顺序", orderedPlayersComponent(bidOrder)));
-        openHandsForAll();
         playRoundMusic();
+        openHandsForAll();
         promptBidTurn();
         refreshPhysicalTable();
         runBotActionIfNeeded();
@@ -875,9 +873,6 @@ public final class GameTable {
     }
 
     private void finishRound(UUID winner) {
-        if (shouldIgnoreEarlyFinish(winner)) {
-            return;
-        }
         boolean landlordWin = Objects.equals(winner, landlord);
         List<UUID> winningSeats = landlordWin ? List.of(landlord) : seats.stream().filter(seat -> !seat.equals(landlord)).toList();
         int roundScore = resolvedCoreScore(landlordWin);
@@ -947,7 +942,6 @@ public final class GameTable {
 
     private void resetRound() {
         stopMusicAll();
-        roundStartedAtMillis = 0L;
         phase = GamePhase.LOBBY;
         readyPlayers.clear();
         bids.clear();
@@ -1039,7 +1033,6 @@ public final class GameTable {
     }
 
     private void startPlayPhase() {
-        validateReadyForPlayPhase();
         phase = GamePhase.PLAYING;
         currentTurn = landlord;
         announceAction("出牌阶段", MuzTheme.field(
@@ -1288,18 +1281,9 @@ public final class GameTable {
     }
 
     private void playRoundMusic() {
-        playEffectAll(PackSounds.landlordConfirmed());
         stopMusicAll();
         int epoch = ++musicEpoch;
-        if (!canScheduleTasks()) {
-            return;
-        }
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (epoch != musicEpoch || phase == GamePhase.LOBBY) {
-                return;
-            }
-            startMusicTrack(PackSounds.loopBgm(), epoch);
-        }, 10L);
+        startMusicTrack(PackSounds.openingBgm(), epoch);
     }
 
     private void stopMusicAll() {
@@ -2014,62 +1998,6 @@ public final class GameTable {
 
     private boolean canScheduleTasks() {
         return plugin.isEnabled() && !plugin.isShuttingDown();
-    }
-
-    private boolean shouldIgnoreEarlyFinish(UUID winner) {
-        if (phase != GamePhase.PLAYING || winner == null) {
-            return false;
-        }
-        if (landlord == null || !seats.contains(winner) || !hands.containsKey(winner)) {
-            return true;
-        }
-        long elapsed = roundStartedAtMillis <= 0L ? Long.MAX_VALUE : System.currentTimeMillis() - roundStartedAtMillis;
-        if (elapsed > 5000L) {
-            return false;
-        }
-        if (!isPlayPhaseStateConsistent()) {
-            return true;
-        }
-        int winnerHandSize = hands.getOrDefault(winner, List.of()).size();
-        if (winnerHandSize > 0) {
-            return false;
-        }
-        return hands.values().stream().filter(Objects::nonNull).allMatch(List::isEmpty);
-    }
-
-    private void validateReadyForPlayPhase() {
-        if (landlord == null || !seats.contains(landlord)) {
-            throw new IllegalStateException("地主数据还没准备好，暂时不能进入出牌阶段。");
-        }
-        if (seats.size() != PLAYER_COUNT || hands.size() != PLAYER_COUNT) {
-            throw new IllegalStateException("玩家或手牌数据不完整，暂时不能进入出牌阶段。");
-        }
-        for (UUID seat : seats) {
-            List<DoudizhuCard> hand = hands.get(seat);
-            if (hand == null) {
-                throw new IllegalStateException("存在未发牌玩家，暂时不能进入出牌阶段。");
-            }
-            int expectedSize = Objects.equals(seat, landlord) ? 20 : 17;
-            if (hand.size() != expectedSize) {
-                throw new IllegalStateException("手牌数量异常，暂时不能进入出牌阶段。");
-            }
-        }
-    }
-
-    private boolean isPlayPhaseStateConsistent() {
-        if (landlord == null || !seats.contains(landlord) || seats.size() != PLAYER_COUNT || hands.size() != PLAYER_COUNT) {
-            return false;
-        }
-        for (UUID seat : seats) {
-            List<DoudizhuCard> hand = hands.get(seat);
-            if (hand == null) {
-                return false;
-            }
-            if (hand.isEmpty()) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private void executeBotBid(UUID botId, int epoch) {
