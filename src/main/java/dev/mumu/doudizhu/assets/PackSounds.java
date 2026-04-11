@@ -10,7 +10,6 @@ public final class PackSounds {
     private static final String PREFIX = "muz:doudizhu.";
     private static final Random RANDOM = new Random();
     private static final List<String> LOOP_BGMS = List.of(
-        PREFIX + "middle",
         PREFIX + "bgm1",
         PREFIX + "bgm2",
         PREFIX + "bgm3"
@@ -68,6 +67,10 @@ public final class PackSounds {
     }
 
     public static String loopBgm() {
+        return PREFIX + "bgm1";
+    }
+
+    public static String excitedBgm() {
         return PREFIX + "middle";
     }
 

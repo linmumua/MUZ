@@ -23,6 +23,7 @@ import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Location;
@@ -48,6 +49,7 @@ import org.joml.Vector3f;
 public final class PhysicalTableManager {
     // 桌椅与按钮属于世界里的公共实体；手牌和个人按钮则是按玩家隐藏/显示的私有实体
     private static final String PROTECTED_ENTITY_TAG = "muz_table_protected";
+    private static final MiniMessage MINI = MiniMessage.miniMessage();
     private static final float DEFAULT_PRIVATE_CARD_RENDER_SCALE = 0.50f;
     private static final float DEFAULT_PUBLIC_CARD_RENDER_SCALE = 0.58f;
     private static final int CARD_HOVER_GRACE_TICKS = 2;
@@ -1022,10 +1024,8 @@ public final class PhysicalTableManager {
                 new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, 0.96)
             );
             case DOUBLING -> List.of(
-                new ActionButtonState("pass", "不加倍", ButtonAction.DOUBLE_NO, -0.96),
-                new ActionButtonState("inspect", "明牌", ButtonAction.MING_PAI, -0.32),
-                new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.32),
-                new ActionButtonState("start", "超级加倍", ButtonAction.SUPER_DOUBLE, 0.96)
+                new ActionButtonState("pass", "不加倍", ButtonAction.DOUBLE_NO, -0.40),
+                new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.40)
             );
             case PLAYING -> List.of(
                 new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.72),
@@ -2640,14 +2640,6 @@ public final class PhysicalTableManager {
             if (owner == null || !owner.equals(table.getCurrentTurn())) {
                 return List.of();
             }
-            if (owner.equals(table.getLandlord())) {
-                return List.of(
-                    new ActionButtonState("pass", "不再加倍", ButtonAction.DOUBLE_NO, -0.96),
-                    new ActionButtonState("inspect", "明牌", ButtonAction.MING_PAI, -0.32),
-                    new ActionButtonState("ready", "再加倍", ButtonAction.DOUBLE_YES, 0.32),
-                    new ActionButtonState("start", "超级加倍", ButtonAction.SUPER_DOUBLE, 0.96)
-                );
-            }
             return phaseStates;
         }
         if (table.getPhase() != GamePhase.PLAYING || owner == null) {
@@ -2692,6 +2684,7 @@ public final class PhysicalTableManager {
         } else {
             if (table.getPhase() == GamePhase.PLAYING) {
                 lines.addAll(table.slidingTrickPreviewComponents(System.currentTimeMillis()));
+                lines.add(MINI.deserialize("<!i><#8fc7da>右键选择</#8fc7da><dark_gray>｜</dark_gray><#ffd670><bold>左键出牌</bold></#ffd670>"));
             } else {
                 lines.add(table.lastActionComponent());
             }
@@ -3062,10 +3055,8 @@ public final class PhysicalTableManager {
                 new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, 0.96)
             );
             case DOUBLING -> List.of(
-                new ActionButtonState("pass", "不加倍", ButtonAction.DOUBLE_NO, -0.96),
-                new ActionButtonState("inspect", "明牌", ButtonAction.MING_PAI, -0.32),
-                new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.32),
-                new ActionButtonState("start", "超级加倍", ButtonAction.SUPER_DOUBLE, 0.96)
+                new ActionButtonState("pass", "不加倍", ButtonAction.DOUBLE_NO, -0.40),
+                new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.40)
             );
             case PLAYING -> List.of(
                 new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.72),

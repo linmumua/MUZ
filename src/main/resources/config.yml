@@ -278,7 +278,7 @@ bot:
 ai:
   deepseek:
     # Bot 调试聊天固定走 DeepSeek；留空密钥时不会真正发请求
-    enabled: true
+    enabled: false
     # 展示名称，仅用于日志和调试提示
     provider-name: "DeepSeek"
     # OpenAI 兼容接口基础地址；DeepSeek 官方可直接使用 https://api.deepseek.com

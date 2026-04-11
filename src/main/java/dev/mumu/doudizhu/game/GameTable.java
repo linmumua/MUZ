@@ -656,7 +656,7 @@ public final class GameTable {
         if (landlord != null) {
         builder.append(" · 农民加倍 ").append(boostedFarmerCount()).append("/").append(farmerSeatCount()).append(" 人");
             if (landlordBoostFactor != null) {
-                builder.append(landlordBoostFactor > 1 ? " · 地主加倍 x" + landlordBoostFactor : " · 地主不再加倍");
+                builder.append(landlordBoostFactor > 1 ? " · 地主加倍 x" + landlordBoostFactor : " · 地主不加倍");
             }
             if (!mingPaiPlayers.isEmpty()) {
                 builder.append(" · 明牌 ").append(mingPaiPlayers.size()).append(" 人");
@@ -677,7 +677,7 @@ public final class GameTable {
             .append(MuzTheme.hotMetric("农民加倍", boostedFarmerCount() + "/" + farmerSeatCount(), "人"));
         if (landlordBoostFactor != null) {
             line = line.append(MuzTheme.divider(" · "))
-                .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", "x" + landlordBoostFactor) : MuzTheme.muted("地主不再加倍"));
+                .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", "x" + landlordBoostFactor) : MuzTheme.muted("地主不加倍"));
         }
         return line.append(MuzTheme.divider(" · "))
             .append(MuzTheme.hotValue(pairMultiplierSummary(false, false)));
@@ -1005,6 +1005,7 @@ public final class GameTable {
         if (player != null) {
             plugin.getPhysicalTableManager().refreshPrivateHand(this, player.getUniqueId());
         }
+        updateMusicState();
     }
 
     private void startDoublingPhase() {
@@ -1027,7 +1028,7 @@ public final class GameTable {
             "加倍阶段",
             liveMultiplierComponent()
                 .append(MuzTheme.divider(" · "))
-                .append(MuzTheme.muted("农民先选，地主最后决定；支持明牌/加倍/超级加倍"))
+                .append(MuzTheme.muted("农民先选，地主最后决定；只选择加倍或不加倍"))
         ));
         promptDoublingTurn();
     }
@@ -1319,11 +1320,50 @@ public final class GameTable {
         }
     }
 
+    private void stopBgmTracks(Player player) {
+        for (String bgm : PackSounds.bgmTracks()) {
+            player.stopSound(bgm);
+        }
+    }
+
+    private void updateMusicState() {
+        if (!canScheduleTasks() || phase == GamePhase.LOBBY) {
+            return;
+        }
+        String desired;
+        if (shouldUseExcitedBgm()) {
+            desired = PackSounds.excitedBgm();
+        } else if (currentMusicKey == null
+            || currentMusicKey.equals(PackSounds.openingBgm())
+            || currentMusicKey.equals(PackSounds.excitedBgm())) {
+            desired = PackSounds.nextBgmTrack(currentMusicKey);
+        } else {
+            return;
+        }
+        if (!Objects.equals(currentMusicKey, desired)) {
+            startMusicTrack(desired, musicEpoch);
+        }
+    }
+
+    private boolean shouldUseExcitedBgm() {
+        return phase == GamePhase.PLAYING
+            && hands.values().stream().anyMatch(hand -> hand.size() == 3);
+    }
+
+    private String nextScheduledMusicTrack(String previousTrack) {
+        return shouldUseExcitedBgm() ? PackSounds.excitedBgm() : PackSounds.nextBgmTrack(previousTrack);
+    }
+
     private void startMusicTrack(String soundKey, int epoch) {
         if (!canScheduleTasks() || soundKey == null || soundKey.isBlank()) {
             return;
         }
-        stopCurrentMusicTrack();
+        for (UUID seat : seats) {
+            Player player = onlinePlayer(seat);
+            if (player != null) {
+                stopBgmTracks(player);
+            }
+        }
         currentMusicKey = soundKey;
         playSoundAll(soundKey, plugin.getBgmVolume(), 1.0f);
         scheduleNextMusic(soundKey, epoch);
@@ -1338,7 +1378,7 @@ public final class GameTable {
             if (epoch != musicEpoch || phase == GamePhase.LOBBY) {
                 return;
             }
-            startMusicTrack(PackSounds.nextBgmTrack(soundKey), epoch);
+            startMusicTrack(nextScheduledMusicTrack(soundKey), epoch);
         }, delay);
     }
 
@@ -1412,8 +1452,8 @@ public final class GameTable {
                 ? text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主") + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
                 : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text((bidRound == 1 ? " 正在定叫分" : " 正在抢地主") + countdown, NamedTextColor.GRAY));
             case DOUBLING -> viewerId.equals(currentTurn)
-                ? text((Objects.equals(currentTurn, landlord) ? "轮到你决定明牌 / 再加倍 / 超级加倍" : "轮到你决定明牌 / 加倍 / 超级加倍") + " · 6 秒内点桌边按钮" + countdown, NamedTextColor.AQUA)
-                : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 正在决定明牌/加倍" + countdown, NamedTextColor.GRAY));
+                ? text("轮到你决定加倍或不加倍 · 6 秒内点桌边按钮" + countdown, NamedTextColor.AQUA)
+                : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 正在决定是否加倍" + countdown, NamedTextColor.GRAY));
             case PLAYING -> viewerId.equals(currentTurn)
                 ? text("轮到你出牌了 · 已选 " + getSelection(currentTurn).size() + " 张" + countdown, NamedTextColor.AQUA)
                 : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 在出牌" + countdown, NamedTextColor.GRAY));
@@ -1654,12 +1694,12 @@ public final class GameTable {
             return " 明牌";
         }
         if (boostFactor >= 4) {
-            return " 超级加倍";
+            return " 加倍";
         }
         if (boostFactor >= 2) {
-            return landlordTurn ? " 再加倍" : " 加倍";
+            return " 加倍";
         }
-        return landlordTurn ? " 不再加倍" : " 不加倍";
+        return " 不加倍";
     }
 
     private Component doublingActionComponent(boolean landlordTurn, int boostFactor, boolean mingPai, boolean autoSkipped) {
@@ -1670,12 +1710,12 @@ public final class GameTable {
             return MuzTheme.warm("明牌");
         }
         if (boostFactor >= 4) {
-            return MuzTheme.hotMetric("超级加倍", "x4");
+            return MuzTheme.hotMetric("加倍", "x2");
         }
         if (boostFactor >= 2) {
-            return landlordTurn ? MuzTheme.hotMetric("再加倍", "x2") : MuzTheme.hotMetric("加倍", "x2");
+            return MuzTheme.hotMetric("加倍", "x2");
         }
-        return landlordTurn ? MuzTheme.muted("不再加倍") : MuzTheme.muted("不加倍");
+        return MuzTheme.muted("不加倍");
     }
 
     private String doublingActionDetail(boolean landlordTurn, int boostFactor, boolean mingPai, boolean autoSkipped) {
@@ -1689,9 +1729,9 @@ public final class GameTable {
             return landlordTurn ? "本局对位倍率直接提升到 x4" : "你这一侧的对位倍率提升到 x4";
         }
         if (boostFactor >= 2) {
-            return landlordTurn ? "本局对位倍率继续 x2" : "你这一侧的对位倍率 x2";
+            return landlordTurn ? "地主侧倍率 x2" : "农民侧倍率 x2";
         }
-        return landlordTurn ? "本局保持当前倍率" : "你这一侧保持当前倍率";
+        return "保持当前倍率";
     }
 
     private String pairMultiplierSummary(boolean resolved, boolean landlordWin) {
@@ -1730,7 +1770,7 @@ public final class GameTable {
                 .append(MuzTheme.hotMetric("农民加倍", boostedFarmerCount() + "/" + farmerSeatCount(), "人"));
             if (landlordBoostFactor != null) {
                 line = line.append(MuzTheme.divider(" · "))
-                    .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", MuzTheme.multiplierToken("x" + landlordBoostFactor)) : MuzTheme.muted("地主不再加倍"));
+                    .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", MuzTheme.multiplierToken("x" + landlordBoostFactor)) : MuzTheme.muted("地主不加倍"));
             }
             if (!mingPaiPlayers.isEmpty()) {
                 line = line.append(MuzTheme.divider(" · "))
@@ -2077,10 +2117,8 @@ public final class GameTable {
 
     private void processDoublingChoice(UUID playerId, int boostFactor, boolean mingPai, boolean autoSkipped) {
         boolean landlordTurn = Objects.equals(playerId, landlord);
-        int normalizedFactor = Math.max(1, Math.min(4, boostFactor));
-        if (normalizedFactor == 4 && mingPai) {
-            mingPai = false;
-        }
+        int normalizedFactor = boostFactor > 1 ? 2 : 1;
+        mingPai = false;
         if (mingPai) {
             mingPaiPlayers.add(playerId);
             playEffectAll(PackSounds.mingPai());
@@ -2391,9 +2429,7 @@ public final class GameTable {
                     return;
                 }
                 switch (parsed) {
-                    case "MING_PAI" -> processDoublingChoice(botId, 1, true, false);
                     case "DOUBLE" -> processDoublingChoice(botId, 2, false, false);
-                    case "SUPER_DOUBLE" -> processDoublingChoice(botId, 4, false, false);
                     default -> processDoublingChoice(botId, 1, false, false);
                 }
             }));
@@ -2495,7 +2531,7 @@ public final class GameTable {
 
     private boolean requestAiTimedOutPlayDecision(UUID playerId, int epoch) {
         AiChatGateway gateway = plugin.getAiChatGateway();
-        if (gateway == null || !gateway.isEnabled()) {
+        if (!plugin.isDeepseekAiEnabled() || gateway == null || !gateway.isEnabled()) {
             return false;
         }
         String prompt = buildTimedOutPlayAiPrompt(playerId);
@@ -2627,8 +2663,11 @@ public final class GameTable {
             你的身份：%s
             当前基础倍率：%d
             你的手牌：%s
-            只输出一个词：PASS 或 MING_PAI 或 DOUBLE 或 SUPER_DOUBLE
-            不要输出解释。
+            只输出一个词：PASS 或 DOUBLE
+            规则：
+            - PASS 表示不加倍
+            - DOUBLE 表示加倍
+            - 不要输出解释
             """.formatted(
             displayName(botId),
             Objects.equals(botId, landlord) ? "地主" : "农民",
@@ -2688,12 +2727,6 @@ public final class GameTable {
 
     private String parseAiKeywordDecision(AiChatGateway.ChatResponse response) {
         String content = aiDecisionContent(response).toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
-        if (content.contains("SUPER_DOUBLE")) {
-            return "SUPER_DOUBLE";
-        }
-        if (content.contains("MING_PAI")) {
-            return "MING_PAI";
-        }
         if (content.contains("DOUBLE")) {
             return "DOUBLE";
         }

@@ -453,7 +453,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public boolean isDeepseekAiEnabled() {
-        return aiProviderConfig != null && aiProviderConfig.hasApiKey();
+        return aiProviderConfig != null
+            && aiProviderConfig.enabled()
+            && aiProviderConfig.hasApiKey()
+            && aiChatGateway != null
+            && aiChatGateway.isEnabled();
     }
 
     public boolean isBotAiEnabled() {
@@ -2853,7 +2857,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private void loadAiSettings() {
         aiProviderConfig = new AiChatGateway.ProviderConfig(
-            true,
+            getConfig().getBoolean("ai.deepseek.enabled", false),
             getConfig().getString("ai.deepseek.provider-name", "DeepSeek"),
             getConfig().getString("ai.deepseek.url", getConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com")),
             getConfig().getString("ai.deepseek.chat-completions-path", "/chat/completions"),
@@ -2910,11 +2914,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean ensureAiConfig() {
         boolean changed = false;
-        if (!getConfig().contains("ai.deepseek.enabled") || !getConfig().getBoolean("ai.deepseek.enabled", false)) {
-            // HARD-CODED:
-            // Bot debug chat now always targets DeepSeek/OpenAI-compatible AI.
-            // Keep the old config key for compatibility, but never let an old "disabled" value silently turn this off.
-            getConfig().set("ai.deepseek.enabled", true);
+        if (!getConfig().contains("ai.deepseek.enabled")) {
+            getConfig().set("ai.deepseek.enabled", false);
             changed = true;
         }
         if (!getConfig().contains("ai.deepseek.provider-name")) {

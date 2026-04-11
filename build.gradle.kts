@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "dev.mumu"
-version = "1.6.18"
+version = "1.6.19"
 
 val sourceResourceNamespace = "doudizhupaper"
 val resourceNamespace = "muz"
