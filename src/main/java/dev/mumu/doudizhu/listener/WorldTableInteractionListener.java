@@ -106,7 +106,7 @@ public final class WorldTableInteractionListener implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onAttack(EntityDamageByEntityEvent event) {
         if (!(event.getDamager() instanceof Player player)) {
             return;
