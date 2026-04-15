@@ -55,6 +55,11 @@ public final class GameTable {
     private final Map<UUID, String> botNames = new LinkedHashMap<>();
     private final List<Component> recentLobbyEntries = new ArrayList<>();
     private final List<RecentTrickEntry> recentTrickEntries = new ArrayList<>();
+    private final TableMusicCoordinator musicCoordinator;
+    private final TableEffectCoordinator effectCoordinator;
+    private final TimedOutPlayCoordinator timedOutPlayCoordinator;
+    private final BotAiCoordinator botAiCoordinator;
+    private final RoundSettlementCoordinator roundSettlementCoordinator;
 
     private GamePhase phase = GamePhase.LOBBY;
     private List<DoudizhuCard> bottomCards = List.of();
@@ -71,20 +76,16 @@ public final class GameTable {
     private List<UUID> doublingOrder = List.of();
     private final Map<UUID, Integer> farmerBoostChoices = new LinkedHashMap<>();
     private Integer landlordBoostFactor;
-    private final Set<UUID> mingPaiPlayers = new HashSet<>();
     private int bombMultiplier = 1;
     private CardPattern currentPattern;
     private List<DoudizhuCard> currentTrickCards = List.of();
     private int botActionEpoch = 0;
-    private String currentMusicKey;
-    private int musicEpoch = 0;
+    private long roundStartedAtMillis = -1L;
     private long turnDeadlineMillis = -1L;
     private int lastCountdownSecond = Integer.MIN_VALUE;
     private long lastLobbyWarningSoundAt;
     private long lobbyUiResumeAtMillis;
     private long delayedUnreadyReminderAtMillis;
-    private UUID pendingTimedOutPlayDecisionPlayer;
-    private int pendingTimedOutPlayDecisionEpoch = Integer.MIN_VALUE;
     private String lastRandomEffectKey;
     private int lastRandomEffectStreak;
     private boolean debugAutoLoop;
@@ -96,10 +97,291 @@ public final class GameTable {
         this.manager = manager;
         this.name = name.trim();
         this.roomLevel = roomLevel == null ? TableLevel.FUN : roomLevel;
+        this.musicCoordinator = new TableMusicCoordinator(
+            plugin,
+            this::canScheduleTasks,
+            () -> phase,
+            () -> hands,
+            () -> seats,
+            this::onlinePlayer
+        );
+        this.effectCoordinator = new TableEffectCoordinator(
+            plugin,
+            random,
+            () -> seats,
+            this::onlinePlayer
+        );
+        this.timedOutPlayCoordinator = new TimedOutPlayCoordinator(new TimedOutPlayCoordinator.Support() {
+            @Override
+            public DoudizhuPlugin plugin() {
+                return plugin;
+            }
+
+            @Override
+            public boolean canScheduleTasks() {
+                return GameTable.this.canScheduleTasks();
+            }
+
+            @Override
+            public int botActionEpoch() {
+                return botActionEpoch;
+            }
+
+            @Override
+            public GamePhase phase() {
+                return phase;
+            }
+
+            @Override
+            public UUID currentTurn() {
+                return currentTurn;
+            }
+
+            @Override
+            public boolean isBot(UUID playerId) {
+                return GameTable.this.isBot(playerId);
+            }
+
+            @Override
+            public UUID leadPlayer() {
+                return leadPlayer;
+            }
+
+            @Override
+            public boolean isDeepseekAiEnabled() {
+                return plugin.isDeepseekAiEnabled();
+            }
+
+            @Override
+            public dev.mumu.doudizhu.ai.AiChatGateway aiGateway() {
+                return plugin.getAiChatGateway();
+            }
+
+            @Override
+            public String aiModelName() {
+                return plugin.aiModelName();
+            }
+
+            @Override
+            public int botAiTimeoutMs() {
+                return plugin.getBotAiTimeoutMs();
+            }
+
+            @Override
+            public String timedOutPlayAiSystemPrompt() {
+                return GameTable.this.timedOutPlayAiSystemPrompt();
+            }
+
+            @Override
+            public String buildTimedOutPlayAiPrompt(UUID playerId) {
+                return GameTable.this.buildTimedOutPlayAiPrompt(playerId);
+            }
+
+            @Override
+            public List<DoudizhuCard> parseAiPlayDecision(UUID playerId, dev.mumu.doudizhu.ai.AiChatGateway.ChatResponse response) {
+                return GameTable.this.parseAiPlayDecision(playerId, response);
+            }
+
+            @Override
+            public void executeDefaultTimedOutPlayDecision(UUID playerId) {
+                GameTable.this.executeDefaultTimedOutPlayDecision(playerId);
+            }
+
+            @Override
+            public void performTimedOutPass(UUID playerId) {
+                GameTable.this.performTimedOutPass(playerId);
+            }
+
+            @Override
+            public void performTimedOutPlay(UUID playerId, List<DoudizhuCard> move) {
+                GameTable.this.performTimedOutPlay(playerId, move);
+            }
+        });
+        this.botAiCoordinator = new BotAiCoordinator(new BotAiCoordinator.Support() {
+            @Override
+            public DoudizhuPlugin plugin() {
+                return plugin;
+            }
+
+            @Override
+            public boolean canScheduleTasks() {
+                return GameTable.this.canScheduleTasks();
+            }
+
+            @Override
+            public int botActionEpoch() {
+                return botActionEpoch;
+            }
+
+            @Override
+            public GamePhase phase() {
+                return phase;
+            }
+
+            @Override
+            public UUID currentTurn() {
+                return currentTurn;
+            }
+
+            @Override
+            public boolean isBot(UUID botId) {
+                return GameTable.this.isBot(botId);
+            }
+
+            @Override
+            public String tableName() {
+                return name;
+            }
+
+            @Override
+            public String aiModelName() {
+                return plugin.aiModelName();
+            }
+
+            @Override
+            public int botAiTimeoutMs() {
+                return plugin.getBotAiTimeoutMs();
+            }
+
+            @Override
+            public boolean isBotAiEnabled() {
+                return plugin.isBotAiEnabled();
+            }
+
+            @Override
+            public dev.mumu.doudizhu.ai.AiChatGateway aiGateway() {
+                return plugin.getAiChatGateway();
+            }
+
+            @Override
+            public String botAiSystemPrompt() {
+                return GameTable.this.botAiSystemPrompt();
+            }
+
+            @Override
+            public String buildBidAiPrompt(UUID botId) {
+                return GameTable.this.buildBidAiPrompt(botId);
+            }
+
+            @Override
+            public String buildDoublingAiPrompt(UUID botId) {
+                return GameTable.this.buildDoublingAiPrompt(botId);
+            }
+
+            @Override
+            public String buildPlayAiPrompt(UUID botId) {
+                return GameTable.this.buildPlayAiPrompt(botId);
+            }
+
+            @Override
+            public Integer parseAiBidDecision(dev.mumu.doudizhu.ai.AiChatGateway.ChatResponse response) {
+                return GameTable.this.parseAiBidDecision(response);
+            }
+
+            @Override
+            public String parseAiKeywordDecision(dev.mumu.doudizhu.ai.AiChatGateway.ChatResponse response) {
+                return GameTable.this.parseAiKeywordDecision(response);
+            }
+
+            @Override
+            public List<DoudizhuCard> parseAiPlayDecision(UUID botId, dev.mumu.doudizhu.ai.AiChatGateway.ChatResponse response) {
+                return GameTable.this.parseAiPlayDecision(botId, response);
+            }
+
+            @Override
+            public void recordTrace(UUID botId, String stage, String prompt, dev.mumu.doudizhu.ai.AiChatGateway.ChatResponse response, String parsedDecision, boolean applied, String fallbackReason, String errorMessage) {
+                GameTable.this.recordBotAiTrace(botId, stage, prompt, response, parsedDecision, applied, fallbackReason, errorMessage);
+            }
+
+            @Override
+            public int normalizeBidDecision(int points) {
+                return GameTable.this.normalizeBidDecision(points);
+            }
+
+            @Override
+            public void executeLocalBotBid(UUID botId) {
+                GameTable.this.executeLocalBotBid(botId);
+            }
+
+            @Override
+            public void executeLocalBotDouble(UUID botId) {
+                GameTable.this.executeLocalBotDouble(botId);
+            }
+
+            @Override
+            public void executeLocalBotPlay(UUID botId) {
+                GameTable.this.executeLocalBotPlay(botId);
+            }
+
+            @Override
+            public void processBidChoice(UUID botId, int points) {
+                GameTable.this.processBidChoice(botId, points);
+            }
+
+            @Override
+            public void processDoublingChoice(UUID botId, int boostFactor, boolean autoSkipped) {
+                GameTable.this.processDoublingChoice(botId, boostFactor, autoSkipped);
+            }
+
+            @Override
+            public void applyBotMove(UUID botId, List<DoudizhuCard> move) {
+                GameTable.this.applyBotMove(botId, move);
+            }
+
+            @Override
+            public void performBotPass(UUID botId) {
+                GameTable.this.performBotPass(botId);
+            }
+        });
+        this.roundSettlementCoordinator = new RoundSettlementCoordinator(new RoundSettlementCoordinator.Support() {
+            @Override
+            public DoudizhuPlugin plugin() {
+                return plugin;
+            }
+
+            @Override
+            public TableLevel roomLevel() {
+                return roomLevel;
+            }
+
+            @Override
+            public List<UUID> seats() {
+                return List.copyOf(seats);
+            }
+
+            @Override
+            public UUID landlord() {
+                return landlord;
+            }
+
+            @Override
+            public int resolvedCoreScore(boolean landlordWin) {
+                return GameTable.this.resolvedCoreScore(landlordWin);
+            }
+
+            @Override
+            public int seatPairFactor(UUID seat) {
+                return GameTable.this.seatPairFactor(seat);
+            }
+
+            @Override
+            public void applyTotalScoreDelta(UUID playerId, int delta) {
+                totalScores.merge(playerId, delta, Integer::sum);
+            }
+
+            @Override
+            public boolean isBot(UUID playerId) {
+                return GameTable.this.isBot(playerId);
+            }
+        });
     }
 
     public String getName() {
         return name;
+    }
+
+    public GamePhase getPhase() {
+        return phase;
     }
 
     public TableLevel getRoomLevel() {
@@ -110,40 +392,12 @@ public final class GameTable {
         this.roomLevel = roomLevel == null ? TableLevel.FUN : roomLevel;
     }
 
-    public GamePhase getPhase() {
-        return phase;
+    public UUID getLandlord() {
+        return landlord;
     }
 
     public List<UUID> getSeats() {
         return List.copyOf(seats);
-    }
-
-    public boolean isEmpty() {
-        return seats.isEmpty();
-    }
-
-    public boolean contains(UUID playerId) {
-        return seats.contains(playerId);
-    }
-
-    public boolean isBot(UUID playerId) {
-        return botNames.containsKey(playerId);
-    }
-
-    public boolean isReady(UUID playerId) {
-        return readyPlayers.contains(playerId);
-    }
-
-    public String displayName(UUID playerId) {
-        if (playerId == null) {
-            return "空位";
-        }
-        String botName = botNames.get(playerId);
-        if (botName != null) {
-            return botName;
-        }
-        Player player = Bukkit.getPlayer(playerId);
-        return player == null ? playerId.toString().substring(0, 8) : player.getName();
     }
 
     public List<DoudizhuCard> getHand(UUID playerId) {
@@ -154,20 +408,59 @@ public final class GameTable {
         return Set.copyOf(selections.getOrDefault(playerId, Set.of()));
     }
 
+    public PlayerRole getRole(UUID playerId) {
+        return roles.get(playerId);
+    }
+
+    public int getScore(UUID playerId) {
+        return totalScores.getOrDefault(playerId, 0);
+    }
+
+    public int getBid(UUID playerId) {
+        if (bidRound == 2 && tieBreakBids.containsKey(playerId)) {
+            return tieBreakBids.getOrDefault(playerId, 0);
+        }
+        return bids.getOrDefault(playerId, 0);
+    }
+
+    public boolean isBot(UUID playerId) {
+        return playerId != null && botNames.containsKey(playerId);
+    }
+
+    public boolean contains(UUID playerId) {
+        return playerId != null && seats.contains(playerId);
+    }
+
+    public boolean isEmpty() {
+        return seats.isEmpty();
+    }
+
+    public String displayName(UUID playerId) {
+        if (playerId == null) {
+            return "未知玩家";
+        }
+        String botName = botNames.get(playerId);
+        if (botName != null && !botName.isBlank()) {
+            return botName;
+        }
+        Player online = onlinePlayer(playerId);
+        if (online != null) {
+            return online.getName();
+        }
+        String offlineName = Bukkit.getOfflinePlayer(playerId).getName();
+        return offlineName == null || offlineName.isBlank() ? playerId.toString().substring(0, 8) : offlineName;
+    }
+
     public UUID getCurrentTurn() {
         return currentTurn;
     }
 
-    public UUID getLandlord() {
-        return landlord;
+    public UUID getLeadPlayer() {
+        return leadPlayer;
     }
 
     public CardPattern getCurrentPattern() {
         return currentPattern;
-    }
-
-    public UUID getLeadPlayer() {
-        return leadPlayer;
     }
 
     public List<DoudizhuCard> getCurrentTrickCards() {
@@ -178,51 +471,29 @@ public final class GameTable {
         return List.copyOf(bottomCards);
     }
 
-    public PlayerRole getRole(UUID playerId) {
-        return roles.get(playerId);
-    }
-
-    public int getBid(UUID playerId) {
-        if (bidRound == 2 && tieBreakBids.containsKey(playerId)) {
-            return tieBreakBids.getOrDefault(playerId, 0);
-        }
-        return bids.getOrDefault(playerId, 0);
-    }
-
-    public int getScore(UUID playerId) {
-        return totalScores.getOrDefault(playerId, 0);
+    public boolean isReady(UUID playerId) {
+        return playerId != null && readyPlayers.contains(playerId);
     }
 
     public UUID addBot(String preferredName) {
-        // 机器人只允许在大厅阶段补位，避免中途进入打乱牌局状态
         ensurePhase(GamePhase.LOBBY, "开局后不能再加机器人。");
         if (seats.size() >= PLAYER_COUNT) {
             throw new IllegalStateException("牌桌已经满了。");
         }
         UUID botId = UUID.randomUUID();
-        String name = preferredName == null || preferredName.isBlank() ? "Bot-" + nextAvailableBotIndex() : preferredName.trim();
-        botNames.put(botId, name);
+        String botName = preferredName == null || preferredName.isBlank() ? "Bot-" + nextAvailableBotIndex() : preferredName.trim();
+        botNames.put(botId, botName);
         plugin.registerBot(botId, this.name, DoudizhuPlugin.BotGameType.DOUDIZHU);
-        seats.add(botId);
-        readyPlayers.add(botId);
-        totalScores.putIfAbsent(botId, 0);
+        occupySeat(botId, true);
         Component update = compactLobbyEvent(
-            Component.text(name, NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
+            Component.text(botName, NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
             MuzTheme.accent("加入"),
             MuzTheme.success("就绪")
         );
-        announceChat(name + " 加入 · 就绪", update);
+        announceChat(botName + " 加入 · 就绪", update);
         recordLobbyEntry(update);
         refreshPhysicalTable();
         return botId;
-    }
-
-    private int nextAvailableBotIndex() {
-        int index = 1;
-        while (botNames.containsValue("Bot-" + index)) {
-            index++;
-        }
-        return index;
     }
 
     public UUID removeBot() {
@@ -235,42 +506,32 @@ public final class GameTable {
         if (target == null) {
             throw new IllegalStateException("当前没有机器人可移除。");
         }
-        String name = botNames.get(target);
-        seats.remove(target);
-        readyPlayers.remove(target);
-        bids.remove(target);
-        roles.remove(target);
-        hands.remove(target);
-        selections.remove(target);
-        botNames.remove(target);
-        plugin.unregisterBot(target);
+        String botName = botNames.get(target);
+        discardSeatState(target);
         Component update = compactLobbyEvent(
-            Component.text(name, NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
+            Component.text(botName, NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
             MuzTheme.muted("离桌"),
             null
         );
-        announceAction(name + " 离桌", update);
+        announceAction(botName + " 离桌", update);
         recordLobbyEntry(update);
         refreshPhysicalTable();
         return target;
     }
 
     public void addPlayer(Player player) {
-        if (contains(player.getUniqueId())) {
+        UUID playerId = player.getUniqueId();
+        if (contains(playerId)) {
             return;
         }
-        if (phase != GamePhase.LOBBY) {
-            throw new IllegalStateException("这一局已经开始了，暂时不能中途加入。");
-        }
+        ensurePhase(GamePhase.LOBBY, "这一局已经开始了，暂时不能中途加入。");
         if (seats.size() >= PLAYER_COUNT) {
             throw new IllegalStateException("牌桌已满。");
         }
-        UUID playerId = player.getUniqueId();
         if (!plugin.canAffordEntry(playerId, roomLevel)) {
             throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, roomLevel));
         }
-        seats.add(playerId);
-        totalScores.putIfAbsent(playerId, 0);
+        occupySeat(playerId, false);
         Component update = compactLobbyEvent(playerId, MuzTheme.accent("加入"), MuzTheme.muted("未准备"));
         announceChat(displayName(playerId) + " 加入 · 未准备", update);
         recordLobbyEntry(update);
@@ -291,6 +552,31 @@ public final class GameTable {
             announceAction(displayName(playerId) + " 离桌", update);
             recordLobbyEntry(update);
         }
+        discardSeatState(playerId);
+        manager.unregisterPlayer(playerId);
+        if (seats.isEmpty() && !plugin.getPhysicalTableManager().isPlaced(name)) {
+            manager.unregisterTable(name);
+        }
+        refreshPhysicalTable();
+    }
+
+    private int nextAvailableBotIndex() {
+        int index = 1;
+        while (botNames.containsValue("Bot-" + index)) {
+            index++;
+        }
+        return index;
+    }
+
+    private void occupySeat(UUID playerId, boolean ready) {
+        seats.add(playerId);
+        totalScores.putIfAbsent(playerId, 0);
+        if (ready) {
+            readyPlayers.add(playerId);
+        }
+    }
+
+    private void discardSeatState(UUID playerId) {
         seats.remove(playerId);
         readyPlayers.remove(playerId);
         bids.remove(playerId);
@@ -300,11 +586,6 @@ public final class GameTable {
         if (botNames.remove(playerId) != null) {
             plugin.unregisterBot(playerId);
         }
-        manager.unregisterPlayer(playerId);
-        if (seats.isEmpty() && !plugin.getPhysicalTableManager().isPlaced(name)) {
-            manager.unregisterTable(name);
-        }
-        refreshPhysicalTable();
     }
 
     public void toggleReady(Player player) {
@@ -333,21 +614,36 @@ public final class GameTable {
         refreshPhysicalTable();
     }
 
-    public void startRound(CommandSender sender) {
-        // 开局前必须满足“刚好 3 个座位 + 全员准备”
+    private void ensureRoundCanStart() {
         ensurePhase(GamePhase.LOBBY, "当前不是可开局状态。");
+        ensureSeatCountForStart();
+        ensureReadyStateForStart();
+        ensureSeatEntryEligibility();
+    }
+
+    private void ensureSeatCountForStart() {
         if (seats.size() != PLAYER_COUNT) {
             throw new IllegalStateException("斗地主需要刚好 3 位玩家。");
         }
+    }
+
+    private void ensureReadyStateForStart() {
         if (readyPlayers.size() != PLAYER_COUNT) {
             warnUnreadyPlayersForStartAttempt();
             throw new IllegalStateException("三位玩家都准备后才能开局。");
         }
+    }
+
+    private void ensureSeatEntryEligibility() {
         for (UUID seat : seats) {
             if (!isBot(seat) && !plugin.canAffordEntry(seat, roomLevel)) {
                 throw new IllegalStateException(displayName(seat) + " 资格不足: " + plugin.insufficientEntryMessage(seat, roomLevel));
             }
         }
+    }
+
+    public void startRound(CommandSender sender) {
+        ensureRoundCanStart();
         dealFreshRound();
         broadcastActionBar(MuzTheme.field(
             "开局",
@@ -383,21 +679,7 @@ public final class GameTable {
         requireAtTable(player);
         ensurePhase(GamePhase.DOUBLING, "当前不是加倍阶段。");
         requireCurrentTurn(player);
-        processDoublingChoice(player.getUniqueId(), doubled ? 2 : 1, false, false);
-    }
-
-    public void chooseMingPai(Player player) {
-        requireAtTable(player);
-        ensurePhase(GamePhase.DOUBLING, "当前不是加倍阶段。");
-        requireCurrentTurn(player);
-        processDoublingChoice(player.getUniqueId(), 1, true, false);
-    }
-
-    public void chooseSuperDouble(Player player) {
-        requireAtTable(player);
-        ensurePhase(GamePhase.DOUBLING, "当前不是加倍阶段。");
-        requireCurrentTurn(player);
-        processDoublingChoice(player.getUniqueId(), 4, false, false);
+        processDoublingChoice(player.getUniqueId(), doubled ? 2 : 1, false);
     }
 
     public void toggleSelection(UUID playerId, int cardId) {
@@ -428,17 +710,37 @@ public final class GameTable {
     }
 
     public void playSelected(Player player) {
-        // 真人玩家的出牌入口：从当前 selection 中组牌并校验
         requireAtTable(player);
         ensurePhase(GamePhase.PLAYING, "当前不是出牌阶段。");
         requireCurrentTurn(player);
 
         UUID playerId = player.getUniqueId();
+        List<DoudizhuCard> chosen = selectedCardsForPlay(playerId);
+        ensureSelectedMoveCanBeatCurrentPattern(playerId, chosen);
+
+        MoveResolution resolution = applyMoveResolution(playerId, chosen, true, "这组牌型不合法，不能这样出。");
+        CeActionExecutor.executePlayProfile(
+            plugin,
+            player,
+            this,
+            resolution.pattern(),
+            resolution.move(),
+            plugin.resolvePlayActionProfile(playerId, resolution.pattern())
+        );
+        finalizePlayedMove(
+            playerId,
+            resolution,
+            displayName(playerId) + " " + resolution.pattern().displayName(),
+            MuzTheme.success(resolution.pattern().displayName()),
+            resolution.cardLabels()
+        );
+    }
+
+    private List<DoudizhuCard> selectedCardsForPlay(UUID playerId) {
         Set<Integer> selection = selections.getOrDefault(playerId, Set.of());
         if (selection.isEmpty()) {
             throw new IllegalStateException("你还没有选择任何牌。");
         }
-
         List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
         List<DoudizhuCard> chosen = hand.stream()
             .filter(card -> selection.contains(card.id()))
@@ -448,62 +750,18 @@ public final class GameTable {
             clearSelection(playerId);
             throw new IllegalStateException("已选择的实体手牌状态过期，请重新选择。");
         }
+        return chosen;
+    }
 
+    private void ensureSelectedMoveCanBeatCurrentPattern(UUID playerId, List<DoudizhuCard> chosen) {
         CardPattern pattern = PatternAnalyzer.analyze(chosen)
             .orElseThrow(() -> new IllegalArgumentException("这组牌型不合法，不能这样出。"));
-
         if (leadPlayer != null && !Objects.equals(leadPlayer, playerId) && currentPattern != null && !pattern.canBeat(currentPattern)) {
             throw new IllegalArgumentException("这手牌压不过上一手。");
         }
-
-        hand.removeIf(card -> selection.contains(card.id()));
-        hand.sort(DoudizhuCard.ORDER);
-        clearSelection(playerId);
-
-        UUID previousLead = leadPlayer;
-        currentPattern = pattern;
-        currentTrickCards = List.copyOf(chosen);
-        leadPlayer = playerId;
-        boolean pressurePlay = previousLead != null && !Objects.equals(previousLead, playerId);
-        boolean multiplierRaised = pattern.type().isBombFamily();
-        recordPlayedHand(playerId);
-        if (multiplierRaised) {
-            bombMultiplier *= 2;
-        }
-
-        boolean threeCardsLeft = hand.size() == 3;
-        playPatternVoice(pattern, pattern.primaryRank(), pressurePlay, threeCardsLeft);
-        announceAction(
-            displayName(playerId) + " " + pattern.displayName(),
-            actorUpdate(playerId, MuzTheme.success(pattern.displayName()), chosen.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" ")))
-        );
-        recordTrickEntry(playerId, chosen, pattern);
-        if (multiplierRaised) {
-            announceAction("倍率抬升", MuzTheme.field("倍率", liveMultiplierComponent()));
-        }
-        CeActionExecutor.executePlayProfile(
-            plugin,
-            player,
-            this,
-            pattern,
-            chosen,
-            plugin.resolvePlayActionProfile(playerId, pattern)
-        );
-
-        if (hand.isEmpty()) {
-            finishRound(playerId);
-            return;
-        }
-
-        currentTurn = nextSeat(playerId);
-        promptPlayTurn();
-        refreshHands();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
     }
 
     public void pass(Player player) {
-        // 不要只允许跟牌玩家执行，领牌方不能“不要”
         requireAtTable(player);
         ensurePhase(GamePhase.PLAYING, "当前不是出牌阶段。");
         requireCurrentTurn(player);
@@ -511,23 +769,7 @@ public final class GameTable {
         if (leadPlayer == null || Objects.equals(leadPlayer, playerId)) {
             throw new IllegalStateException("这轮是你先手，不能直接点不要。");
         }
-
-        clearSelection(playerId);
-        playEffectAll(PackSounds.autoPass());
-        announceAction(displayName(playerId) + " 不要", actorUpdate(playerId, MuzTheme.muted("不要"), "这轮先不压牌"));
-        UUID next = nextSeat(playerId);
-        if (Objects.equals(next, leadPlayer)) {
-            currentTurn = leadPlayer;
-            currentPattern = null;
-            currentTrickCards = List.of();
-        announceAction(displayName(leadPlayer) + " 获得先手", actorUpdate(leadPlayer, MuzTheme.warm("先手"), "拿到这一轮的先手"));
-        } else {
-            currentTurn = next;
-        }
-        promptPlayTurn();
-        refreshHands();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
+        finalizePass(playerId, displayName(playerId) + " 不要", MuzTheme.muted("不要"), "这轮先不压牌");
     }
 
     public void forceEnd(CommandSender sender) {
@@ -545,33 +787,64 @@ public final class GameTable {
         lines.add(MuzTheme.field("阶段", MuzTheme.accent(phase.displayName())));
         lines.add(MuzTheme.field("座位", MuzTheme.body(seats.size() + "/" + PLAYER_COUNT)));
         for (UUID seat : seats) {
-            List<Component> details = new ArrayList<>();
-            Integer botNumericId = plugin.getBotNumericId(seat);
-            if (botNumericId != null) {
-                details.add(MuzTheme.muted("Bot " + botNumericId));
-            }
-            if (readyPlayers.contains(seat)) {
-                details.add(MuzTheme.success("已准备"));
-            }
-            if (landlord != null && landlord.equals(seat)) {
-                details.add(MuzTheme.warm("地主"));
-            }
-            if (phase == GamePhase.PLAYING) {
-                details.add(MuzTheme.accent("手牌 " + getHand(seat).size() + " 张"));
-            }
-            details.add(MuzTheme.muted("总分 " + getScore(seat)));
-            lines.add(MuzTheme.row(identity(seat, NamedTextColor.WHITE), details));
+            lines.add(statusSeatLine(seat));
         }
+        appendCurrentTurnStatusLine(lines);
+        appendBidAndMultiplierStatusLines(lines);
+        appendTieBreakAndCardStatusLines(lines);
+        return lines;
+    }
+
+    private Component statusSeatLine(UUID seat) {
+        return MuzTheme.row(identity(seat, NamedTextColor.WHITE), statusSeatDetails(seat));
+    }
+
+    private List<Component> statusSeatDetails(UUID seat) {
+        List<Component> details = new ArrayList<>();
+        Integer botNumericId = plugin.getBotNumericId(seat);
+        if (botNumericId != null) {
+            details.add(MuzTheme.muted("Bot " + botNumericId));
+        }
+        if (readyPlayers.contains(seat)) {
+            details.add(MuzTheme.success("已准备"));
+        }
+        if (landlord != null && landlord.equals(seat)) {
+            details.add(MuzTheme.warm("地主"));
+        }
+        if (phase == GamePhase.PLAYING) {
+            details.add(MuzTheme.accent("手牌 " + getHand(seat).size() + " 张"));
+        }
+        details.add(MuzTheme.muted("总分 " + getScore(seat)));
+        return details;
+    }
+
+    private void appendCurrentTurnStatusLine(List<Component> lines) {
         if (currentTurn != null) {
-            lines.add(MuzTheme.field("当前操作", identity(currentTurn, NamedTextColor.WHITE)));
+            lines.add(MuzTheme.field(currentTurnStatusLabel(), identity(currentTurn, NamedTextColor.WHITE)));
         }
-        if (highestBid > 0 && highestBidder != null) {
-            lines.add(MuzTheme.field(
-                bidRound == 1 ? "最高叫分" : "最高抢分",
-                MuzTheme.warm(highestBid + " 分").append(MuzTheme.divider(" · ")).append(identity(highestBidder, NamedTextColor.WHITE))
-            ));
-            lines.add(MuzTheme.field("倍率", liveMultiplierComponent()));
+    }
+
+    private String currentTurnStatusLabel() {
+        return switch (phase) {
+            case BIDDING -> "当前叫分";
+            case DOUBLING -> "当前加倍";
+            case PLAYING -> "当前出牌";
+            case LOBBY -> "当前操作";
+        };
+    }
+
+    private void appendBidAndMultiplierStatusLines(List<Component> lines) {
+        if (highestBid <= 0 || highestBidder == null) {
+            return;
         }
+        lines.add(MuzTheme.field(
+            bidRound == 1 ? "最高叫分" : "最高抢分",
+            MuzTheme.warm(highestBid + " 分").append(MuzTheme.divider(" · ")).append(identity(highestBidder, NamedTextColor.WHITE))
+        ));
+        lines.add(MuzTheme.field("倍率", liveMultiplierComponent()));
+    }
+
+    private void appendTieBreakAndCardStatusLines(List<Component> lines) {
         if (bidRound == 2 && !tieBreakOrder.isEmpty()) {
             lines.add(MuzTheme.field("抢地主顺序", orderedPlayersComponent(tieBreakOrder)));
         }
@@ -581,31 +854,29 @@ public final class GameTable {
         if (!bottomCards.isEmpty()) {
             lines.add(MuzTheme.field("底牌", MuzTheme.warm(bottomCards.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" ")))));
         }
-        return lines;
     }
 
     public String currentTrickPreviewText() {
-        if (currentPattern == null || currentTrickCards.isEmpty()) {
-            return "上一手 · 暂无";
-        }
-        return "上一手 · " + playerName(leadPlayer) + " · " + describeCards(currentTrickCards, currentPattern);
+        return TableStatusViews.currentTrickPreviewText(
+            leadPlayer,
+            currentPattern,
+            currentTrickCards,
+            this::playerName,
+            this::describeCards
+        );
     }
 
     public Component currentTrickPreviewComponent() {
-        if (currentPattern == null || currentTrickCards.isEmpty()) {
-            return MuzTheme.orange("上一手")
-                .append(MuzTheme.divider(" · "))
-                .append(MuzTheme.muted("暂未出现"));
-        }
-        return MuzTheme.orange("上一手")
-            .append(MuzTheme.divider(" · "))
-            .append(identity(leadPlayer, NamedTextColor.WHITE))
-            .append(MuzTheme.divider(" · "))
-            .append(MuzTheme.orange(describeCards(currentTrickCards, currentPattern)));
+        return TableStatusViews.currentTrickPreviewComponent(
+            leadPlayer,
+            currentPattern,
+            currentTrickCards,
+            playerId -> identity(playerId, NamedTextColor.WHITE),
+            this::describeCards
+        );
     }
 
     public List<Component> slidingTrickPreviewComponents(long nowMillis) {
-        pruneExpiredTrickEntries(nowMillis);
         if (recentTrickEntries.isEmpty()) {
             return List.of(currentTrickPreviewComponent());
         }
@@ -613,10 +884,8 @@ public final class GameTable {
             ? List.copyOf(recentTrickEntries)
             : List.copyOf(recentTrickEntries.subList(recentTrickEntries.size() - 5, recentTrickEntries.size()));
         List<Component> lines = new ArrayList<>(visible.size());
-        for (int index = 0; index < visible.size(); index++) {
-            RecentTrickEntry entry = visible.get(index);
-            long ageMillis = Math.max(0L, nowMillis - entry.createdAtMillis());
-            lines.add(styleRecentTrickLine(entry.component(), ageMillis, index, visible.size()));
+        for (RecentTrickEntry entry : visible) {
+            lines.add(entry.component());
         }
         return lines;
     }
@@ -647,40 +916,29 @@ public final class GameTable {
     }
 
     public String liveMultiplierStatusText() {
-        if (highestBid <= 0 || landlord == null) {
-            return phase == GamePhase.LOBBY ? "等待本局开局" : "等待叫分结果";
-        }
-        StringBuilder builder = new StringBuilder()
-            .append("底分 ").append(Math.max(1, highestBid))
-            .append(" · 炸弹 x").append(bombMultiplier);
-        if (landlord != null) {
-        builder.append(" · 农民加倍 ").append(boostedFarmerCount()).append("/").append(farmerSeatCount()).append(" 人");
-            if (landlordBoostFactor != null) {
-                builder.append(landlordBoostFactor > 1 ? " · 地主加倍 x" + landlordBoostFactor : " · 地主不加倍");
-            }
-            if (!mingPaiPlayers.isEmpty()) {
-                builder.append(" · 明牌 ").append(mingPaiPlayers.size()).append(" 人");
-            }
-        }
-        builder.append(" · ").append(pairMultiplierSummary(false, false));
-        return builder.toString();
+        return TableStatusViews.multiplierStatusText(
+            phase,
+            highestBid,
+            landlord,
+            bombMultiplier,
+            boostedFarmerCount(),
+            farmerSeatCount(),
+            landlordBoostFactor,
+            pairMultiplierSummary(false, false)
+        );
     }
 
     public Component liveMultiplierStatusComponent() {
-        if (highestBid <= 0 || landlord == null) {
-            return phase == GamePhase.LOBBY ? MuzTheme.muted("等待本局开局") : MuzTheme.muted("等待叫分结果");
-        }
-        Component line = MuzTheme.warm("底分 " + Math.max(1, highestBid))
-            .append(MuzTheme.divider(" · "))
-            .append(MuzTheme.hotValue("x" + bombMultiplier));
-        line = line.append(MuzTheme.divider(" · "))
-            .append(MuzTheme.hotMetric("农民加倍", boostedFarmerCount() + "/" + farmerSeatCount(), "人"));
-        if (landlordBoostFactor != null) {
-            line = line.append(MuzTheme.divider(" · "))
-                .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", "x" + landlordBoostFactor) : MuzTheme.muted("地主不加倍"));
-        }
-        return line.append(MuzTheme.divider(" · "))
-            .append(MuzTheme.hotValue(pairMultiplierSummary(false, false)));
+        return TableStatusViews.multiplierStatusComponent(
+            phase,
+            highestBid,
+            landlord,
+            bombMultiplier,
+            boostedFarmerCount(),
+            farmerSeatCount(),
+            landlordBoostFactor,
+            pairMultiplierSummary(false, false)
+        );
     }
 
     public void enableDebugAutoLoop() {
@@ -701,49 +959,8 @@ public final class GameTable {
         debugAutoLoop = false;
         plugin.getHandGuiService().closeHands(this);
         stopMusicAll();
-        for (UUID seat : new ArrayList<>(seats)) {
-            if (!isBot(seat)) {
-                Player player = onlinePlayer(seat);
-                if (player != null) {
-                    player.sendMessage(text(reason, NamedTextColor.RED));
-                }
-                manager.unregisterPlayer(seat);
-            } else {
-                plugin.unregisterBot(seat);
-            }
-        }
-        seats.clear();
-        readyPlayers.clear();
-        totalScores.clear();
-        bids.clear();
-        tieBreakBids.clear();
-        roles.clear();
-        hands.clear();
-        selections.clear();
-        botNames.clear();
-        bottomCards = List.of();
-        bidOrder = List.of();
-        tieBreakOrder = List.of();
-        doublingOrder = List.of();
-        currentTurn = null;
-        leadPlayer = null;
-        landlord = null;
-        highestBidder = null;
-        highestBid = 0;
-        bidRound = 1;
-        farmerBoostChoices.clear();
-        landlordBoostFactor = null;
-        mingPaiPlayers.clear();
-        bombMultiplier = 1;
-        currentPattern = null;
-        currentTrickCards = List.of();
-        turnDeadlineMillis = -1L;
-        lastCountdownSecond = Integer.MIN_VALUE;
-        lastLobbyWarningSoundAt = 0L;
-        delayedUnreadyReminderAtMillis = 0L;
-        pendingTimedOutPlayDecisionPlayer = null;
-        pendingTimedOutPlayDecisionEpoch = Integer.MIN_VALUE;
-        phase = GamePhase.LOBBY;
+        detachAllSeatsForForceClose(reason);
+        clearTableStateForForceClose();
     }
 
     public void tickActionBar() {
@@ -751,47 +968,33 @@ public final class GameTable {
             return;
         }
         if (phase == GamePhase.LOBBY) {
-            if (System.currentTimeMillis() < lobbyUiResumeAtMillis) {
-                return;
-            }
-            for (UUID seat : seats) {
-                Player player = onlinePlayer(seat);
-                if (player != null) {
-                    player.sendActionBar(buildPersistentActionBar(player.getUniqueId(), 0));
-                }
-            }
+            broadcastLobbyActionBarIfVisible();
             return;
         }
 
         int remaining = remainingCountdownSeconds();
-        if (phase == GamePhase.DOUBLING && remaining <= 0 && currentTurn != null && !isBot(currentTurn)) {
-            processDoublingChoice(currentTurn, 1, false, true);
+        if (handleExpiredHumanTurn(remaining)) {
             return;
         }
-        if (phase == GamePhase.PLAYING && remaining <= 0 && currentTurn != null && !isBot(currentTurn)) {
-            handleTimedOutPlayerTurn(currentTurn, botActionEpoch);
-            return;
-        }
-        if (!isBot(currentTurn) && remaining != lastCountdownSecond) {
-            if (remaining > 0 && remaining <= 5) {
-                DoudizhuPlugin.ConfiguredSound sound = plugin.countdownSound();
-                if (sound.volume() > 0.0f) {
-                    playSoundAll(sound.key(), sound.volume(), sound.pitch());
-                }
-            }
-            lastCountdownSecond = remaining;
-        }
-
-        for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player != null) {
-                player.sendActionBar(buildPersistentActionBar(player.getUniqueId(), remaining));
-            }
-        }
+        updateCountdownSoundState(remaining);
+        broadcastPersistentActionBar(remaining);
     }
 
     private void dealFreshRound() {
-        // 每局重新洗牌、发牌、重置叫分与炸弹倍数
+        prepareFreshRoundState();
+        List<DoudizhuCard> deck = DoudizhuDeck.shuffled(random);
+        dealHandsFromDeck(deck);
+        assignBottomCards(deck);
+        bidOrder = seedBidOrder();
+        tieBreakOrder = List.of();
+        currentTurn = bidOrder.get(0);
+    }
+
+    private void confirmLandlord(UUID playerId, int bid) {
+        confirmLandlord(playerId, bid, null);
+    }
+
+    private void prepareFreshRoundState() {
         phase = GamePhase.BIDDING;
         bids.clear();
         tieBreakBids.clear();
@@ -810,45 +1013,51 @@ public final class GameTable {
         doublingOrder = List.of();
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
-        mingPaiPlayers.clear();
         bombMultiplier = 1;
         readyPlayers.clear();
+    }
 
-        List<DoudizhuCard> deck = DoudizhuDeck.shuffled(random);
+    private void dealHandsFromDeck(List<DoudizhuCard> deck) {
         for (int index = 0; index < PLAYER_COUNT; index++) {
             List<DoudizhuCard> hand = new ArrayList<>(deck.subList(index * 17, index * 17 + 17));
             hand.sort(DoudizhuCard.ORDER);
             hands.put(seats.get(index), hand);
         }
+    }
+
+    private void assignBottomCards(List<DoudizhuCard> deck) {
         bottomCards = new ArrayList<>(deck.subList(51, 54));
         bottomCards.sort(DoudizhuCard.ORDER);
+    }
 
+    private List<UUID> seedBidOrder() {
         int startIndex = random.nextInt(PLAYER_COUNT);
         List<UUID> order = new ArrayList<>(PLAYER_COUNT);
         for (int index = 0; index < PLAYER_COUNT; index++) {
             order.add(seats.get((startIndex + index) % PLAYER_COUNT));
         }
-        bidOrder = List.copyOf(order);
-        tieBreakOrder = List.of();
-        currentTurn = bidOrder.get(0);
+        return List.copyOf(order);
     }
 
-    private void confirmLandlord(UUID playerId, int bid) {
-        confirmLandlord(playerId, bid, null);
-    }
-
-    private void confirmLandlord(UUID playerId, int bid, String priorTriggerSound) {
-        // 地主确定后追加底牌，并进入加倍阶段
-        landlord = playerId;
-        highestBid = Math.max(1, bid);
+    private void assignLandlordRoles() {
         roles.clear();
         for (UUID seat : seats) {
             roles.put(seat, seat.equals(landlord) ? PlayerRole.LANDLORD : PlayerRole.FARMER);
         }
+    }
+
+    private void appendBottomCardsToLandlord(UUID playerId) {
         List<DoudizhuCard> landlordHand = new ArrayList<>(hands.getOrDefault(playerId, List.of()));
         landlordHand.addAll(bottomCards);
         landlordHand.sort(DoudizhuCard.ORDER);
         hands.put(playerId, landlordHand);
+    }
+
+    private void confirmLandlord(UUID playerId, int bid, String priorTriggerSound) {
+        landlord = playerId;
+        highestBid = Math.max(1, bid);
+        assignLandlordRoles();
+        appendBottomCardsToLandlord(playerId);
         currentTurn = playerId;
         currentPattern = null;
         currentTrickCards = List.of();
@@ -873,50 +1082,20 @@ public final class GameTable {
     }
 
     private void finishRound(UUID winner) {
-        boolean landlordWin = Objects.equals(winner, landlord);
-        List<UUID> winningSeats = landlordWin ? List.of(landlord) : seats.stream().filter(seat -> !seat.equals(landlord)).toList();
-        int roundScore = resolvedCoreScore(landlordWin);
-        Map<UUID, Integer> scoreDeltas = new LinkedHashMap<>();
         stopMusicAll();
-        if (landlordWin) {
-            int landlordGain = 0;
-            for (UUID seat : seats) {
-                if (!seat.equals(landlord)) {
-                    int loss = roundScore * seatPairFactor(seat);
-                    landlordGain += loss;
-                    scoreDeltas.put(seat, -loss);
-                    totalScores.computeIfPresent(seat, (ignored, score) -> score - loss);
-                }
-            }
-            scoreDeltas.put(landlord, landlordGain);
-            int finalLandlordGain = landlordGain;
-            totalScores.computeIfPresent(landlord, (ignored, score) -> score + finalLandlordGain);
-        } else {
-            int landlordLoss = 0;
-            for (UUID seat : seats) {
-                if (!seat.equals(landlord)) {
-                    int gain = roundScore * seatPairFactor(seat);
-                    landlordLoss += gain;
-                    scoreDeltas.put(seat, gain);
-                    totalScores.computeIfPresent(seat, (ignored, score) -> score + gain);
-                }
-            }
-            scoreDeltas.put(landlord, -landlordLoss);
-            int finalLandlordLoss = landlordLoss;
-            totalScores.computeIfPresent(landlord, (ignored, score) -> score - finalLandlordLoss);
-        }
-        Component summary = settlementSummaryComponent(winningSeats, landlordWin);
+        RoundSettlementCoordinator.RoundSettlement settlement = roundSettlementCoordinator.settle(winner);
+        RoundSettlementView settlementView = settlementView(settlement);
+        Component summary = settlementView.summary(orderedPlayersComponent(settlement.winners()));
         // IMPORTANT:
         // Keep round-end chat on a single send path.
         // `sendRoundChatBundles(...)` already includes the full multiplier block, so broadcasting summary here again
         // would resend the same final multiplier text and cause duplicate settlement chat after a round ends.
-        setLastActionText(landlordWin ? "地主阵营胜出" : "农民阵营胜出", summary);
-        Map<UUID, DoudizhuPlugin.SettlementResult> settlementSnapshots = broadcastEconomySettlement(scoreDeltas);
-        plugin.recordDoudizhuMatch(this, winningSeats, scoreDeltas, settlementSnapshots);
-        sendRoundChatBundles(winningSeats, settlementSnapshots, scoreDeltas);
-        broadcastStickyOutcomeActionBar(winningSeats);
+        setLastActionText(settlement.landlordWin() ? "地主阵营胜出" : "农民阵营胜出", summary);
+        plugin.recordDoudizhuMatch(this, settlement.winners(), settlement.scoreDeltas(), settlement.settlementSnapshots());
+        sendRoundChatBundles(settlement, settlementView);
+        broadcastStickyOutcomeActionBar(settlement.winners());
         for (UUID seat : seats) {
-            playEffect(seat, (landlordWin == seat.equals(landlord)) ? PackSounds.win() : PackSounds.lose());
+            playEffect(seat, (settlement.landlordWin() == seat.equals(landlord)) ? PackSounds.win() : PackSounds.lose());
         }
         resetRound();
     }
@@ -942,6 +1121,60 @@ public final class GameTable {
 
     private void resetRound() {
         stopMusicAll();
+        resetRoundStateForLobby();
+        plugin.getHandGuiService().closeHands(this);
+        refreshPhysicalTable();
+        scheduleDebugAutoLoopRestartIfEligible();
+    }
+
+    private void detachAllSeatsForForceClose(String reason) {
+        for (UUID seat : new ArrayList<>(seats)) {
+            if (!isBot(seat)) {
+                Player player = onlinePlayer(seat);
+                if (player != null) {
+                    player.sendMessage(text(reason, NamedTextColor.RED));
+                }
+                manager.unregisterPlayer(seat);
+                continue;
+            }
+            plugin.unregisterBot(seat);
+        }
+    }
+
+    private void clearTableStateForForceClose() {
+        seats.clear();
+        readyPlayers.clear();
+        totalScores.clear();
+        bids.clear();
+        tieBreakBids.clear();
+        roles.clear();
+        hands.clear();
+        selections.clear();
+        botNames.clear();
+        bottomCards = List.of();
+        bidOrder = List.of();
+        tieBreakOrder = List.of();
+        doublingOrder = List.of();
+        currentTurn = null;
+        leadPlayer = null;
+        landlord = null;
+        highestBidder = null;
+        highestBid = 0;
+        bidRound = 1;
+        farmerBoostChoices.clear();
+        landlordBoostFactor = null;
+        bombMultiplier = 1;
+        currentPattern = null;
+        currentTrickCards = List.of();
+        roundStartedAtMillis = -1L;
+        timedOutPlayCoordinator.reset();
+        clearTurnCountdown();
+        lastLobbyWarningSoundAt = 0L;
+        delayedUnreadyReminderAtMillis = 0L;
+        phase = GamePhase.LOBBY;
+    }
+
+    private void resetRoundStateForLobby() {
         phase = GamePhase.LOBBY;
         readyPlayers.clear();
         bids.clear();
@@ -964,21 +1197,24 @@ public final class GameTable {
         doublingOrder = List.of();
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
-        mingPaiPlayers.clear();
         bombMultiplier = 1;
         currentPattern = null;
         currentTrickCards = List.of();
-        plugin.getHandGuiService().closeHands(this);
+        roundStartedAtMillis = -1L;
+        timedOutPlayCoordinator.reset();
         clearTurnCountdown();
-        refreshPhysicalTable();
-        if (canScheduleTasks() && debugAutoLoop && seats.size() == PLAYER_COUNT && seats.stream().allMatch(this::isBot)) {
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                try {
-                    startRound(plugin.getServer().getConsoleSender());
-                } catch (RuntimeException ignored) {
-                }
-            }, 2L);
+    }
+
+    private void scheduleDebugAutoLoopRestartIfEligible() {
+        if (!canScheduleTasks() || !debugAutoLoop || seats.size() != PLAYER_COUNT || !seats.stream().allMatch(this::isBot)) {
+            return;
         }
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            try {
+                startRound(plugin.getServer().getConsoleSender());
+            } catch (RuntimeException ignored) {
+            }
+        }, 2L);
     }
 
     private void promptBidTurn() {
@@ -1012,7 +1248,6 @@ public final class GameTable {
         phase = GamePhase.DOUBLING;
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
-        mingPaiPlayers.clear();
         List<UUID> order = new ArrayList<>();
         for (UUID seat : seats) {
             if (!seat.equals(landlord)) {
@@ -1062,34 +1297,34 @@ public final class GameTable {
     }
 
     private void skipIfNoResponse() {
-        // 自动不要：只在不是领牌者且手里没有任何可压牌型时触发
-        while (
-            phase == GamePhase.PLAYING
-                && currentTurn != null
-                && leadPlayer != null
-                && currentPattern != null
-                && !Objects.equals(currentTurn, leadPlayer)
-        ) {
-            List<DoudizhuCard> hand = hands.getOrDefault(currentTurn, List.of());
-            if (MoveAdvisor.hasAnyBeatingMove(hand, currentPattern)) {
-                return;
-            }
-
+        while (shouldAutoPassCurrentTurn()) {
             UUID stuckPlayer = currentTurn;
-            clearSelection(stuckPlayer);
-            playEffectAll(PackSounds.autoPass());
-        announceAction(displayName(stuckPlayer) + " 自动不要", actorUpdate(stuckPlayer, MuzTheme.muted("自动不要"), "手里暂时没有更大的牌"));
-
-            UUID next = nextSeat(stuckPlayer);
-            if (Objects.equals(next, leadPlayer)) {
-                currentTurn = leadPlayer;
-                currentPattern = null;
-                currentTrickCards = List.of();
-        announceAction(displayName(leadPlayer) + " 获得先手", actorUpdate(leadPlayer, MuzTheme.warm("先手"), "拿到这一轮的先手"));
+            performAutoSkippedPass(stuckPlayer);
+            if (Objects.equals(currentTurn, leadPlayer)) {
                 return;
             }
-            currentTurn = next;
         }
+    }
+
+    private boolean shouldAutoPassCurrentTurn() {
+        if (
+            phase != GamePhase.PLAYING
+                || currentTurn == null
+                || leadPlayer == null
+                || currentPattern == null
+                || Objects.equals(currentTurn, leadPlayer)
+        ) {
+            return false;
+        }
+        List<DoudizhuCard> hand = hands.getOrDefault(currentTurn, List.of());
+        return !MoveAdvisor.hasAnyBeatingMove(hand, currentPattern);
+    }
+
+    private void performAutoSkippedPass(UUID playerId) {
+        clearSelection(playerId);
+        playEffectAll(PackSounds.autoPass());
+        announceAction(displayName(playerId) + " 自动不要", actorUpdate(playerId, MuzTheme.muted("自动不要"), "手里暂时没有更大的牌"));
+        advanceAfterResolvedTurn(playerId, false);
     }
 
     private UUID nextSeat(UUID playerId) {
@@ -1213,173 +1448,35 @@ public final class GameTable {
     }
 
     private void playSoundAll(String soundKey, float volume, float pitch) {
-        for (UUID seat : seats) {
-            playSound(seat, soundKey, volume, pitch);
-        }
+        effectCoordinator.playSoundAll(soundKey, volume, pitch);
     }
 
     private void playEffectAll(String soundKey) {
-        playSoundAll(soundKey, plugin.getEffectVolume(), 1.0f);
+        effectCoordinator.playEffectAll(soundKey);
     }
 
     private void playEffect(UUID playerId, String soundKey) {
-        playSound(playerId, soundKey, plugin.getEffectVolume(), 1.0f);
+        effectCoordinator.playEffect(playerId, soundKey);
     }
 
     private void playRandomEffectAll(List<String> soundKeys) {
-        if (soundKeys == null || soundKeys.isEmpty()) {
-            return;
-        }
-        List<String> candidates = new ArrayList<>();
-        for (String soundKey : soundKeys) {
-            if (soundKey == null || soundKey.isBlank() || candidates.contains(soundKey)) {
-                continue;
-            }
-            candidates.add(soundKey);
-        }
-        if (candidates.isEmpty()) {
-            return;
-        }
-        List<String> filtered = candidates;
-        if (lastRandomEffectKey != null && lastRandomEffectStreak >= 2 && candidates.size() > 1) {
-            filtered = candidates.stream()
-                .filter(soundKey -> !soundKey.equals(lastRandomEffectKey))
-                .toList();
-        }
-        String selected = filtered.get(random.nextInt(filtered.size()));
-        if (selected.equals(lastRandomEffectKey)) {
-            lastRandomEffectStreak++;
-        } else {
-            lastRandomEffectKey = selected;
-            lastRandomEffectStreak = 1;
-        }
-        playEffectAll(selected);
+        effectCoordinator.playRandomEffectAll(soundKeys);
     }
 
-    private void playPatternVoice(CardPattern pattern, CardRank primaryRank, boolean pressurePlay, boolean threeCardsLeft) {
-        if (pattern == null || primaryRank == null) {
-            if (threeCardsLeft) {
-                playEffectAll(PackSounds.threeCardsWarning());
-            }
-            return;
-        }
-        List<String> candidates = new ArrayList<>();
-        candidates.add(PackSounds.play(pattern, primaryRank));
-        if (pressurePlay) {
-            candidates.add(PackSounds.pressureCallout());
-        }
-        if (threeCardsLeft) {
-            candidates.add(PackSounds.threeCardsWarning());
-        }
-        playRandomEffectAll(candidates);
-    }
-
-    private void playSound(UUID playerId, String soundKey, float volume, float pitch) {
-        Player player = onlinePlayer(playerId);
-        if (player != null) {
-            player.playSound(player.getLocation(), soundKey, volume, pitch);
-        }
+    private void playPatternVoice(CardPattern pattern, CardRank primaryRank, boolean pressurePlay, boolean threeCardsLeft, boolean twoCardsLeft) {
+        effectCoordinator.playPatternVoice(pattern, primaryRank, pressurePlay, threeCardsLeft, twoCardsLeft);
     }
 
     private void playRoundMusic() {
-        stopMusicAll();
-        int epoch = ++musicEpoch;
-        startMusicTrack(PackSounds.openingBgm(), epoch);
+        musicCoordinator.playRoundMusic();
     }
 
     private void stopMusicAll() {
-        musicEpoch++;
-        String activeTrack = currentMusicKey;
-        currentMusicKey = null;
-        for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player == null) {
-                continue;
-            }
-            if (activeTrack != null && !activeTrack.isBlank()) {
-                player.stopSound(activeTrack);
-            }
-            for (String bgm : PackSounds.bgmTracks()) {
-                if (bgm.equals(activeTrack)) {
-                    continue;
-                }
-                player.stopSound(bgm);
-            }
-        }
-    }
-
-    private void stopCurrentMusicTrack() {
-        if (currentMusicKey == null || currentMusicKey.isBlank()) {
-            return;
-        }
-        for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player != null) {
-                player.stopSound(currentMusicKey);
-            }
-        }
-    }
-
-    private void stopBgmTracks(Player player) {
-        for (String bgm : PackSounds.bgmTracks()) {
-            player.stopSound(bgm);
-        }
+        musicCoordinator.stopAll();
     }
 
     private void updateMusicState() {
-        if (!canScheduleTasks() || phase == GamePhase.LOBBY) {
-            return;
-        }
-        String desired;
-        if (shouldUseExcitedBgm()) {
-            desired = PackSounds.excitedBgm();
-        } else if (currentMusicKey == null
-            || currentMusicKey.equals(PackSounds.openingBgm())
-            || currentMusicKey.equals(PackSounds.excitedBgm())) {
-            desired = PackSounds.nextBgmTrack(currentMusicKey);
-        } else {
-            return;
-        }
-        if (!Objects.equals(currentMusicKey, desired)) {
-            startMusicTrack(desired, musicEpoch);
-        }
-    }
-
-    private boolean shouldUseExcitedBgm() {
-        return phase == GamePhase.PLAYING
-            && hands.values().stream().anyMatch(hand -> hand.size() == 3);
-    }
-
-    private String nextScheduledMusicTrack(String previousTrack) {
-        return shouldUseExcitedBgm() ? PackSounds.excitedBgm() : PackSounds.nextBgmTrack(previousTrack);
-    }
-
-    private void startMusicTrack(String soundKey, int epoch) {
-        if (!canScheduleTasks() || soundKey == null || soundKey.isBlank()) {
-            return;
-        }
-        for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player != null) {
-                stopBgmTracks(player);
-            }
-        }
-        currentMusicKey = soundKey;
-        playSoundAll(soundKey, plugin.getBgmVolume(), 1.0f);
-        scheduleNextMusic(soundKey, epoch);
-    }
-
-    private void scheduleNextMusic(String soundKey, int epoch) {
-        if (!canScheduleTasks()) {
-            return;
-        }
-        long delay = PackSounds.bgmDurationTicks(soundKey);
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (epoch != musicEpoch || phase == GamePhase.LOBBY) {
-                return;
-            }
-            startMusicTrack(nextScheduledMusicTrack(soundKey), epoch);
-        }, delay);
+        musicCoordinator.updateState();
     }
 
     private void refreshPhysicalTable() {
@@ -1436,48 +1533,67 @@ public final class GameTable {
         return phase == GamePhase.DOUBLING ? 6 : plugin.getTurnCountdownSeconds();
     }
 
+    private void broadcastLobbyActionBarIfVisible() {
+        if (System.currentTimeMillis() < lobbyUiResumeAtMillis) {
+            return;
+        }
+        broadcastPersistentActionBar(0);
+    }
+
+    private boolean handleExpiredHumanTurn(int remaining) {
+        if (currentTurn == null || isBot(currentTurn) || remaining > 0) {
+            return false;
+        }
+        if (phase == GamePhase.DOUBLING) {
+            processDoublingChoice(currentTurn, 1, true);
+            return true;
+        }
+        if (phase == GamePhase.PLAYING) {
+            handleTimedOutPlayerTurn(currentTurn, botActionEpoch);
+            return true;
+        }
+        return false;
+    }
+
+    private void updateCountdownSoundState(int remaining) {
+        if (currentTurn == null || isBot(currentTurn) || remaining == lastCountdownSecond) {
+            return;
+        }
+        effectCoordinator.playCountdownCue(remaining);
+        lastCountdownSecond = remaining;
+    }
+
+    private void broadcastPersistentActionBar(int remainingSeconds) {
+        for (UUID seat : seats) {
+            Player player = onlinePlayer(seat);
+            if (player != null) {
+                player.sendActionBar(buildPersistentActionBar(player.getUniqueId(), remainingSeconds));
+            }
+        }
+    }
+
     private Component buildPersistentActionBar(UUID viewerId, int remainingSeconds) {
-        if (phase == GamePhase.LOBBY) {
-            return buildLobbyActionBar(viewerId);
-        }
-        if (currentTurn == null) {
-            return text("牌桌正在整理下一轮。", NamedTextColor.GRAY);
-        }
-        if (isBot(currentTurn)) {
-            return append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 正在思考。", NamedTextColor.GRAY));
-        }
-        String countdown = currentTurnTimeoutSeconds() > 0 ? " | " + remainingSeconds + " 秒" : "";
-        return switch (phase) {
-            case BIDDING -> viewerId.equals(currentTurn)
-                ? text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主") + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
-                : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text((bidRound == 1 ? " 正在定叫分" : " 正在抢地主") + countdown, NamedTextColor.GRAY));
-            case DOUBLING -> viewerId.equals(currentTurn)
-                ? text("轮到你决定加倍或不加倍 · 6 秒内点桌边按钮" + countdown, NamedTextColor.AQUA)
-                : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 正在决定是否加倍" + countdown, NamedTextColor.GRAY));
-            case PLAYING -> viewerId.equals(currentTurn)
-                ? text("轮到你出牌了 · 已选 " + getSelection(currentTurn).size() + " 张" + countdown, NamedTextColor.AQUA)
-                : append(text("当前由 ", NamedTextColor.GRAY), identity(currentTurn, NamedTextColor.YELLOW), text(" 在出牌" + countdown, NamedTextColor.GRAY));
-            case LOBBY -> text("还在等大家入座准备。", NamedTextColor.GRAY);
-        };
+        return TableStatusViews.persistentActionBar(
+            phase,
+            viewerId,
+            currentTurn,
+            isBot(currentTurn),
+            bidRound,
+            remainingSeconds,
+            currentTurn == null ? 0 : getSelection(currentTurn).size(),
+            playerId -> identity(playerId, NamedTextColor.YELLOW),
+            buildLobbyActionBar(viewerId),
+            currentTurnTimeoutSeconds()
+        );
     }
 
     private Component buildLobbyActionBar(UUID viewerId) {
-        if (seats.isEmpty()) {
-            return text("等待玩家加入。", NamedTextColor.GRAY);
-        }
-        if (seats.size() < PLAYER_COUNT) {
-            return text("等待更多玩家入座 · " + seats.size() + "/" + PLAYER_COUNT, NamedTextColor.GRAY);
-        }
         List<String> unreadyNames = seats.stream()
             .filter(seat -> !readyPlayers.contains(seat))
             .filter(seat -> !isBot(seat))
             .map(this::displayName)
             .toList();
-        if (unreadyNames.isEmpty()) {
-            return MuzTheme.success("全员就绪").append(MuzTheme.divider(" · ")).append(MuzTheme.muted("任意一位可开始"));
-        }
-        return text("未准备：", NamedTextColor.YELLOW)
-            .append(MuzTheme.warning(String.join("、", unreadyNames)));
+        return TableStatusViews.lobbyActionBar(seats.size(), PLAYER_COUNT, unreadyNames);
     }
 
     private void warnUnreadyPlayersForStartAttempt() {
@@ -1492,29 +1608,38 @@ public final class GameTable {
             return;
         }
         long now = System.currentTimeMillis();
-        if (now < lobbyUiResumeAtMillis) {
-            long remainingMillis = lobbyUiResumeAtMillis - now;
-            if (canScheduleTasks() && delayedUnreadyReminderAtMillis < lobbyUiResumeAtMillis) {
-                delayedUnreadyReminderAtMillis = lobbyUiResumeAtMillis;
-                long delayTicks = Math.max(1L, (remainingMillis + 49L) / 50L);
-                plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                    delayedUnreadyReminderAtMillis = 0L;
-                    warnUnreadyPlayersForStartAttempt();
-                }, delayTicks);
-            }
+        if (scheduleDelayedUnreadyReminderIfNeeded(now)) {
             return;
         }
         if (now - lastLobbyWarningSoundAt < 500L) {
             return;
         }
         lastLobbyWarningSoundAt = now;
+        playUnreadyWarning(unreadySeats);
+    }
+
+    private boolean scheduleDelayedUnreadyReminderIfNeeded(long now) {
+        if (now >= lobbyUiResumeAtMillis) {
+            return false;
+        }
+        long remainingMillis = lobbyUiResumeAtMillis - now;
+        if (canScheduleTasks() && delayedUnreadyReminderAtMillis < lobbyUiResumeAtMillis) {
+            delayedUnreadyReminderAtMillis = lobbyUiResumeAtMillis;
+            long delayTicks = Math.max(1L, (remainingMillis + 49L) / 50L);
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                delayedUnreadyReminderAtMillis = 0L;
+                warnUnreadyPlayersForStartAttempt();
+            }, delayTicks);
+        }
+        return true;
+    }
+
+    private void playUnreadyWarning(List<UUID> unreadySeats) {
         DoudizhuPlugin.ConfiguredSound sound = plugin.unreadyWarningSound();
         for (UUID seat : unreadySeats) {
             Player player = onlinePlayer(seat);
             if (player != null) {
-                if (sound.volume() > 0.0f) {
-                    player.playSound(player.getLocation(), sound.key(), sound.volume(), sound.pitch());
-                }
+                effectCoordinator.playConfiguredSound(seat, sound);
                 player.showTitle(Title.title(
                     MINI.deserialize("<!i><gradient:#ff9ec7:#ffd670><bold>就差你没准备啦！</bold></gradient>"),
                     MINI.deserialize("<!i><#fff7fb>大家都在等你点一下 <#7ee7c1><bold>准备</bold></#7ee7c1>，马上就能开局啦</#fff7fb>"),
@@ -1524,29 +1649,8 @@ public final class GameTable {
         }
     }
 
-    private Map<UUID, DoudizhuPlugin.SettlementResult> broadcastEconomySettlement(Map<UUID, Integer> scoreDeltas) {
-        Map<UUID, DoudizhuPlugin.SettlementResult> settlementSnapshots = new LinkedHashMap<>();
-        if (scoreDeltas.isEmpty()) {
-            return settlementSnapshots;
-        }
-        if (!plugin.isDoudizhuRoomEconomyEnabled(roomLevel)) {
-            if (!plugin.isChipPaymentEnabled()) {
-                return settlementSnapshots;
-            }
-        }
-        for (Map.Entry<UUID, Integer> entry : scoreDeltas.entrySet()) {
-            UUID playerId = entry.getKey();
-            int scoreDelta = entry.getValue();
-            if (scoreDelta == 0 || isBot(playerId)) {
-                continue;
-            }
-            DoudizhuPlugin.SettlementResult result = plugin.settleDoudizhuCurrency(roomLevel, playerId, scoreDelta);
-            settlementSnapshots.put(playerId, result);
-        }
-        return settlementSnapshots;
-    }
-
-    private void sendRoundChatBundles(List<UUID> winners, Map<UUID, DoudizhuPlugin.SettlementResult> settlementSnapshots, Map<UUID, Integer> scoreDeltas) {
+    private void sendRoundChatBundles(RoundSettlementCoordinator.RoundSettlement settlement, RoundSettlementView settlementView) {
+        Component summary = settlementView.summary(orderedPlayersComponent(settlement.winners()));
         for (UUID seat : seats) {
             if (isBot(seat)) {
                 continue;
@@ -1555,60 +1659,43 @@ public final class GameTable {
             if (player == null) {
                 continue;
             }
-            boolean winner = winners.contains(seat);
-            DoudizhuPlugin.SettlementResult result = displaySettlementResult(seat, settlementSnapshots, scoreDeltas);
-            Component message = MuzTheme.banner("斗地主", name + " 号桌", winner ? MuzTheme.success("本局结果") : MuzTheme.danger("本局结果"))
-                .append(Component.newline())
-                .append(settlementSummaryComponent(winners, landlord != null && winners.contains(landlord)))
-                .append(Component.newline())
-                .append(settlementLine(seat, result));
-            List<UUID> others = seats.stream()
-                .filter(other -> !other.equals(seat))
-                .toList();
-            if (!others.isEmpty()) {
-                for (UUID other : others) {
-                    DoudizhuPlugin.SettlementResult otherResult = displaySettlementResult(other, settlementSnapshots, scoreDeltas);
-                    message = message.append(Component.newline())
-                        .append(settlementLine(other, otherResult));
-                }
+            player.sendMessage(roundChatMessageForSeat(seat, settlement, settlementView, summary).decoration(TextDecoration.ITALIC, false));
+        }
+    }
+
+    private Component roundChatMessageForSeat(
+        UUID seat,
+        RoundSettlementCoordinator.RoundSettlement settlement,
+        RoundSettlementView settlementView,
+        Component summary
+    ) {
+        boolean winner = settlement.winners().contains(seat);
+        Component message = MuzTheme.banner("斗地主", name + " 号桌", winner ? MuzTheme.success("本局结果") : MuzTheme.danger("本局结果"))
+            .append(Component.newline())
+            .append(summary)
+            .append(Component.newline())
+            .append(roundChatPlayerLine(seat, settlement, settlementView));
+        for (UUID other : seats) {
+            if (!other.equals(seat)) {
+                message = message.append(Component.newline()).append(roundChatPlayerLine(other, settlement, settlementView));
             }
-            player.sendMessage(message.decoration(TextDecoration.ITALIC, false));
         }
+        return message;
     }
 
-    private Component settlementLine(UUID playerId, DoudizhuPlugin.SettlementResult result) {
-        String amount = plugin.formatCompactAmount(Math.abs(result.delta()));
-        PlayerRole role = getRole(playerId);
-        Component line = identity(playerId, NamedTextColor.WHITE)
-            .append(MuzTheme.divider(" · "))
-            .append(role == null ? MuzTheme.muted("玩家") : role == PlayerRole.LANDLORD ? MuzTheme.landlord(role.displayName()) : MuzTheme.farmer(role.displayName()));
-        if (Math.abs(result.delta()) > 0.0001) {
-            line = line.append(MuzTheme.divider(" · "))
-                .append(result.delta() >= 0
-                    ? MuzTheme.success("赢了 " + amount + result.unitLabel())
-                    : MuzTheme.danger("输了 " + amount + result.unitLabel()));
-        } else {
-            line = line.append(MuzTheme.divider(" · "))
-                .append(MuzTheme.muted("持平"));
-        }
-        return MuzTheme.plain(line);
-    }
-
-    private DoudizhuPlugin.SettlementResult displaySettlementResult(UUID playerId, Map<UUID, DoudizhuPlugin.SettlementResult> settlementSnapshots, Map<UUID, Integer> scoreDeltas) {
-        DoudizhuPlugin.SettlementResult stored = settlementSnapshots.get(playerId);
-        if (stored != null) {
-            return stored;
-        }
-        int scoreDelta = scoreDeltas.getOrDefault(playerId, 0);
-        if (plugin.isChipPaymentEnabled()) {
-            double chipDelta = Math.round(scoreDelta * plugin.roomMultiplier(roomLevel));
-            return new DoudizhuPlugin.SettlementResult(chipDelta, 0.0, 0.0, false, false, "筹码");
-        }
-        if (plugin.isDoudizhuRoomEconomyEnabled(roomLevel)) {
-            double currencyDelta = scoreDelta * plugin.doudizhuCurrencyPerPoint(roomLevel);
-            return new DoudizhuPlugin.SettlementResult(currencyDelta, 0.0, 0.0, false, false, "金币");
-        }
-        return new DoudizhuPlugin.SettlementResult(scoreDelta, 0.0, 0.0, false, false, "分");
+    private Component roundChatPlayerLine(
+        UUID seat,
+        RoundSettlementCoordinator.RoundSettlement settlement,
+        RoundSettlementView settlementView
+    ) {
+        DoudizhuPlugin.SettlementResult result = settlement.displayResultFor(seat, plugin, roomLevel);
+        return settlementView.playerLine(
+            identity(seat, NamedTextColor.WHITE),
+            getRole(seat),
+            plugin.formatCompactAmount(Math.abs(result.delta())),
+            result.delta(),
+            result.unitLabel()
+        );
     }
 
     private void recordPlayedHand(UUID playerId) {
@@ -1682,58 +1769,6 @@ public final class GameTable {
         return farmerBoostFactor(seat) * landlordBoostFactor();
     }
 
-    public boolean isMingPai(UUID playerId) {
-        return mingPaiPlayers.contains(playerId);
-    }
-
-    private String doublingActionText(boolean landlordTurn, int boostFactor, boolean mingPai, boolean autoSkipped) {
-        if (autoSkipped) {
-            return " 超时跳过";
-        }
-        if (mingPai) {
-            return " 明牌";
-        }
-        if (boostFactor >= 4) {
-            return " 加倍";
-        }
-        if (boostFactor >= 2) {
-            return " 加倍";
-        }
-        return " 不加倍";
-    }
-
-    private Component doublingActionComponent(boolean landlordTurn, int boostFactor, boolean mingPai, boolean autoSkipped) {
-        if (autoSkipped) {
-            return MuzTheme.muted("跳过");
-        }
-        if (mingPai) {
-            return MuzTheme.warm("明牌");
-        }
-        if (boostFactor >= 4) {
-            return MuzTheme.hotMetric("加倍", "x2");
-        }
-        if (boostFactor >= 2) {
-            return MuzTheme.hotMetric("加倍", "x2");
-        }
-        return MuzTheme.muted("不加倍");
-    }
-
-    private String doublingActionDetail(boolean landlordTurn, int boostFactor, boolean mingPai, boolean autoSkipped) {
-        if (autoSkipped) {
-            return "6 秒内未操作，已自动跳过";
-        }
-        if (mingPai) {
-            return "你的手牌将对全桌公开";
-        }
-        if (boostFactor >= 4) {
-            return landlordTurn ? "本局对位倍率直接提升到 x4" : "你这一侧的对位倍率提升到 x4";
-        }
-        if (boostFactor >= 2) {
-            return landlordTurn ? "地主侧倍率 x2" : "农民侧倍率 x2";
-        }
-        return "保持当前倍率";
-    }
-
     private String pairMultiplierSummary(boolean resolved, boolean landlordWin) {
         int core = resolved ? resolvedCoreScore(landlordWin) : liveCoreScore();
         List<Integer> values = seats.stream()
@@ -1772,10 +1807,6 @@ public final class GameTable {
                 line = line.append(MuzTheme.divider(" · "))
                     .append(landlordBoostFactor > 1 ? MuzTheme.hotMetric("地主加倍", MuzTheme.multiplierToken("x" + landlordBoostFactor)) : MuzTheme.muted("地主不加倍"));
             }
-            if (!mingPaiPlayers.isEmpty()) {
-                line = line.append(MuzTheme.divider(" · "))
-                    .append(MuzTheme.hotMetric("明牌", String.valueOf(mingPaiPlayers.size()), "人"));
-            }
         }
         return line.append(MuzTheme.divider(" · "))
             .append(MuzTheme.multiplierToken(pairMultiplierSummary(false, false)));
@@ -1791,39 +1822,19 @@ public final class GameTable {
             .append(MuzTheme.hotMetric("结算", MuzTheme.multiplierToken(pairMultiplierSummary(true, landlordWin))));
     }
 
-    private Component settlementSummaryComponent(List<UUID> winners, boolean landlordWin) {
-        List<Component> lines = new ArrayList<>();
-        lines.add(
-            orderedPlayersComponent(winners)
-                .append(MuzTheme.divider(" · "))
-                .append(landlordWin ? MuzTheme.landlord("地主") : MuzTheme.farmer("农民"))
+    private RoundSettlementView settlementView(RoundSettlementCoordinator.RoundSettlement settlement) {
+        return new RoundSettlementView(
+            settlement.landlordWin(),
+            resolvedCoreScore(settlement.landlordWin()),
+            Math.max(1, highestBid),
+            bombMultiplier,
+            boostedFarmerCount(),
+            farmerSeatCount(),
+            landlordBoostFactor,
+            hasSpring(settlement.landlordWin()),
+            springLabel(settlement.landlordWin()),
+            pairMultiplierSummary(true, settlement.landlordWin())
         );
-        lines.add(MuzTheme.hotMetric("最终倍数", MuzTheme.multiplierToken(pairMultiplierSummary(true, landlordWin))));
-        lines.add(landlordWin ? MuzTheme.landlord("地主阵营胜出") : MuzTheme.farmer("农民阵营胜出"));
-        lines.add(MuzTheme.hotMetric("本局核心", MuzTheme.multiplierToken("x" + resolvedCoreScore(landlordWin))));
-        lines.add(MuzTheme.hotMetric("叫分", MuzTheme.multiplierToken("x" + Math.max(1, highestBid))));
-        lines.add(MuzTheme.hotMetric("炸弹", MuzTheme.multiplierToken("x" + bombMultiplier)));
-        if (landlord != null && farmerSeatCount() > 0) {
-            lines.add(MuzTheme.hotMetric("农民加倍", boostedFarmerCount() + "/" + farmerSeatCount(), "人"));
-        }
-        if (landlordBoostFactor != null && landlordBoostFactor > 1) {
-            lines.add(MuzTheme.hotMetric("地主加倍", MuzTheme.multiplierToken("x" + landlordBoostFactor)));
-        }
-        if (!mingPaiPlayers.isEmpty()) {
-            lines.add(MuzTheme.hotMetric("明牌", String.valueOf(mingPaiPlayers.size()), "人"));
-        }
-        if (hasSpring(landlordWin)) {
-            lines.add(MuzTheme.warning(springLabel(landlordWin)).append(MuzTheme.space()).append(MuzTheme.multiplierToken("x2")));
-        }
-        lines.add(MuzTheme.hotMetric("结算倍数", MuzTheme.multiplierToken(pairMultiplierSummary(true, landlordWin))));
-        Component result = Component.empty();
-        for (int index = 0; index < lines.size(); index++) {
-            if (index > 0) {
-                result = result.append(Component.newline());
-            }
-            result = result.append(lines.get(index));
-        }
-        return MuzTheme.plain(result);
     }
 
     private int currentMultiplierPeak(boolean resolved, boolean landlordWin) {
@@ -1932,20 +1943,6 @@ public final class GameTable {
         }
     }
 
-    private void pruneExpiredTrickEntries(long nowMillis) {
-        recentTrickEntries.removeIf(entry -> nowMillis - entry.createdAtMillis() > 12000L);
-    }
-
-    private Component styleRecentTrickLine(Component line, long ageMillis, int index, int total) {
-        if (ageMillis < 4000L) {
-            return line;
-        }
-        if (ageMillis < 8000L) {
-            return MuzTheme.plain(line).color(NamedTextColor.GRAY);
-        }
-        return MuzTheme.plain(line).color(NamedTextColor.DARK_GRAY);
-    }
-
     private String describeCards(List<DoudizhuCard> cards, CardPattern pattern) {
         Map<CardRank, Long> counts = cards.stream()
             .collect(Collectors.groupingBy(DoudizhuCard::rank, LinkedHashMap::new, Collectors.counting()));
@@ -2041,7 +2038,7 @@ public final class GameTable {
     }
 
     private void executeBotBid(UUID botId, int epoch) {
-        if (requestAiBidDecision(botId, epoch)) {
+        if (botAiCoordinator.requestBidDecision(botId, epoch)) {
             return;
         }
         executeLocalBotBid(botId);
@@ -2058,7 +2055,7 @@ public final class GameTable {
     }
 
     private void executeBotDouble(UUID botId, int epoch) {
-        if (requestAiDoublingDecision(botId, epoch)) {
+        if (botAiCoordinator.requestDoublingDecision(botId, epoch)) {
             return;
         }
         executeLocalBotDouble(botId);
@@ -2066,39 +2063,67 @@ public final class GameTable {
 
     private void executeLocalBotDouble(UUID botId) {
         List<DoudizhuCard> hand = hands.getOrDefault(botId, List.of());
-        int strength = SimpleBotBrain.chooseBid(hand);
-        boolean mingPai = strength >= 3;
-        int boostFactor;
-        if (strength >= 4) {
-            boostFactor = 4;
-        } else if (strength >= 2) {
-            boostFactor = 2;
-        } else {
-            boostFactor = 1;
-        }
-        processDoublingChoice(botId, boostFactor, mingPai && boostFactor == 1, false);
+        boolean doubled = SimpleBotBrain.chooseDouble(hand);
+        processDoublingChoice(botId, doubled ? 2 : 1, false);
+    }
+
+    private void refreshAndRunBot() {
+        refreshPhysicalTable();
+        runBotActionIfNeeded();
+    }
+
+    private void continueBidTurn(UUID nextPlayer) {
+        currentTurn = nextPlayer;
+        promptBidTurn();
+        refreshAndRunBot();
+    }
+
+    private void continueDoublingTurn(UUID nextPlayer) {
+        currentTurn = nextPlayer;
+        promptDoublingTurn();
+        refreshAndRunBot();
+    }
+
+    private void restartBidPhaseAfterRedeal() {
+        dealFreshRound();
+        openHandsForAll();
+        promptBidTurn();
+        refreshAndRunBot();
     }
 
     private void processBidChoice(UUID playerId, int points) {
         String bidSound = PackSounds.bid(points);
         if (bidRound == 1) {
-            bids.put(playerId, points);
-            if (points > highestBid || (points == highestBid && points > 0)) {
-                highestBid = points;
-                highestBidder = playerId;
-            }
-            announceAction(displayName(playerId) + (points == 0 ? " 不叫" : " 叫分 " + points), actorUpdate(playerId, points == 0 ? MuzTheme.muted("不叫") : MuzTheme.accent("叫分"), points == 0 ? "这轮先不叫地主" : points + " 分"));
-            if (points == 3) {
-                confirmLandlord(playerId, 3, bidSound);
-                return;
-            }
-            playEffectAll(bidSound);
-            advanceFirstBidRound(playerId);
+            handleFirstBidChoice(playerId, points, bidSound);
             return;
         }
+        handleTieBreakBidChoice(playerId, points, bidSound);
+    }
 
+    private void handleFirstBidChoice(UUID playerId, int points, String bidSound) {
+        bids.put(playerId, points);
+        if (points > highestBid || (points == highestBid && points > 0)) {
+            highestBid = points;
+            highestBidder = playerId;
+        }
+        announceAction(
+            displayName(playerId) + (points == 0 ? " 不叫" : " 叫分 " + points),
+            actorUpdate(playerId, points == 0 ? MuzTheme.muted("不叫") : MuzTheme.accent("叫分"), points == 0 ? "这轮先不叫地主" : points + " 分")
+        );
+        if (points == 3) {
+            confirmLandlord(playerId, 3, bidSound);
+            return;
+        }
+        playEffectAll(bidSound);
+        advanceFirstBidRound(playerId);
+    }
+
+    private void handleTieBreakBidChoice(UUID playerId, int points, String bidSound) {
         tieBreakBids.put(playerId, points);
-        announceAction(displayName(playerId) + (points == 0 ? " 不抢" : " 抢地主 " + points), actorUpdate(playerId, points == 0 ? MuzTheme.muted("不抢") : MuzTheme.accent("抢地主"), points == 0 ? "这轮先不抢地主" : points + " 分"));
+        announceAction(
+            displayName(playerId) + (points == 0 ? " 不抢" : " 抢地主 " + points),
+            actorUpdate(playerId, points == 0 ? MuzTheme.muted("不抢") : MuzTheme.accent("抢地主"), points == 0 ? "这轮先不抢地主" : points + " 分")
+        );
         if (points == 3) {
             confirmLandlord(playerId, Math.max(highestBid, 3), bidSound);
             return;
@@ -2109,48 +2134,34 @@ public final class GameTable {
             resolveTieBreakRound();
             return;
         }
-        currentTurn = tieBreakOrder.get(currentIndex + 1);
-        promptBidTurn();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
+        continueBidTurn(tieBreakOrder.get(currentIndex + 1));
     }
 
-    private void processDoublingChoice(UUID playerId, int boostFactor, boolean mingPai, boolean autoSkipped) {
+    private void processDoublingChoice(UUID playerId, int boostFactor, boolean autoSkipped) {
         boolean landlordTurn = Objects.equals(playerId, landlord);
         int normalizedFactor = boostFactor > 1 ? 2 : 1;
-        mingPai = false;
-        if (mingPai) {
-            mingPaiPlayers.add(playerId);
-            playEffectAll(PackSounds.mingPai());
-        } else if (normalizedFactor > 1) {
-            playEffectAll(normalizedFactor >= 4 ? PackSounds.superDouble() : PackSounds.doubleChoice(true, landlordTurn));
-        } else {
-            playEffectAll(PackSounds.doubleChoice(false, landlordTurn));
-        }
+        DoublingDecisionView decisionView = DoublingDecisionView.of(landlordTurn, normalizedFactor, autoSkipped);
+        playEffectAll(PackSounds.doubleChoice(normalizedFactor > 1, landlordTurn));
         if (landlordTurn) {
             landlordBoostFactor = normalizedFactor;
             announceAction(
-                displayName(playerId) + doublingActionText(landlordTurn, normalizedFactor, mingPai, autoSkipped),
-                actorUpdate(playerId, doublingActionComponent(landlordTurn, normalizedFactor, mingPai, autoSkipped), doublingActionDetail(landlordTurn, normalizedFactor, mingPai, autoSkipped)))
-            ;
+                displayName(playerId) + decisionView.actionText(),
+                actorUpdate(playerId, decisionView.actionComponent(), decisionView.actionDetail())
+            );
         } else {
             farmerBoostChoices.put(playerId, normalizedFactor);
             announceAction(
-                displayName(playerId) + doublingActionText(landlordTurn, normalizedFactor, mingPai, autoSkipped),
-                actorUpdate(playerId, doublingActionComponent(landlordTurn, normalizedFactor, mingPai, autoSkipped), doublingActionDetail(landlordTurn, normalizedFactor, mingPai, autoSkipped)))
-            ;
+                displayName(playerId) + decisionView.actionText(),
+                actorUpdate(playerId, decisionView.actionComponent(), decisionView.actionDetail())
+            );
         }
         int currentIndex = doublingOrder.indexOf(playerId);
         if (currentIndex < 0 || currentIndex == doublingOrder.size() - 1) {
             startPlayPhase();
-            refreshPhysicalTable();
-            runBotActionIfNeeded();
+            refreshAndRunBot();
             return;
         }
-        currentTurn = doublingOrder.get(currentIndex + 1);
-        promptDoublingTurn();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
+        continueDoublingTurn(doublingOrder.get(currentIndex + 1));
     }
 
     private void advanceFirstBidRound(UUID playerId) {
@@ -2158,11 +2169,7 @@ public final class GameTable {
         if (currentIndex == bidOrder.size() - 1) {
             if (highestBidder == null) {
         announceAction("无人叫分", MuzTheme.field("发牌", MuzTheme.danger("无人叫分").append(MuzTheme.divider(" · ")).append(MuzTheme.muted("这局重新洗牌再来"))));
-                dealFreshRound();
-                openHandsForAll();
-                promptBidTurn();
-                refreshPhysicalTable();
-                runBotActionIfNeeded();
+                restartBidPhaseAfterRedeal();
                 return;
             }
             List<UUID> tiedHighest = bidOrder.stream()
@@ -2189,8 +2196,7 @@ public final class GameTable {
         currentTurn = tieBreakOrder.get(0);
         announceAction("同分加赛", MuzTheme.field("抢地主", MuzTheme.warm("同分加赛").append(MuzTheme.divider(" · ")).append(orderedPlayersComponent(tieBreakOrder))));
         promptBidTurn();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
+        refreshAndRunBot();
     }
 
     private void resolveTieBreakRound() {
@@ -2207,7 +2213,7 @@ public final class GameTable {
     }
 
     private void executeBotPlay(UUID botId, int epoch) {
-        if (requestAiPlayDecision(botId, epoch)) {
+        if (botAiCoordinator.requestPlayDecision(botId, epoch)) {
             return;
         }
         executeLocalBotPlay(botId);
@@ -2215,27 +2221,16 @@ public final class GameTable {
 
     private void executeLocalBotPlay(UUID botId) {
         List<DoudizhuCard> hand = hands.getOrDefault(botId, List.of());
-        List<DoudizhuCard> move = SimpleBotBrain.choosePlay(hand, leadPlayer != null && !Objects.equals(leadPlayer, botId) ? currentPattern : null);
+        List<DoudizhuCard> move = SimpleBotBrain.choosePlay(
+            hand,
+            leadPlayer != null && !Objects.equals(leadPlayer, botId) ? currentPattern : null,
+            botPlayContext(botId)
+        );
         if (move.isEmpty()) {
             if (leadPlayer == null || Objects.equals(leadPlayer, botId)) {
                 move = List.of(hand.getLast());
             } else {
-                clearSelection(botId);
-                playEffectAll(PackSounds.autoPass());
-        announceAction(displayName(botId) + " 不要", actorUpdate(botId, MuzTheme.muted("不要"), "这轮先不压牌"));
-                UUID next = nextSeat(botId);
-                if (Objects.equals(next, leadPlayer)) {
-                    currentTurn = leadPlayer;
-                    currentPattern = null;
-                    currentTrickCards = List.of();
-        announceAction(displayName(leadPlayer) + " 获得先手", actorUpdate(leadPlayer, MuzTheme.warm("先手"), "拿到这一轮的先手"));
-                } else {
-                    currentTurn = next;
-                }
-                promptPlayTurn();
-                refreshHands();
-                refreshPhysicalTable();
-                runBotActionIfNeeded();
+                performBotPass(botId);
                 return;
             }
         }
@@ -2244,56 +2239,49 @@ public final class GameTable {
     }
 
     private void applyBotMove(UUID botId, List<DoudizhuCard> move) {
-        List<DoudizhuCard> hand = hands.getOrDefault(botId, List.of());
-        CardPattern pattern = PatternAnalyzer.analyze(move)
-            .orElseThrow(() -> new IllegalStateException("机器人生成了非法牌型。"));
-
-        hand.removeAll(move);
-        hand.sort(DoudizhuCard.ORDER);
-
-        UUID previousLead = leadPlayer;
-        currentPattern = pattern;
-        currentTrickCards = List.copyOf(move);
-        leadPlayer = botId;
-        boolean pressurePlay = previousLead != null && !Objects.equals(previousLead, botId);
-        boolean multiplierRaised = pattern.type().isBombFamily();
-        recordPlayedHand(botId);
-        if (multiplierRaised) {
-            bombMultiplier *= 2;
-        }
-
-        boolean threeCardsLeft = hand.size() == 3;
-        playPatternVoice(pattern, pattern.primaryRank(), pressurePlay, threeCardsLeft);
-        announceAction(
-            displayName(botId) + " " + pattern.displayName(),
-            actorUpdate(botId, MuzTheme.success(pattern.displayName()), move.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" ")))
+        MoveResolution resolution = applyMoveResolution(botId, move, false, "机器人生成了非法牌型。");
+        finalizePlayedMove(
+            botId,
+            resolution,
+            displayName(botId) + " " + resolution.pattern().displayName(),
+            MuzTheme.success(resolution.pattern().displayName()),
+            resolution.cardLabels()
         );
-        recordTrickEntry(botId, move, pattern);
-        if (multiplierRaised) {
-            announceAction("倍率抬升", MuzTheme.field("倍率", liveMultiplierComponent()));
-        }
-
-        if (hand.isEmpty()) {
-            finishRound(botId);
-            return;
-        }
-
-        currentTurn = nextSeat(botId);
-        promptPlayTurn();
-        refreshHands();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
     }
 
     private void performTimedOutPlay(UUID playerId, List<DoudizhuCard> move) {
+        MoveResolution resolution = applyMoveResolution(playerId, move, true, "超时托管生成了非法牌型。");
+        finalizePlayedMove(
+            playerId,
+            resolution,
+            displayName(playerId) + " 超时托管出牌",
+            MuzTheme.warning("超时托管"),
+            resolution.cardLabels()
+        );
+    }
+
+    private void performBotPass(UUID botId) {
+        finalizePass(botId, displayName(botId) + " 不要", MuzTheme.muted("不要"), "这轮先不压牌");
+    }
+
+    private void performTimedOutPass(UUID playerId) {
+        finalizePass(playerId, displayName(playerId) + " 超时托管不要", MuzTheme.muted("超时托管"), "这轮自动不要");
+    }
+
+
+    private void handleTimedOutPlayerTurn(UUID playerId, int epoch) {
+        timedOutPlayCoordinator.handleTimedOutPlayerTurn(playerId, epoch);
+    }
+
+    private MoveResolution applyMoveResolution(UUID playerId, List<DoudizhuCard> move, boolean clearSelectionFirst, String invalidMessage) {
         List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
         CardPattern pattern = PatternAnalyzer.analyze(move)
-            .orElseThrow(() -> new IllegalStateException("超时托管生成了非法牌型。"));
-
+            .orElseThrow(() -> new IllegalStateException(invalidMessage));
         hand.removeAll(move);
         hand.sort(DoudizhuCard.ORDER);
-        clearSelection(playerId);
-
+        if (clearSelectionFirst) {
+            clearSelection(playerId);
+        }
         UUID previousLead = leadPlayer;
         currentPattern = pattern;
         currentTrickCards = List.copyOf(move);
@@ -2304,32 +2292,69 @@ public final class GameTable {
         if (multiplierRaised) {
             bombMultiplier *= 2;
         }
-
-        boolean threeCardsLeft = hand.size() == 3;
-        playPatternVoice(pattern, pattern.primaryRank(), pressurePlay, threeCardsLeft);
-        announceAction(
-            displayName(playerId) + " 超时托管出牌",
-            actorUpdate(playerId, MuzTheme.warning("超时托管"), move.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" ")))
+        return new MoveResolution(
+            List.copyOf(move),
+            pattern,
+            move.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" ")),
+            pressurePlay,
+            multiplierRaised,
+            hand.size() == 3,
+            hand.size() == 2,
+            hand.isEmpty()
         );
-        recordTrickEntry(playerId, move, pattern);
-        if (multiplierRaised) {
+    }
+
+    private void finalizePlayedMove(UUID playerId, MoveResolution resolution, String title, Component badge, String detail) {
+        playPatternVoice(
+            resolution.pattern(),
+            resolution.pattern().primaryRank(),
+            resolution.pressurePlay(),
+            resolution.threeCardsLeft(),
+            resolution.twoCardsLeft()
+        );
+        announceAction(title, actorUpdate(playerId, badge, detail));
+        recordTrickEntry(playerId, resolution.move(), resolution.pattern());
+        if (resolution.threeCardsLeft()) {
+            announceChat(
+                displayName(playerId) + " 只剩三张牌了",
+                actorUpdate(playerId, MuzTheme.warning("三张预警"), "只剩三张牌了")
+            );
+        }
+        if (resolution.multiplierRaised()) {
             announceAction("倍率抬升", MuzTheme.field("倍率", liveMultiplierComponent()));
         }
-        if (hand.isEmpty()) {
+        if (resolution.handEmpty()) {
+            if (shouldIgnoreEarlyFinish(playerId)) {
+                return;
+            }
             finishRound(playerId);
             return;
         }
-        currentTurn = nextSeat(playerId);
-        promptPlayTurn();
-        refreshHands();
-        refreshPhysicalTable();
-        runBotActionIfNeeded();
+        advanceAfterResolvedTurn(playerId);
     }
 
-    private void performTimedOutPass(UUID playerId) {
+    private boolean shouldIgnoreEarlyFinish(UUID winner) {
+        if (phase != GamePhase.PLAYING || winner == null || roundStartedAtMillis <= 0L || seats.isEmpty()) {
+            return false;
+        }
+        if (System.currentTimeMillis() - roundStartedAtMillis > 2000L) {
+            return false;
+        }
+        return seats.stream().allMatch(seat -> hands.getOrDefault(seat, List.of()).isEmpty());
+    }
+
+    private void finalizePass(UUID playerId, String title, Component badge, String detail) {
         clearSelection(playerId);
         playEffectAll(PackSounds.autoPass());
-        announceAction(displayName(playerId) + " 超时托管不要", actorUpdate(playerId, MuzTheme.muted("超时托管"), "这轮自动不要"));
+        announceAction(title, actorUpdate(playerId, badge, detail));
+        advanceAfterResolvedTurn(playerId);
+    }
+
+    private void advanceAfterResolvedTurn(UUID playerId) {
+        advanceAfterResolvedTurn(playerId, true);
+    }
+
+    private void advanceAfterResolvedTurn(UUID playerId, boolean continueFlow) {
         UUID next = nextSeat(playerId);
         if (Objects.equals(next, leadPlayer)) {
             currentTurn = leadPlayer;
@@ -2339,452 +2364,232 @@ public final class GameTable {
         } else {
             currentTurn = next;
         }
+        if (!continueFlow) {
+            return;
+        }
         promptPlayTurn();
         refreshHands();
         refreshPhysicalTable();
         runBotActionIfNeeded();
     }
 
-    private boolean requestAiBidDecision(UUID botId, int epoch) {
-        AiChatGateway gateway = plugin.getAiChatGateway();
-        if (!plugin.isBotAiEnabled() || gateway == null) {
-            return false;
-        }
-        String prompt = buildBidAiPrompt(botId);
-        gateway.chatAsync(new AiChatGateway.ChatRequest(
-                List.of(
-                    AiChatGateway.Message.system(botAiSystemPrompt()),
-                    AiChatGateway.Message.user(prompt)
-                ),
-                plugin.aiModelName(),
-                0.2,
-                80
-            ))
-            .orTimeout(plugin.getBotAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> plugin.getServer().getScheduler().runTask(plugin, () -> {
-                if (!isAiDecisionStillValid(botId, epoch, GamePhase.BIDDING)) {
-                    return;
-                }
-                Integer parsed = error == null ? parseAiBidDecision(response) : null;
-                plugin.recordBotAiTrace(
-                    DoudizhuPlugin.BotGameType.DOUDIZHU,
-                    botId,
-                    name,
-                    "BIDDING",
-                    prompt,
-                    response,
-                    parsed == null ? "" : String.valueOf(parsed),
-                    parsed != null,
-                    parsed == null ? "fallback_local" : "",
-                    error == null ? "" : error.getMessage()
-                );
-                if (parsed == null) {
-                    executeLocalBotBid(botId);
-                    return;
-                }
-                int points = parsed;
-                if (bidRound == 1 && points != 0 && points < highestBid) {
-                    points = 0;
-                }
-                processBidChoice(botId, points);
-            }));
-        return true;
-    }
-
-    private boolean requestAiDoublingDecision(UUID botId, int epoch) {
-        AiChatGateway gateway = plugin.getAiChatGateway();
-        if (!plugin.isBotAiEnabled() || gateway == null) {
-            return false;
-        }
-        String prompt = buildDoublingAiPrompt(botId);
-        gateway.chatAsync(new AiChatGateway.ChatRequest(
-                List.of(
-                    AiChatGateway.Message.system(botAiSystemPrompt()),
-                    AiChatGateway.Message.user(prompt)
-                ),
-                plugin.aiModelName(),
-                0.2,
-                100
-            ))
-            .orTimeout(plugin.getBotAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> plugin.getServer().getScheduler().runTask(plugin, () -> {
-                if (!isAiDecisionStillValid(botId, epoch, GamePhase.DOUBLING)) {
-                    return;
-                }
-                String parsed = error == null ? parseAiKeywordDecision(response) : null;
-                plugin.recordBotAiTrace(
-                    DoudizhuPlugin.BotGameType.DOUDIZHU,
-                    botId,
-                    name,
-                    "DOUBLING",
-                    prompt,
-                    response,
-                    parsed == null ? "" : parsed,
-                    parsed != null,
-                    parsed == null ? "fallback_local" : "",
-                    error == null ? "" : error.getMessage()
-                );
-                if (parsed == null) {
-                    executeLocalBotDouble(botId);
-                    return;
-                }
-                switch (parsed) {
-                    case "DOUBLE" -> processDoublingChoice(botId, 2, false, false);
-                    default -> processDoublingChoice(botId, 1, false, false);
-                }
-            }));
-        return true;
-    }
-
-    private boolean requestAiPlayDecision(UUID botId, int epoch) {
-        AiChatGateway gateway = plugin.getAiChatGateway();
-        if (!plugin.isBotAiEnabled() || gateway == null) {
-            return false;
-        }
-        String prompt = buildPlayAiPrompt(botId);
-        gateway.chatAsync(new AiChatGateway.ChatRequest(
-                List.of(
-                    AiChatGateway.Message.system(botAiSystemPrompt()),
-                    AiChatGateway.Message.user(prompt)
-                ),
-                plugin.aiModelName(),
-                0.2,
-                140
-            ))
-            .orTimeout(plugin.getBotAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> plugin.getServer().getScheduler().runTask(plugin, () -> {
-                if (!isAiDecisionStillValid(botId, epoch, GamePhase.PLAYING)) {
-                    return;
-                }
-                List<DoudizhuCard> aiMove = error == null ? parseAiPlayDecision(botId, response) : null;
-                String parsedDecision = aiMove == null
-                    ? ""
-                    : aiMove.isEmpty()
-                        ? "PASS"
-                        : aiMove.stream().map(card -> Integer.toString(card.id())).collect(Collectors.joining(","));
-                plugin.recordBotAiTrace(
-                    DoudizhuPlugin.BotGameType.DOUDIZHU,
-                    botId,
-                    name,
-                    "PLAYING",
-                    prompt,
-                    response,
-                    parsedDecision,
-                    aiMove != null,
-                    aiMove == null ? "fallback_local" : "",
-                    error == null ? "" : error.getMessage()
-                );
-                if (aiMove == null) {
-                    executeLocalBotPlay(botId);
-                    return;
-                }
-                if (aiMove.isEmpty()) {
-                    if (leadPlayer == null || Objects.equals(leadPlayer, botId)) {
-                        executeLocalBotPlay(botId);
-                        return;
-                    }
-                    clearSelection(botId);
-                    playEffectAll(PackSounds.autoPass());
-                    announceAction(displayName(botId) + " 不要", actorUpdate(botId, MuzTheme.muted("不要"), "这轮先不压牌"));
-                    UUID next = nextSeat(botId);
-                    if (Objects.equals(next, leadPlayer)) {
-                        currentTurn = leadPlayer;
-                        currentPattern = null;
-                        currentTrickCards = List.of();
-                        announceAction(displayName(leadPlayer) + " 获得先手", actorUpdate(leadPlayer, MuzTheme.warm("先手"), "拿到这一轮的先手"));
-                    } else {
-                        currentTurn = next;
-                    }
-                    promptPlayTurn();
-                    refreshHands();
-                    refreshPhysicalTable();
-                    runBotActionIfNeeded();
-                    return;
-                }
-                applyBotMove(botId, aiMove);
-            }));
-        return true;
-    }
-
-    private boolean isAiDecisionStillValid(UUID botId, int epoch, GamePhase expectedPhase) {
-        return canScheduleTasks()
-            && epoch == botActionEpoch
-            && phase == expectedPhase
-            && currentTurn != null
-            && Objects.equals(currentTurn, botId)
-            && isBot(botId);
-    }
-
-    private void handleTimedOutPlayerTurn(UUID playerId, int epoch) {
-        if (pendingTimedOutPlayDecisionPlayer != null
-            && pendingTimedOutPlayDecisionPlayer.equals(playerId)
-            && pendingTimedOutPlayDecisionEpoch == epoch) {
-            return;
-        }
-        pendingTimedOutPlayDecisionPlayer = playerId;
-        pendingTimedOutPlayDecisionEpoch = epoch;
-        if (requestAiTimedOutPlayDecision(playerId, epoch)) {
-            return;
-        }
-        executeDefaultTimedOutPlayDecision(playerId);
-    }
-
-    private boolean requestAiTimedOutPlayDecision(UUID playerId, int epoch) {
-        AiChatGateway gateway = plugin.getAiChatGateway();
-        if (!plugin.isDeepseekAiEnabled() || gateway == null || !gateway.isEnabled()) {
-            return false;
-        }
-        String prompt = buildTimedOutPlayAiPrompt(playerId);
-        gateway.chatAsync(new AiChatGateway.ChatRequest(
-                List.of(
-                    AiChatGateway.Message.system(timedOutPlayAiSystemPrompt()),
-                    AiChatGateway.Message.user(prompt)
-                ),
-                plugin.aiModelName(),
-                0.2,
-                140
-            ))
-            .orTimeout(plugin.getBotAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> plugin.getServer().getScheduler().runTask(plugin, () -> {
-                if (!isTimedOutPlayDecisionStillValid(playerId, epoch)) {
-                    clearPendingTimedOutPlayDecision(playerId, epoch);
-                    return;
-                }
-                List<DoudizhuCard> aiMove = error == null ? parseAiPlayDecision(playerId, response) : null;
-                if (aiMove == null) {
-                    executeDefaultTimedOutPlayDecision(playerId);
-                    return;
-                }
-                if (aiMove.isEmpty()) {
-                    if (leadPlayer == null || Objects.equals(leadPlayer, playerId)) {
-                        executeDefaultTimedOutPlayDecision(playerId);
-                        return;
-                    }
-                    clearPendingTimedOutPlayDecision(playerId, epoch);
-                    performTimedOutPass(playerId);
-                    return;
-                }
-                clearPendingTimedOutPlayDecision(playerId, epoch);
-                performTimedOutPlay(playerId, aiMove);
-            }));
-        return true;
-    }
-
     private void executeDefaultTimedOutPlayDecision(UUID playerId) {
-        List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
-        List<DoudizhuCard> move = SimpleBotBrain.choosePlay(hand, leadPlayer != null && !Objects.equals(leadPlayer, playerId) ? currentPattern : null);
-        clearPendingTimedOutPlayDecision(playerId, pendingTimedOutPlayDecisionEpoch);
+        List<DoudizhuCard> move = resolveDefaultAutoPlayMove(playerId);
         if (move.isEmpty()) {
-            if (leadPlayer == null || Objects.equals(leadPlayer, playerId)) {
-                if (!hand.isEmpty()) {
-                    move = List.of(hand.getLast());
-                } else {
-                    return;
-                }
-            } else {
-                performTimedOutPass(playerId);
+            if (canLeadCurrentTrick(playerId)) {
                 return;
             }
+            performTimedOutPass(playerId);
+            return;
         }
         performTimedOutPlay(playerId, move);
     }
 
-    private boolean isTimedOutPlayDecisionStillValid(UUID playerId, int epoch) {
-        return canScheduleTasks()
-            && epoch == botActionEpoch
-            && phase == GamePhase.PLAYING
-            && currentTurn != null
-            && Objects.equals(currentTurn, playerId)
-            && !isBot(playerId);
+    private List<DoudizhuCard> resolveDefaultAutoPlayMove(UUID playerId) {
+        List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
+        List<DoudizhuCard> move = SimpleBotBrain.choosePlay(hand, canLeadCurrentTrick(playerId) ? null : currentPattern, botPlayContext(playerId));
+        if (!move.isEmpty()) {
+            return move;
+        }
+        if (canLeadCurrentTrick(playerId) && !hand.isEmpty()) {
+            return List.of(hand.getLast());
+        }
+        return List.of();
     }
 
-    private void clearPendingTimedOutPlayDecision(UUID playerId, int epoch) {
-        if (pendingTimedOutPlayDecisionPlayer != null
-            && pendingTimedOutPlayDecisionPlayer.equals(playerId)
-            && pendingTimedOutPlayDecisionEpoch == epoch) {
-            pendingTimedOutPlayDecisionPlayer = null;
-            pendingTimedOutPlayDecisionEpoch = Integer.MIN_VALUE;
+    private boolean canLeadCurrentTrick(UUID playerId) {
+        return leadPlayer == null || Objects.equals(leadPlayer, playerId);
+    }
+
+    private int normalizeBidDecision(int points) {
+        if (bidRound == 1 && points != 0 && points < highestBid) {
+            return 0;
         }
+        return points;
+    }
+
+    private SimpleBotBrain.PlayContext botPlayContext(UUID playerId) {
+        List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
+        return new SimpleBotBrain.PlayContext(canLeadCurrentTrick(playerId), hand.size(), minOpponentHandCount(playerId));
+    }
+
+    private int minOpponentHandCount(UUID playerId) {
+        return seats.stream()
+            .filter(seat -> !Objects.equals(seat, playerId))
+            .filter(seat -> isOpponentSeat(playerId, seat))
+            .mapToInt(seat -> hands.getOrDefault(seat, List.of()).size())
+            .min()
+            .orElse(Integer.MAX_VALUE);
+    }
+
+    private boolean isOpponentSeat(UUID viewerId, UUID targetId) {
+        if (viewerId == null || targetId == null || Objects.equals(viewerId, targetId) || landlord == null) {
+            return false;
+        }
+        boolean viewerLandlord = Objects.equals(viewerId, landlord);
+        boolean targetLandlord = Objects.equals(targetId, landlord);
+        return viewerLandlord != targetLandlord;
+    }
+
+    private String aiIdentityLabel(UUID playerId) {
+        if (playerId == null) {
+            return "未知身份";
+        }
+        if (Objects.equals(playerId, landlord)) {
+            return "地主";
+        }
+        if (landlord != null && seats.contains(playerId)) {
+            return "农民";
+        }
+        return "未定";
+    }
+
+    private String aiTableStateSummary(UUID playerId) {
+        StringBuilder builder = new StringBuilder();
+        for (UUID seat : seats) {
+            if (seat == null) {
+                continue;
+            }
+            String relation = Objects.equals(seat, playerId)
+                ? "自己"
+                : isOpponentSeat(playerId, seat)
+                    ? "对手"
+                    : "队友";
+            builder.append("- ")
+                .append(displayName(seat))
+                .append("：")
+                .append(relation)
+                .append("，")
+                .append(aiIdentityLabel(seat))
+                .append("，剩余 ")
+                .append(hands.getOrDefault(seat, List.of()).size())
+                .append(" 张");
+            if (Objects.equals(seat, leadPlayer)) {
+                builder.append("，本轮先手");
+            }
+            if (Objects.equals(seat, currentTurn)) {
+                builder.append("，当前行动");
+            }
+            builder.append('\n');
+        }
+        int minOpponent = minOpponentHandCount(playerId);
+        if (minOpponent == Integer.MAX_VALUE) {
+            builder.append("- 对手剩牌压力：未知");
+        } else {
+            builder.append("- 对手剩牌压力：最近的对手还剩 ").append(minOpponent).append(" 张");
+        }
+        return builder.toString();
+    }
+
+    private String conservativeAiSuggestion(UUID playerId) {
+        List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
+        List<DoudizhuCard> move = SimpleBotBrain.choosePlay(hand, canLeadCurrentTrick(playerId) ? null : currentPattern, botPlayContext(playerId));
+        if (move.isEmpty()) {
+            return canLeadCurrentTrick(playerId) ? "没有稳定组合时，优先拆低风险小牌起手，不要先手开炸。" : "PASS";
+        }
+        CardPattern pattern = PatternAnalyzer.analyze(move).orElse(null);
+        String ids = move.stream().map(card -> Integer.toString(card.id())).collect(Collectors.joining(","));
+        if (pattern == null) {
+            return ids;
+        }
+        return describeCards(move, pattern) + "（id: " + ids + "）";
+    }
+
+    private void recordBotAiTrace(
+        UUID botId,
+        String stage,
+        String prompt,
+        AiChatGateway.ChatResponse response,
+        String parsedDecision,
+        boolean applied,
+        String fallbackReason,
+        String errorMessage
+    ) {
+        plugin.recordBotAiTrace(
+            DoudizhuPlugin.BotGameType.DOUDIZHU,
+            botId,
+            name,
+            stage,
+            prompt,
+            response,
+            parsedDecision,
+            applied,
+            fallbackReason,
+            errorMessage
+        );
     }
 
     private String timedOutPlayAiSystemPrompt() {
-        return "你是 MUZ 斗地主超时托管决策引擎。现在要替一名超时玩家自动出牌。"
-            + "你只能依据给出的牌桌状态选择一个最合适、最稳妥、合法的出牌方案。"
-            + "你必须只输出 PASS 或者手牌 id 列表，不要解释。";
+        return BotAiDecisionCodec.timedOutSystemPrompt();
     }
 
     private String buildTimedOutPlayAiPrompt(UUID playerId) {
-        return """
-            当前阶段：玩家超时托管出牌
-            玩家名字：%s
-            上一手：%s
-            你的手牌：
-            %s
-            只允许两种输出：
-            1. PASS
-            2. 只输出手牌 id，用英文逗号分隔，例如：12,18
-            规则：
-            - 如果你是先手，不能输出 PASS
-            - 必须选择当前最合适、合法、尽量稳妥的一手
-            - 不要输出解释
-            """.formatted(
+        return BotAiDecisionCodec.buildTimedOutPlayPrompt(
             displayName(playerId),
+            aiIdentityLabel(playerId),
+            aiTableStateSummary(playerId),
             currentPattern == null || currentTrickCards.isEmpty() ? "无，你是先手或这一轮已重置" : describeCards(currentTrickCards, currentPattern),
-            handSummaryLines(hands.getOrDefault(playerId, List.of()))
+            hands.getOrDefault(playerId, List.of()),
+            conservativeAiSuggestion(playerId)
         );
     }
 
     private String botAiSystemPrompt() {
-        return "你是 MUZ 斗地主机器人决策引擎。你只能根据给出的牌桌信息做决策。"
-            + "你必须只输出要求的结果格式，不要解释，不要寒暄，不要额外标点。"
-            + "如果拿不准，也必须在允许格式里给出一个保守合法答案。";
+        return BotAiDecisionCodec.botSystemPrompt();
     }
 
     private String buildBidAiPrompt(UUID botId) {
-        List<DoudizhuCard> hand = hands.getOrDefault(botId, List.of());
-        String roundText = bidRound == 1 ? "第一轮叫分" : "同分加赛抢地主";
-        return """
-            当前阶段：%s
-            你的名字：%s
-            当前最高分：%d
-            你的手牌：%s
-            只输出一个数字：0 或 1 或 2 或 3
-            规则：
-            - 不想叫分就输出 0
-            - 第一轮时，非零分不能低于当前最高分
-            - 不要输出任何解释
-            """.formatted(roundText, displayName(botId), highestBid, handSummary(hand));
+        return BotAiDecisionCodec.buildBidPrompt(displayName(botId), bidRound, highestBid, hands.getOrDefault(botId, List.of()));
     }
 
     private String buildDoublingAiPrompt(UUID botId) {
-        return """
-            当前阶段：加倍决策
-            你的名字：%s
-            你的身份：%s
-            当前基础倍率：%d
-            你的手牌：%s
-            只输出一个词：PASS 或 DOUBLE
-            规则：
-            - PASS 表示不加倍
-            - DOUBLE 表示加倍
-            - 不要输出解释
-            """.formatted(
+        return BotAiDecisionCodec.buildDoublingPrompt(
             displayName(botId),
-            Objects.equals(botId, landlord) ? "地主" : "农民",
+            Objects.equals(botId, landlord),
             Math.max(1, highestBid) * bombMultiplier,
-            handSummary(hands.getOrDefault(botId, List.of()))
+            hands.getOrDefault(botId, List.of())
         );
     }
 
     private String buildPlayAiPrompt(UUID botId) {
-        List<DoudizhuCard> hand = hands.getOrDefault(botId, List.of());
-        String targetText = currentPattern == null || currentTrickCards.isEmpty()
-            ? "无，你是先手或这一轮已重置"
-            : describeCards(currentTrickCards, currentPattern);
-        String leadText = leadPlayer == null ? "无" : displayName(leadPlayer);
-        return """
-            当前阶段：出牌
-            你的名字：%s
-            当前先手：%s
-            上一手：%s
-            你的手牌：
-            %s
-            只允许两种输出：
-            1. PASS
-            2. 只输出手牌 id，用英文逗号分隔，例如：12,18
-            规则：
-            - 如果你是先手，不能输出 PASS
-            - 只能从你当前手牌里选 id
-            - 必须保证选出的牌是合法牌型；如果要压上一手，必须能压过
-            - 不要输出任何解释
-            """.formatted(displayName(botId), leadText, targetText, handSummaryLines(hand));
-    }
-
-    private String handSummary(List<DoudizhuCard> hand) {
-        return hand.stream()
-            .map(card -> card.id() + ":" + card.displayLabel())
-            .collect(Collectors.joining(" "));
-    }
-
-    private String handSummaryLines(List<DoudizhuCard> hand) {
-        return hand.stream()
-            .map(card -> "- " + card.id() + " = " + card.displayLabel())
-            .collect(Collectors.joining("\n"));
+        return BotAiDecisionCodec.buildPlayPrompt(
+            displayName(botId),
+            aiIdentityLabel(botId),
+            aiTableStateSummary(botId),
+            leadPlayer == null ? "无" : displayName(leadPlayer),
+            currentPattern == null || currentTrickCards.isEmpty() ? "无，你是先手或这一轮已重置" : describeCards(currentTrickCards, currentPattern),
+            hands.getOrDefault(botId, List.of()),
+            conservativeAiSuggestion(botId)
+        );
     }
 
     private Integer parseAiBidDecision(AiChatGateway.ChatResponse response) {
-        String content = aiDecisionContent(response);
-        if (content.isBlank()) {
-            return null;
-        }
-        for (String token : content.replaceAll("[^0-3]", " ").trim().split("\\s+")) {
-            if (token.matches("[0-3]")) {
-                return Integer.parseInt(token);
-            }
-        }
-        return null;
+        return BotAiDecisionCodec.parseBidDecision(response);
     }
 
     private String parseAiKeywordDecision(AiChatGateway.ChatResponse response) {
-        String content = aiDecisionContent(response).toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
-        if (content.contains("DOUBLE")) {
-            return "DOUBLE";
-        }
-        if (content.contains("PASS")) {
-            return "PASS";
-        }
-        return null;
+        return BotAiDecisionCodec.parseKeywordDecision(response);
     }
 
     private List<DoudizhuCard> parseAiPlayDecision(UUID botId, AiChatGateway.ChatResponse response) {
-        String content = aiDecisionContent(response).trim();
-        if (content.isBlank()) {
-            return null;
-        }
-        if (content.toUpperCase(Locale.ROOT).contains("PASS")) {
-            return List.of();
-        }
-        List<Integer> ids = new ArrayList<>();
-        for (String token : content.replaceAll("[^0-9,]", "").split(",")) {
-            if (!token.isBlank()) {
-                try {
-                    ids.add(Integer.parseInt(token));
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
-        if (ids.isEmpty()) {
-            return null;
-        }
-        List<DoudizhuCard> hand = new ArrayList<>(hands.getOrDefault(botId, List.of()));
-        List<DoudizhuCard> chosen = new ArrayList<>();
-        for (Integer id : ids) {
-            DoudizhuCard matched = hand.stream().filter(card -> card.id() == id).findFirst().orElse(null);
-            if (matched == null) {
-                return null;
-            }
-            chosen.add(matched);
-            hand.remove(matched);
-        }
-        CardPattern analyzed = PatternAnalyzer.analyze(chosen).orElse(null);
-        if (analyzed == null) {
-            return null;
-        }
-        if (leadPlayer != null && !Objects.equals(leadPlayer, botId) && currentPattern != null && !analyzed.canBeat(currentPattern)) {
-            return null;
-        }
-        return chosen;
+        return BotAiDecisionCodec.parsePlayDecision(
+            new BotAiDecisionCodec.UUIDOwnerHand(botId, hands.getOrDefault(botId, List.of())),
+            currentPattern,
+            new BotAiDecisionCodec.UUIDHolder(leadPlayer),
+            response
+        );
     }
 
-    private String aiDecisionContent(AiChatGateway.ChatResponse response) {
-        if (response == null) {
-            return "";
-        }
-        String content = response.content();
-        if (content == null || content.isBlank()) {
-            content = response.reasoningContent();
-        }
-        return content == null ? "" : content.trim();
+    private record MoveResolution(
+        List<DoudizhuCard> move,
+        CardPattern pattern,
+        String cardLabels,
+        boolean pressurePlay,
+        boolean multiplierRaised,
+        boolean threeCardsLeft,
+        boolean twoCardsLeft,
+        boolean handEmpty
+    ) {
     }
 }
 

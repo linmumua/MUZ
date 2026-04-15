@@ -16,10 +16,12 @@ public final class HandInventoryHolder implements InventoryHolder {
         DDZ_CARDS,
         DDZ_LABELS,
         DDZ_TEXT,
+        DDZ_SEAT_TEXT,
         DDZ_HITBOX,
         DDZ_AUDIO,
         DDZ_PLAYER_OPTIONS,
         DDZ_BOTS,
+        DDZ_AI,
         TEXAS_FURNITURE,
         TEXAS_BUTTONS,
         TEXAS_CARDS,
@@ -29,7 +31,9 @@ public final class HandInventoryHolder implements InventoryHolder {
         GLOBAL_HIGHLIGHT,
         GLOBAL_AVATARS,
         GLOBAL_STATUS_AVATARS,
-        GLOBAL_SEAT_AVATARS
+        GLOBAL_STATUS_NAMES,
+        GLOBAL_SEAT_AVATARS,
+        GLOBAL_SEAT_NAMES
     }
 
     public enum ViewMode {
@@ -58,6 +62,7 @@ public final class HandInventoryHolder implements InventoryHolder {
         ADMIN_AI_URL,
         ADMIN_AI_KEY,
         ADMIN_AI_MODEL,
+        ADMIN_AI_SYSTEM_PROMPT,
         ADMIN_HOVER_GLOW,
         ADMIN_SELECTED_GLOW
     }

@@ -29,6 +29,7 @@ import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
@@ -42,6 +43,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.util.Transformation;
 import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
@@ -319,12 +321,18 @@ public final class PhysicalTableManager {
         if (placed.statusAvatarNameDisplayId() == null || Bukkit.getEntity(placed.statusAvatarNameDisplayId()) == null) {
             missing.add("status-avatar-name");
         }
-        if (placed.seatAvatarDisplayIds().size() < 3 || placed.seatInfoDisplayIds().size() < 3) {
+        if (placed.seatAvatarDisplayIds().size() < 3 || placed.seatNameDisplayIds().size() < 3 || placed.seatInfoDisplayIds().size() < 3) {
             missing.add("seat-display-count");
         }
         for (UUID id : placed.seatAvatarDisplayIds()) {
             if (Bukkit.getEntity(id) == null) {
                 missing.add("seat-avatar");
+                break;
+            }
+        }
+        for (UUID id : placed.seatNameDisplayIds()) {
+            if (Bukkit.getEntity(id) == null) {
+                missing.add("seat-name");
                 break;
             }
         }
@@ -470,6 +478,7 @@ public final class PhysicalTableManager {
             showPublicEntitiesTo(viewer, placed.staticEntities());
             showPublicEntitiesTo(viewer, placed.publicEntities());
             showPublicEntitiesTo(viewer, placed.seatAvatarDisplayIds());
+            showPublicEntitiesTo(viewer, placed.seatNameDisplayIds());
             showPublicEntitiesTo(viewer, placed.seatInfoDisplayIds());
             if (placed.statusDisplayId() != null) {
                 showPublicEntitiesTo(viewer, List.of(placed.statusDisplayId()));
@@ -559,8 +568,6 @@ public final class PhysicalTableManager {
                     }
                     case DOUBLE_NO -> table.chooseDouble(player, false);
                     case DOUBLE_YES -> table.chooseDouble(player, true);
-                    case MING_PAI -> table.chooseMingPai(player);
-                    case SUPER_DOUBLE -> table.chooseSuperDouble(player);
                     case OPEN_SETTINGS -> {
                         plugin.getHandGuiService().openSettings(player);
                         hint(player, "已打开你的个人微调菜单。", NamedTextColor.GREEN);
@@ -879,6 +886,7 @@ public final class PhysicalTableManager {
             null,
             new ArrayList<>(),
             new ArrayList<>(),
+            new ArrayList<>(),
             new ArrayList<>()
         );
 
@@ -923,29 +931,36 @@ public final class PhysicalTableManager {
             Location seatBase = chairPlacement.seatBaseLocation();
             placed.seatBaseLocations().add(seatBase.clone());
 
-            // HARD-CODED AVATAR SPLIT:
-            // Keep the chair-side avatar and the chair-side name/info as separate TextDisplays.
-            // The user wants these to stay independently scalable and movable, with the name block fixed below the avatar.
-            // Do not merge them back into one display unless the user explicitly asks.
-            TextDisplay seatAvatar = spawnText(
+            // HARD-CODED AVATAR / NAME / META SPLIT:
+            // Chair-side avatar, chair-side player name, and chair-side meta text must stay as three separate display entities.
+            // Avatar now uses an ItemDisplay with a real PLAYER_HEAD to avoid player-head text-object refresh issues.
+            ItemDisplay seatAvatar = spawnAvatarDisplay(
                 seatAvatarLocation(seatBase, yaw),
-                seatAvatar(table, index),
-                Display.Billboard.CENTER,
-                false,
+                seatAvatarItem(table, index),
                 seatAvatarScale()
             );
             staticEntities.add(seatAvatar.getUniqueId());
             placed.seatAvatarDisplayIds().add(seatAvatar.getUniqueId());
 
-            TextDisplay seatLabel = spawnText(
-                seatInfoLocation(seatBase, yaw),
+            TextDisplay seatName = spawnText(
+                seatNameLocation(table, index, seatBase, yaw),
+                seatName(table, index),
+                Display.Billboard.CENTER,
+                false,
+                seatNameScale(table, index)
+            );
+            staticEntities.add(seatName.getUniqueId());
+            placed.seatNameDisplayIds().add(seatName.getUniqueId());
+
+            TextDisplay seatInfo = spawnText(
+                seatInfoLocation(table, index, seatBase, yaw),
                 seatInfo(table, index),
                 Display.Billboard.CENTER,
                 false,
                 plugin.getSmallTextScale()
             );
-            staticEntities.add(seatLabel.getUniqueId());
-            placed.seatInfoDisplayIds().add(seatLabel.getUniqueId());
+            staticEntities.add(seatInfo.getUniqueId());
+            placed.seatInfoDisplayIds().add(seatInfo.getUniqueId());
         }
 
         TextDisplay status = spawnText(
@@ -960,24 +975,21 @@ public final class PhysicalTableManager {
 
         // HARD-CODED STATUS AVATAR SPLIT:
         // The top-bar avatar and the top-bar name are intentionally separate from the status text body.
-        // This allows admin-side size/position tuning without dragging the whole status text around, and keeps
-        // the displayed name fixed below the avatar instead of embedding a head object inline inside the banner text.
-        TextDisplay statusAvatar = spawnText(
+        // Avatar now uses an ItemDisplay with a real PLAYER_HEAD instead of a player-head text object.
+        ItemDisplay statusAvatar = spawnAvatarDisplay(
             statusAvatarLocation(anchor, yaw),
-            statusAvatar(table),
-            Display.Billboard.CENTER,
-            false,
+            statusAvatarItem(table),
             statusAvatarScale()
         );
         placed = placed.withStatusAvatarDisplayId(statusAvatar.getUniqueId());
         staticEntities.add(statusAvatar.getUniqueId());
 
         TextDisplay statusAvatarName = spawnText(
-            statusAvatarNameLocation(anchor, yaw),
+            statusAvatarNameLocation(table, anchor, yaw),
             statusAvatarName(table),
             Display.Billboard.CENTER,
             false,
-            plugin.getSmallTextScale()
+            statusNameScale()
         );
         placed = placed.withStatusAvatarNameDisplayId(statusAvatarName.getUniqueId());
         staticEntities.add(statusAvatarName.getUniqueId());
@@ -1119,7 +1131,13 @@ public final class PhysicalTableManager {
                     clearEntities(new ArrayList<>(List.of(removedId)), false);
                 }
                 icon = spawnFlatButtonItem(spec.iconLocation(), spec.iconItem(), plugin.getButtonScale(), spec.yaw());
-                label = spawnText(spec.labelLocation(), spec.labelText(), Display.Billboard.CENTER, false, buttonLabelTextScale());
+                label = spawnText(
+                    spec.labelLocation(),
+                    spec.labelText(),
+                    Display.Billboard.CENTER,
+                    false,
+                    spec.joinVisibility() ? joinLabelTextScale() : actionLabelTextScale()
+                );
                 mountTextDisplay(icon, label, spec.labelLocation(), false);
                 interaction = spawnInteraction(spec.interactionLocation(), actionHitboxWidth(spec.binding()), actionHitboxHeight(spec.binding()));
                 placed.actionEntities().add(icon.getUniqueId());
@@ -1181,7 +1199,7 @@ public final class PhysicalTableManager {
     private void refreshStatusAvatar(GameTable table, PlacedTable placed) {
         if (placed.statusAvatarDisplayId() != null) {
             Entity avatar = Bukkit.getEntity(placed.statusAvatarDisplayId());
-            updateTextEntity(avatar, statusAvatar(table));
+            updateAvatarEntity(avatar, statusAvatarItem(table));
             if (avatar != null) {
                 teleportIfMoved(avatar, statusAvatarLocation(placed.anchor(), placed.yaw()));
             }
@@ -1190,7 +1208,7 @@ public final class PhysicalTableManager {
             Entity name = Bukkit.getEntity(placed.statusAvatarNameDisplayId());
             updateTextEntity(name, statusAvatarName(table));
             if (name != null) {
-                teleportIfMoved(name, statusAvatarNameLocation(placed.anchor(), placed.yaw()));
+                teleportIfMoved(name, statusAvatarNameLocation(table, placed.anchor(), placed.yaw()));
             }
         }
     }
@@ -1198,16 +1216,23 @@ public final class PhysicalTableManager {
     private void refreshSeatInfos(GameTable table, PlacedTable placed) {
         for (int index = 0; index < placed.seatAvatarDisplayIds().size(); index++) {
             Entity entity = Bukkit.getEntity(placed.seatAvatarDisplayIds().get(index));
-            updateTextEntity(entity, seatAvatar(table, index));
+            updateAvatarEntity(entity, seatAvatarItem(table, index));
             if (entity != null && index < placed.seatBaseLocations().size()) {
                 teleportIfMoved(entity, seatAvatarLocation(placed.seatBaseLocations().get(index), placed.yaw()));
+            }
+        }
+        for (int index = 0; index < placed.seatNameDisplayIds().size(); index++) {
+            Entity entity = Bukkit.getEntity(placed.seatNameDisplayIds().get(index));
+            updateTextEntity(entity, seatName(table, index));
+            if (entity != null && index < placed.seatBaseLocations().size()) {
+                teleportIfMoved(entity, seatNameLocation(table, index, placed.seatBaseLocations().get(index), placed.yaw()));
             }
         }
         for (int index = 0; index < placed.seatInfoDisplayIds().size(); index++) {
             Entity entity = Bukkit.getEntity(placed.seatInfoDisplayIds().get(index));
             updateTextEntity(entity, seatInfo(table, index));
             if (entity != null && index < placed.seatBaseLocations().size()) {
-                teleportIfMoved(entity, seatInfoLocation(placed.seatBaseLocations().get(index), placed.yaw()));
+                teleportIfMoved(entity, seatInfoLocation(table, index, placed.seatBaseLocations().get(index), placed.yaw()));
             }
         }
         updateSeatInfoVisibility(table, placed);
@@ -1231,6 +1256,20 @@ public final class PhysicalTableManager {
                 }
             }
         }
+        for (int index = 0; index < placed.seatNameDisplayIds().size(); index++) {
+            Entity entity = Bukkit.getEntity(placed.seatNameDisplayIds().get(index));
+            if (entity == null) {
+                continue;
+            }
+            UUID owner = placed.seatAssignments().get(index);
+            for (Player viewer : Bukkit.getOnlinePlayers()) {
+                if (owner != null && viewer.getUniqueId().equals(owner) && !table.isBot(owner)) {
+                    viewer.hideEntity(plugin, entity);
+                } else {
+                    viewer.showEntity(plugin, entity);
+                }
+            }
+        }
         for (int index = 0; index < placed.seatInfoDisplayIds().size(); index++) {
             Entity entity = Bukkit.getEntity(placed.seatInfoDisplayIds().get(index));
             if (entity == null) {
@@ -1242,6 +1281,37 @@ public final class PhysicalTableManager {
                     viewer.hideEntity(plugin, entity);
                 } else {
                     viewer.showEntity(plugin, entity);
+                }
+            }
+        }
+    }
+
+    private void updateStatusAvatarVisibility(GameTable table, PlacedTable placed) {
+        if (plugin.isShuttingDown()) {
+            return;
+        }
+        UUID focus = statusFocusPlayer(table);
+        if (placed.statusAvatarDisplayId() != null) {
+            Entity entity = Bukkit.getEntity(placed.statusAvatarDisplayId());
+            if (entity != null) {
+                for (Player viewer : Bukkit.getOnlinePlayers()) {
+                    if (focus != null && viewer.getUniqueId().equals(focus) && !table.isBot(focus)) {
+                        viewer.hideEntity(plugin, entity);
+                    } else {
+                        viewer.showEntity(plugin, entity);
+                    }
+                }
+            }
+        }
+        if (placed.statusAvatarNameDisplayId() != null) {
+            Entity entity = Bukkit.getEntity(placed.statusAvatarNameDisplayId());
+            if (entity != null) {
+                for (Player viewer : Bukkit.getOnlinePlayers()) {
+                    if (focus != null && viewer.getUniqueId().equals(focus) && !table.isBot(focus)) {
+                        viewer.hideEntity(plugin, entity);
+                    } else {
+                        viewer.showEntity(plugin, entity);
+                    }
                 }
             }
         }
@@ -1317,7 +1387,7 @@ public final class PhysicalTableManager {
                 center.z() + adjustment.z() + step.z() * delta + depth.z() * delta
             );
             double lift = selectedCardLift(isSelected, false);
-            ItemDisplay cardDisplay = spawnPlacedCard(cardBaseLocation, table.isMingPai(playerId) ? cardItem(card) : backCardItem(), privateCardScale(false, false), cardYaw, (float) lift);
+            ItemDisplay cardDisplay = spawnPlacedCard(cardBaseLocation, backCardItem(), privateCardScale(false, false), cardYaw, (float) lift);
             applyCardGlow(cardDisplay, playerId, isSelected, false);
             spawned.add(cardDisplay.getUniqueId());
             visuals.put(card.id(), cardDisplay.getUniqueId());
@@ -1589,7 +1659,7 @@ public final class PhysicalTableManager {
             }
             List<DoudizhuCard> selectedCards = selectedCards(table, playerId);
             boolean hasCurrentTrick = !table.getCurrentTrickCards().isEmpty();
-            boolean showOpponentRow = hasCurrentTrick && selectedCards.isEmpty();
+            boolean showOpponentRow = hasCurrentTrick && plugin.isOpponentPreviewEnabledFor(playerId);
             if (!showOpponentRow && selectedCards.isEmpty()) {
                 continue;
             }
@@ -1695,14 +1765,11 @@ public final class PhysicalTableManager {
         if (table.isBot(playerId)) {
             return;
         }
-        List<UUID> viewerEntities = placed.viewerTrickEntitiesByPlayer().get(playerId);
-        if (viewerEntities == null || viewerEntities.isEmpty()) {
-            return;
-        }
         List<DoudizhuCard> selectedCards = selectedCards(table, playerId);
         boolean hasCurrentTrick = !table.getCurrentTrickCards().isEmpty();
-        boolean showOpponentRow = hasCurrentTrick && selectedCards.isEmpty();
+        boolean showOpponentRow = hasCurrentTrick && plugin.isOpponentPreviewEnabledFor(playerId);
         if (!showOpponentRow && selectedCards.isEmpty()) {
+            clearViewerTrickEntities(placed, playerId);
             return;
         }
         List<PreviewCardSpec> specs = new ArrayList<>();
@@ -1734,21 +1801,8 @@ public final class PhysicalTableManager {
                 NamedTextColor.AQUA
             );
         }
-        if (viewerEntities.size() < specs.size()) {
-            refreshPublicTrick(table, placed);
-            return;
-        }
-        for (int index = 0; index < specs.size(); index++) {
-            Entity entity = Bukkit.getEntity(viewerEntities.get(index));
-            if (!(entity instanceof ItemDisplay display)) {
-                refreshPublicTrick(table, placed);
-                return;
-            }
-            PreviewCardSpec spec = specs.get(index);
-            teleportIfMoved(display, spec.location());
-            applyStableYaw(display, spec.yaw());
-            applyTrickVisibility(table, playerId, display);
-        }
+        List<UUID> viewerEntities = placed.viewerTrickEntitiesByPlayer().computeIfAbsent(playerId, ignored -> new ArrayList<>());
+        syncPreviewEntities(table, playerId, viewerEntities, specs);
     }
 
     private List<DoudizhuCard> selectedCards(GameTable table, UUID playerId) {
@@ -2057,6 +2111,10 @@ public final class PhysicalTableManager {
         return display;
     }
 
+    private ItemDisplay spawnAvatarDisplay(Location location, ItemStack item, float scale) {
+        return spawnBillboardItem(location, item, new Vector3f(scale, scale, scale));
+    }
+
     private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background) {
         return spawnText(location, text, billboard, background, 1.0f);
     }
@@ -2079,6 +2137,12 @@ public final class PhysicalTableManager {
     private void updateTextEntity(Entity entity, Component text) {
         if (entity instanceof TextDisplay display) {
             display.text(MuzTheme.plain(text).decoration(TextDecoration.ITALIC, false));
+        }
+    }
+
+    private void updateAvatarEntity(Entity entity, ItemStack item) {
+        if (entity instanceof ItemDisplay display) {
+            display.setItemStack(item == null ? new ItemStack(Material.AIR) : item);
         }
     }
 
@@ -2659,14 +2723,14 @@ public final class PhysicalTableManager {
 
     private Component buildStatus(GameTable table) {
         // Keep the status text head-free.
-        // The top avatar now lives in its own TextDisplay pair above this banner so size/position can be tuned separately.
+        // The top avatar/name pair already shows the focused player, so the banner should only describe the phase and state.
         Component top = MuzTheme.accent("斗地主")
             .append(MuzTheme.divider(" · "))
             .append(MuzTheme.multiplierWarm(table.getName() + " 号桌"));
         Component middle = TypewriterTextStyle.joinInline(
             MuzTheme.warm(plugin.roomDisplayTag(table.getRoomLevel())),
             MuzTheme.accent(table.getPhase().displayName()),
-            table.getCurrentTurn() == null ? null : plugin.playerNameComponent(table.getCurrentTurn(), table.displayName(table.getCurrentTurn()), NamedTextColor.WHITE)
+            currentTurnStatusBanner(table)
         );
         Component detail = TypewriterTextStyle.joinInline(
             table.getBottomCards().isEmpty() ? null : MuzTheme.warm("底牌 " + table.getBottomCards().size() + " 张"),
@@ -2778,24 +2842,31 @@ public final class PhysicalTableManager {
         return counts;
     }
 
-    private Component seatAvatar(GameTable table, int seatIndex) {
+    private ItemStack seatAvatarItem(GameTable table, int seatIndex) {
+        UUID seat = placedSeat(table, seatIndex);
+        return seatAvatarVisible(table, seat) ? playerHeadItem(seat) : new ItemStack(Material.AIR);
+    }
+
+    private Component seatName(GameTable table, int seatIndex) {
         UUID seat = placedSeat(table, seatIndex);
         if (seat == null) {
+            return TypewriterTextStyle.warning("空位");
+        }
+        if (!seatNameVisible(table, seat)) {
             return Component.empty();
         }
-        return plugin.playerHeadComponent(seat, table.displayName(seat), table.isBot(seat) ? NamedTextColor.AQUA : NamedTextColor.GOLD);
+        NamedTextColor color = table.isBot(seat) ? NamedTextColor.AQUA : NamedTextColor.WHITE;
+        return plugin.playerNameComponent(seat, table.displayName(seat), color)
+            .decoration(TextDecoration.BOLD, true)
+            .decoration(TextDecoration.ITALIC, false);
     }
 
     private Component seatInfo(GameTable table, int seatIndex) {
         UUID seat = placedSeat(table, seatIndex);
         if (seat == null) {
-            return TypewriterTextStyle.joinLines(
-                TypewriterTextStyle.warning("空位"),
-                TypewriterTextStyle.meta("座位 " + (seatIndex + 1))
-            );
+            return TypewriterTextStyle.meta("座位 " + (seatIndex + 1));
         }
         List<Component> lines = new ArrayList<>();
-        lines.add(TypewriterTextStyle.focus(table.displayName(seat)));
         lines.add(TypewriterTextStyle.meta("座位 " + (seatIndex + 1)));
         lines.add(TypewriterTextStyle.meta(table.isBot(seat) ? "机器人" : "玩家"));
         if (table.isReady(seat)) {
@@ -2822,8 +2893,23 @@ public final class PhysicalTableManager {
         return plugin.getSmallTextScale() * Math.max(0.5f, plugin.getSeatAvatarScale());
     }
 
+    private float seatNameScale(GameTable table, int seatIndex) {
+        UUID seat = placedSeat(table, seatIndex);
+        return seat == null
+            ? Math.max(0.08f, plugin.getEmptySeatScale())
+            : Math.max(0.08f, plugin.getSeatNameScale());
+    }
+
     private float statusAvatarScale() {
         return plugin.getStatusTextScale() * Math.max(0.45f, plugin.getStatusAvatarScale());
+    }
+
+    private float seatInfoScale() {
+        return Math.max(0.08f, plugin.getSeatInfoScale());
+    }
+
+    private float statusNameScale() {
+        return Math.max(0.08f, plugin.getStatusNameScale());
     }
 
     private Location statusAvatarLocation(Location anchor, float yaw) {
@@ -2836,9 +2922,14 @@ public final class PhysicalTableManager {
         );
     }
 
-    private Location statusAvatarNameLocation(Location anchor, float yaw) {
-        double gap = 0.26 + Math.max(0.0f, plugin.getStatusAvatarScale() - 1.0f) * 0.10;
-        return statusAvatarLocation(anchor, yaw).clone().add(0.0, -gap, 0.0);
+    private Location statusAvatarNameLocation(GameTable table, Location anchor, float yaw) {
+        return rotate(
+            anchor,
+            yaw,
+            plugin.getStatusNameLateralOffset(),
+            plugin.getStatusHeight() + plugin.getStatusNameVerticalOffset(),
+            plugin.getStatusNameDepthOffset()
+        );
     }
 
     private Location seatAvatarLocation(Location seatBase, float yaw) {
@@ -2851,25 +2942,103 @@ public final class PhysicalTableManager {
         );
     }
 
-    private Location seatInfoLocation(Location seatBase, float yaw) {
-        double gap = 0.22 + Math.max(0.0f, plugin.getSeatAvatarScale() - 1.0f) * 0.08;
-        return seatAvatarLocation(seatBase, yaw).clone().add(0.0, -gap, 0.0);
+    private Location seatNameLocation(GameTable table, int seatIndex, Location seatBase, float yaw) {
+        UUID seat = placedSeat(table, seatIndex);
+        double lateral = seat == null ? plugin.getEmptySeatLateralOffset() : plugin.getSeatNameLateralOffset();
+        double vertical = seat == null ? plugin.getEmptySeatVerticalOffset() : plugin.getSeatNameVerticalOffset();
+        double depth = seat == null ? plugin.getEmptySeatDepthOffset() : plugin.getSeatNameDepthOffset();
+        return offsetFromYaw(
+            seatBase,
+            yaw,
+            lateral,
+            plugin.getChairLabelHeight() + vertical,
+            depth
+        );
     }
 
-    private Component statusAvatar(GameTable table) {
-        UUID focus = statusFocusPlayer(table);
-        if (focus == null) {
-            return Component.empty();
+    private Location seatInfoLocation(GameTable table, int seatIndex, Location seatBase, float yaw) {
+        UUID seat = placedSeat(table, seatIndex);
+        if (!seatNameVisible(table, seat)) {
+            return seatNameLocation(table, seatIndex, seatBase, yaw);
         }
-        return plugin.playerHeadComponent(focus, table.displayName(focus), table.isBot(focus) ? NamedTextColor.AQUA : NamedTextColor.GOLD);
+        double gap = 0.18 + Math.max(0.0f, plugin.getSmallTextScale() - 0.46f) * 0.06;
+        return seatNameLocation(table, seatIndex, seatBase, yaw).clone().add(0.0, -gap, 0.0);
+    }
+
+    private ItemStack statusAvatarItem(GameTable table) {
+        UUID focus = statusFocusPlayer(table);
+        return statusAvatarVisible(table, focus) ? playerHeadItem(focus) : new ItemStack(Material.AIR);
     }
 
     private Component statusAvatarName(GameTable table) {
         UUID focus = statusFocusPlayer(table);
-        if (focus == null) {
+        if (!statusNameVisible(table, focus)) {
             return Component.empty();
         }
-        return plugin.playerNameComponent(focus, table.displayName(focus), NamedTextColor.WHITE);
+        NamedTextColor color = focus != null && table.isBot(focus) ? NamedTextColor.AQUA : NamedTextColor.WHITE;
+        return plugin.playerNameComponent(focus, table.displayName(focus), color);
+    }
+
+    private boolean seatAvatarVisible(GameTable table, UUID seat) {
+        return seat != null && !table.isBot(seat) && plugin.shouldShowPlayerHeadAvatar();
+    }
+
+    private boolean seatNameVisible(GameTable table, UUID seat) {
+        return seat == null || table.isBot(seat) || plugin.shouldShowPlayerHeadName();
+    }
+
+    private boolean statusAvatarVisible(GameTable table, UUID focus) {
+        return focus != null && !table.isBot(focus) && plugin.shouldShowPlayerHeadAvatar();
+    }
+
+    private boolean statusNameVisible(GameTable table, UUID focus) {
+        return focus != null && (table.isBot(focus) || plugin.shouldShowPlayerHeadName());
+    }
+
+    private ItemStack playerHeadItem(UUID playerId) {
+        if (playerId == null) {
+            return new ItemStack(Material.AIR);
+        }
+        ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+        ItemMeta rawMeta = item.getItemMeta();
+        if (!(rawMeta instanceof SkullMeta meta)) {
+            return item;
+        }
+        Player online = Bukkit.getPlayer(playerId);
+        if (online != null) {
+            meta.setOwningPlayer(online);
+        } else {
+            OfflinePlayer offline = Bukkit.getOfflinePlayer(playerId);
+            if (offline.getName() != null && !offline.getName().isBlank()) {
+                meta.setOwningPlayer(offline);
+            }
+        }
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Component currentTurnStatusBanner(GameTable table) {
+        if (table == null || table.getCurrentTurn() == null) {
+            return null;
+        }
+        return switch (table.getPhase()) {
+            case BIDDING -> MuzTheme.warm("当前叫分");
+            case DOUBLING -> MuzTheme.warm("当前加倍");
+            case PLAYING -> MuzTheme.warm("当前出牌");
+            case LOBBY -> null;
+        };
+    }
+
+    private Component currentTurnSeatBadge(GameTable table) {
+        if (table == null || table.getCurrentTurn() == null) {
+            return null;
+        }
+        return switch (table.getPhase()) {
+            case BIDDING -> TypewriterTextStyle.accent("当前叫分");
+            case DOUBLING -> TypewriterTextStyle.accent("当前加倍");
+            case PLAYING -> TypewriterTextStyle.accent("当前出牌");
+            case LOBBY -> null;
+        };
     }
 
     private UUID statusFocusPlayer(GameTable table) {
@@ -2894,8 +3063,12 @@ public final class PhysicalTableManager {
         return base.clone().add(x, vertical, z);
     }
 
-    private float buttonLabelTextScale() {
-        return Math.max(0.08f, plugin.getLabelTextScale() * 0.5f);
+    private float joinLabelTextScale() {
+        return Math.max(0.08f, plugin.getJoinLabelScale());
+    }
+
+    private float actionLabelTextScale() {
+        return Math.max(0.08f, plugin.getActionLabelScale());
     }
 
     private UUID placedSeat(GameTable table, int seatIndex) {
@@ -3025,7 +3198,7 @@ public final class PhysicalTableManager {
         String cards = table.getHand(playerId).stream()
             .map(card -> Integer.toString(card.id()))
             .collect(java.util.stream.Collectors.joining(","));
-        return table.getPhase().displayName() + "|" + seatIndex + "|" + cards + "|mingpai=" + table.isMingPai(playerId);
+        return table.getPhase().displayName() + "|" + seatIndex + "|" + cards;
     }
 
     private String publicTrickSignature(GameTable table) {
@@ -3241,18 +3414,11 @@ public final class PhysicalTableManager {
         if (ownerId == null) {
             return publicCardYaw(placed.yaw());
         }
-        Player owner = Bukkit.getPlayer(ownerId);
-        if (owner == null) {
+        Vector facing = previewFacingAxis(placed, ownerId);
+        if (Math.abs(facing.x()) < 0.0001 && Math.abs(facing.z()) < 0.0001) {
             return ownerSeatIndex < 0 ? publicCardYaw(placed.yaw()) : handCardYaw(placed.yaw(), ownerSeatIndex);
         }
-        Location anchor = placed.anchor();
-        Location viewerLocation = owner.getLocation();
-        double dx = viewerLocation.getX() - anchor.getX();
-        double dz = viewerLocation.getZ() - anchor.getZ();
-        if (Math.abs(dx) < 0.0001 && Math.abs(dz) < 0.0001) {
-            return ownerSeatIndex < 0 ? publicCardYaw(placed.yaw()) : handCardYaw(placed.yaw(), ownerSeatIndex);
-        }
-        float viewerYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float viewerYaw = (float) Math.toDegrees(Math.atan2(-facing.x(), facing.z()));
         return normalizeYaw(viewerYaw + 180.0f);
     }
 
@@ -3386,9 +3552,7 @@ public final class PhysicalTableManager {
 
     private boolean isDoublingAction(ButtonAction action) {
         return action == ButtonAction.DOUBLE_NO
-            || action == ButtonAction.DOUBLE_YES
-            || action == ButtonAction.MING_PAI
-            || action == ButtonAction.SUPER_DOUBLE;
+            || action == ButtonAction.DOUBLE_YES;
     }
 
     private void rememberActionVisual(UUID bindingId, UUID displayId) {
@@ -3537,6 +3701,7 @@ public final class PhysicalTableManager {
         UUID statusAvatarDisplayId,
         UUID statusAvatarNameDisplayId,
         List<UUID> seatAvatarDisplayIds,
+        List<UUID> seatNameDisplayIds,
         List<UUID> seatInfoDisplayIds,
         List<UUID> actionEntities
     ) {
@@ -3563,6 +3728,7 @@ public final class PhysicalTableManager {
                 statusAvatarDisplayId,
                 statusAvatarNameDisplayId,
                 seatAvatarDisplayIds,
+                seatNameDisplayIds,
                 seatInfoDisplayIds,
                 actionEntities
             );
@@ -3591,6 +3757,7 @@ public final class PhysicalTableManager {
                 statusAvatarDisplayId,
                 statusAvatarNameDisplayId,
                 seatAvatarDisplayIds,
+                seatNameDisplayIds,
                 seatInfoDisplayIds,
                 actionEntities
             );
@@ -3619,6 +3786,7 @@ public final class PhysicalTableManager {
                 newStatusAvatarDisplayId,
                 statusAvatarNameDisplayId,
                 seatAvatarDisplayIds,
+                seatNameDisplayIds,
                 seatInfoDisplayIds,
                 actionEntities
             );
@@ -3647,6 +3815,7 @@ public final class PhysicalTableManager {
                 statusAvatarDisplayId,
                 newStatusAvatarNameDisplayId,
                 seatAvatarDisplayIds,
+                seatNameDisplayIds,
                 seatInfoDisplayIds,
                 actionEntities
             );
@@ -3696,8 +3865,6 @@ public final class PhysicalTableManager {
         CLEAR_SELECTION,
         DOUBLE_NO,
         DOUBLE_YES,
-        MING_PAI,
-        SUPER_DOUBLE,
         OPEN_SETTINGS,
         BID_0,
         BID_1,

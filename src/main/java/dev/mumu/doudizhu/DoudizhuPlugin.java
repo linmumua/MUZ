@@ -99,6 +99,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private static final String DEFAULT_COUNTDOWN_SOUND_SPEC = "minecraft:block.note_block.hat 0.45 1.00";
     private static final String DEFAULT_UNREADY_WARNING_SOUND_SPEC = "minecraft:block.note_block.didgeridoo 0.55 0.85";
     private static final String DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC = "minecraft:block.note_block.bass 0.55 0.75";
+    private static final String DEFAULT_AI_SYSTEM_PROMPT = """
+        你是 MUZ 的斗地主智能牌局助手，风格冷静、稳健、重视胜率与节奏控制。
+        你的第一目标永远是做出合法且高胜率的决策，而不是为了炫技、搞节目效果或追求单手牌面最大。
+        炸弹和王炸属于高价值终结资源：除非能直接建立明显优势、阻止对手冲刺、或已经进入收尾阶段，否则不要轻易交出。
+        能用普通牌解决的问题，就不要升级到炸弹；能用炸弹解决的问题，就不要升级到王炸。
+        先手时优先考虑低风险起手、整理手型、保留关键控制牌；跟牌时优先考虑是否有必要接，而不是见牌就压。
+        当对手剩牌很少时，可以适当提高压制优先级；当队友仍有机会接管节奏时，避免过度消耗自己的终结资源。
+        如果后续系统消息要求你只输出固定格式，你必须严格服从，不解释、不闲聊、不追加额外文本。
+        """;
     private static final int PLAYER_OPTION_PROFILE_COUNT = 4;
     private static final float DEFAULT_PRIVATE_CARD_SCALE = 0.50f;
     private static final float DEFAULT_PUBLIC_CARD_SCALE = 0.58f;
@@ -160,15 +169,31 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private float statusTextScale;
     private float labelTextScale;
     private float playerHeadScale;
-    private boolean playerHeadShowId;
+    private PlayerHeadDisplayMode playerHeadDisplayMode = PlayerHeadDisplayMode.BOTH;
     private float statusAvatarScale;
     private double statusAvatarLateralOffset;
     private double statusAvatarVerticalOffset;
     private double statusAvatarDepthOffset;
+    private float statusNameScale;
+    private double statusNameLateralOffset;
+    private double statusNameVerticalOffset;
+    private double statusNameDepthOffset;
     private float seatAvatarScale;
     private double seatAvatarLateralOffset;
     private double seatAvatarVerticalOffset;
     private double seatAvatarDepthOffset;
+    private float seatNameScale;
+    private double seatNameLateralOffset;
+    private double seatNameVerticalOffset;
+    private double seatNameDepthOffset;
+    private float emptySeatScale;
+    private double emptySeatLateralOffset;
+    private double emptySeatVerticalOffset;
+    private double emptySeatDepthOffset;
+    private float seatInfoScale;
+    private double seatInfoLateralOffset;
+    private double seatInfoVerticalOffset;
+    private double seatInfoDepthOffset;
     private float cardDepthOffset;
     private float handSpacing;
     private float publicTrickSpacing;
@@ -221,7 +246,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double handCenterHeight;
     private double chairDistance;
     private double joinLabelHeight;
+    private float joinLabelScale;
     private double actionLabelHeight;
+    private float actionLabelScale;
     private double buttonFrontBaseDistance;
     private double buttonSideBaseDistance;
     private double buttonDistanceFactor;
@@ -297,8 +324,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private YamlConfiguration playerSettingsConfig;
     private File optionProfilesFile;
     private YamlConfiguration optionProfilesConfig;
-    private File guiIconsFile;
-    private YamlConfiguration guiIconsConfig;
     private volatile boolean shuttingDown;
     private volatile boolean sqlTablesLoaded;
     private volatile List<PersistedTableRecord> pendingPersistedTables = List.of();
@@ -317,9 +342,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         loadAiSettings();
         playerSettingsFile = new File(getDataFolder(), "player-settings.yml");
         loadPlayerSettings();
-        saveResource("gui-icons.yml", false);
-        guiIconsFile = new File(getDataFolder(), "gui-icons.yml");
-        loadGuiIcons();
         cardIdKey = new NamespacedKey(this, "card-id");
         tableNameKey = new NamespacedKey(this, "table-name");
         interactionActionKey = new NamespacedKey(this, "interaction-action");
@@ -494,6 +516,28 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return aiProviderConfig == null ? "deepseek-chat" : aiProviderConfig.model();
     }
 
+    public String aiSystemPrompt() {
+        return aiProviderConfig == null ? DEFAULT_AI_SYSTEM_PROMPT : normalizeNonBlank(aiProviderConfig.systemPrompt(), DEFAULT_AI_SYSTEM_PROMPT);
+    }
+
+    public List<String> aiSystemPromptPreviewLines() {
+        String prompt = aiSystemPrompt().replace('\r', '\n');
+        List<String> lines = new ArrayList<>();
+        for (String rawLine : prompt.split("\\n+")) {
+            String line = rawLine.trim();
+            if (!line.isBlank()) {
+                lines.add(line);
+            }
+            if (lines.size() >= 3) {
+                break;
+            }
+        }
+        if (lines.isEmpty()) {
+            lines.add("未设置");
+        }
+        return lines;
+    }
+
     public boolean hasAiApiKey() {
         return aiProviderConfig != null && aiProviderConfig.hasApiKey();
     }
@@ -548,6 +592,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getConfig().set("ai.deepseek.enabled", true);
         getConfig().set("bot.ai.enabled", true);
         getConfig().set("ai.deepseek.model", normalized);
+        saveConfig();
+        loadAiSettings();
+    }
+
+    public void setAiSystemPrompt(String rawPrompt) {
+        String normalized = rawPrompt == null ? "" : rawPrompt.trim();
+        if (normalized.isBlank()) {
+            throw new IllegalArgumentException("全局人设词不能为空。");
+        }
+        getConfig().set("ai.deepseek.enabled", true);
+        getConfig().set("bot.ai.enabled", true);
+        getConfig().set("ai.deepseek.system-prompt", normalized);
         saveConfig();
         loadAiSettings();
     }
@@ -1710,6 +1766,29 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return playerHeadScale;
     }
 
+    public PlayerHeadDisplayMode playerHeadDisplayMode() {
+        return playerHeadDisplayMode == null ? PlayerHeadDisplayMode.BOTH : playerHeadDisplayMode;
+    }
+
+    public boolean shouldShowPlayerHeadAvatar() {
+        return playerHeadDisplayMode().showAvatar();
+    }
+
+    public boolean shouldShowPlayerHeadName() {
+        return playerHeadDisplayMode().showName();
+    }
+
+    public String playerHeadDisplayModeLabel() {
+        return playerHeadDisplayMode().label();
+    }
+
+    public void cyclePlayerHeadDisplayMode() {
+        playerHeadDisplayMode = playerHeadDisplayMode().next();
+        getConfig().set("render.player-head-show-id", playerHeadDisplayMode.configValue());
+        saveConfig();
+        reloadVisualState(false, ReloadFeedback.silent());
+    }
+
     public float getStatusAvatarScale() {
         return statusAvatarScale;
     }
@@ -1726,6 +1805,22 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return statusAvatarDepthOffset;
     }
 
+    public float getStatusNameScale() {
+        return statusNameScale;
+    }
+
+    public double getStatusNameLateralOffset() {
+        return statusNameLateralOffset;
+    }
+
+    public double getStatusNameVerticalOffset() {
+        return statusNameVerticalOffset;
+    }
+
+    public double getStatusNameDepthOffset() {
+        return statusNameDepthOffset;
+    }
+
     public float getSeatAvatarScale() {
         return seatAvatarScale;
     }
@@ -1740,6 +1835,54 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public double getSeatAvatarDepthOffset() {
         return seatAvatarDepthOffset;
+    }
+
+    public float getSeatNameScale() {
+        return seatNameScale;
+    }
+
+    public double getSeatNameLateralOffset() {
+        return seatNameLateralOffset;
+    }
+
+    public double getSeatNameVerticalOffset() {
+        return seatNameVerticalOffset;
+    }
+
+    public double getSeatNameDepthOffset() {
+        return seatNameDepthOffset;
+    }
+
+    public float getEmptySeatScale() {
+        return emptySeatScale;
+    }
+
+    public double getEmptySeatLateralOffset() {
+        return emptySeatLateralOffset;
+    }
+
+    public double getEmptySeatVerticalOffset() {
+        return emptySeatVerticalOffset;
+    }
+
+    public double getEmptySeatDepthOffset() {
+        return emptySeatDepthOffset;
+    }
+
+    public float getSeatInfoScale() {
+        return seatInfoScale;
+    }
+
+    public double getSeatInfoLateralOffset() {
+        return seatInfoLateralOffset;
+    }
+
+    public double getSeatInfoVerticalOffset() {
+        return seatInfoVerticalOffset;
+    }
+
+    public double getSeatInfoDepthOffset() {
+        return seatInfoDepthOffset;
     }
 
     public Component phaseComponent(dev.mumu.doudizhu.game.GamePhase phase, NamedTextColor color) {
@@ -2006,8 +2149,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return joinLabelHeight;
     }
 
+    public float getJoinLabelScale() {
+        return joinLabelScale;
+    }
+
     public double getActionLabelHeight() {
         return actionLabelHeight;
+    }
+
+    public float getActionLabelScale() {
+        return actionLabelScale;
     }
 
     public double getButtonFrontBaseDistance() {
@@ -2614,6 +2765,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.HOVER_BUTTON_ANIMATION_TYPE) {
             return buttonHoverAnimationCurve().label();
         }
+        if (setting == AdminSetting.PLAYER_HEAD_SHOW_ID) {
+            return playerHeadDisplayModeLabel();
+        }
         if (setting.booleanSetting()) {
             return getConfig().getBoolean(setting.path(), setting.defaultBoolean()) ? "开启" : "关闭";
         }
@@ -2635,26 +2789,19 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return String.format(java.util.Locale.ROOT, "%.1f", getConfig().getDouble(setting.path(), setting.defaultValue()));
     }
 
-    public String guiIcon(String path, String fallback) {
-        if (guiIconsConfig == null) {
-            return fallback;
-        }
-        String value = guiIconsConfig.getString(path);
-        return value == null || value.isBlank() ? fallback : value.trim();
-    }
-
     public Component playerIdentityComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
         String playerName = resolvePlayerName(playerId);
         if (playerName != null && !playerName.isBlank()) {
             Component head = Component.object(ObjectContents.playerHead().name(playerName).build())
                 .color(NamedTextColor.WHITE)
                 .decoration(TextDecoration.ITALIC, false);
-            if (!playerHeadShowId) {
-                return head.decoration(TextDecoration.ITALIC, false);
-            }
             Component name = MuzTheme.named(" " + playerName, fallbackColor)
                 .decoration(TextDecoration.ITALIC, false);
-            return head.append(name).decoration(TextDecoration.ITALIC, false);
+            return switch (playerHeadDisplayMode()) {
+                case HEAD_ONLY -> head.decoration(TextDecoration.ITALIC, false);
+                case BOTH -> head.append(name).decoration(TextDecoration.ITALIC, false);
+                case NAME_ONLY -> name;
+            };
         }
         return MuzTheme.named(normalizeNonBlank(fallbackText, "未知玩家"), fallbackColor)
             .decoration(TextDecoration.ITALIC, false);
@@ -2716,15 +2863,31 @@ public final class DoudizhuPlugin extends JavaPlugin {
         statusTextScale = (float) getConfig().getDouble("render.text-scale.status", 0.72);
         labelTextScale = (float) getConfig().getDouble("render.text-scale.label", 0.40);
         playerHeadScale = (float) getConfig().getDouble("render.player-head-scale", 1.00);
-        playerHeadShowId = getConfig().getBoolean("render.player-head-show-id", true);
+        playerHeadDisplayMode = PlayerHeadDisplayMode.fromConfig(getConfig().get("render.player-head-show-id"));
         statusAvatarScale = (float) getConfig().getDouble("render.status-avatar.scale", playerHeadScale);
         statusAvatarLateralOffset = getConfig().getDouble("render.status-avatar-offset.lateral", 0.0);
         statusAvatarVerticalOffset = getConfig().getDouble("render.status-avatar-offset.vertical", 0.82);
         statusAvatarDepthOffset = getConfig().getDouble("render.status-avatar-offset.depth", 0.0);
+        statusNameScale = (float) getConfig().getDouble("render.status-name.scale", smallTextScale);
+        statusNameLateralOffset = getConfig().getDouble("render.status-name-offset.lateral", 0.0);
+        statusNameVerticalOffset = getConfig().getDouble("render.status-name-offset.vertical", 0.56);
+        statusNameDepthOffset = getConfig().getDouble("render.status-name-offset.depth", 0.0);
         seatAvatarScale = (float) getConfig().getDouble("render.seat-avatar.scale", playerHeadScale);
         seatAvatarLateralOffset = getConfig().getDouble("render.seat-avatar-offset.lateral", 0.0);
         seatAvatarVerticalOffset = getConfig().getDouble("render.seat-avatar-offset.vertical", 0.18);
         seatAvatarDepthOffset = getConfig().getDouble("render.seat-avatar-offset.depth", 0.0);
+        seatNameScale = (float) getConfig().getDouble("render.seat-name.scale", smallTextScale);
+        seatNameLateralOffset = getConfig().getDouble("render.seat-name-offset.lateral", 0.0);
+        seatNameVerticalOffset = getConfig().getDouble("render.seat-name-offset.vertical", -0.04);
+        seatNameDepthOffset = getConfig().getDouble("render.seat-name-offset.depth", 0.0);
+        emptySeatScale = (float) getConfig().getDouble("render.empty-seat.scale", seatNameScale);
+        emptySeatLateralOffset = getConfig().getDouble("render.empty-seat-offset.lateral", seatNameLateralOffset);
+        emptySeatVerticalOffset = getConfig().getDouble("render.empty-seat-offset.vertical", seatNameVerticalOffset);
+        emptySeatDepthOffset = getConfig().getDouble("render.empty-seat-offset.depth", seatNameDepthOffset);
+        seatInfoScale = (float) getConfig().getDouble("render.seat-info.scale", smallTextScale);
+        seatInfoLateralOffset = getConfig().getDouble("render.seat-info-offset.lateral", 0.0);
+        seatInfoVerticalOffset = getConfig().getDouble("render.seat-info-offset.vertical", -0.22);
+        seatInfoDepthOffset = getConfig().getDouble("render.seat-info-offset.depth", 0.0);
         selectedCardScale = (float) getConfig().getDouble("render.selected-card.scale", 1.00);
         selectedCardLift = getConfig().getDouble("render.selected-card.lift", 0.18);
         hoverGlowEnabled = getConfig().getBoolean("render.hover-glow.enabled", true);
@@ -2793,7 +2956,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         handCenterHeight = getConfig().getDouble("render.layout.hand-center.height", 1.23);
         chairDistance = getConfig().getDouble("render.layout.chair-distance", 2.35);
         joinLabelHeight = getConfig().getDouble("render.button-layout.join-label-height", 0.18);
+        joinLabelScale = (float) getConfig().getDouble("render.button-layout.join-label-scale", 0.46);
         actionLabelHeight = getConfig().getDouble("render.button-layout.action-label-height", 0.18);
+        actionLabelScale = (float) getConfig().getDouble("render.button-layout.action-label-scale", 0.20);
         buttonFrontBaseDistance = getConfig().getDouble("render.button-layout.front-base-distance", 1.40);
         buttonSideBaseDistance = getConfig().getDouble("render.button-layout.side-base-distance", 1.72);
         buttonDistanceFactor = getConfig().getDouble("render.button-layout.distance-factor", 0.45);
@@ -2868,7 +3033,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             getConfig().getInt("ai.deepseek.request-timeout-ms", 45000),
             roundToSingleDecimal(getConfig().getDouble("ai.deepseek.temperature", 0.7)),
             getConfig().getInt("ai.deepseek.max-tokens", 0),
-            getConfig().getString("ai.deepseek.system-prompt", "")
+            normalizeNonBlank(getConfig().getString("ai.deepseek.system-prompt"), DEFAULT_AI_SYSTEM_PROMPT)
         );
         aiChatGateway = new OpenAiCompatibleAiChatGateway(aiProviderConfig, getLogger());
     }
@@ -2893,14 +3058,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean ensureBotAiConfig() {
         boolean changed = false;
-        if (!getConfig().contains("bot.ai.enabled")) {
-            getConfig().set("bot.ai.enabled", true);
-            changed = true;
-        }
-        if (!getConfig().contains("bot.ai.timeout-ms")) {
-            getConfig().set("bot.ai.timeout-ms", 5000);
-            changed = true;
-        }
+        changed |= ensureMissingConfigValue("bot.ai.enabled", true);
+        changed |= ensureMissingConfigValue("bot.ai.timeout-ms", 5000);
         return changed;
     }
 
@@ -2912,71 +3071,63 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return true;
     }
 
+    private boolean ensureMissingConfigValue(String path, Object value) {
+        YamlConfiguration persisted = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "config.yml"));
+        if (persisted.contains(path)) {
+            return false;
+        }
+        getConfig().set(path, value);
+        return true;
+    }
+
     private boolean ensureAiConfig() {
         boolean changed = false;
-        if (!getConfig().contains("ai.deepseek.enabled")) {
-            getConfig().set("ai.deepseek.enabled", false);
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.provider-name")) {
-            getConfig().set("ai.deepseek.provider-name", "DeepSeek");
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.url")) {
-            getConfig().set("ai.deepseek.url", getConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com"));
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.chat-completions-path")) {
-            getConfig().set("ai.deepseek.chat-completions-path", "/chat/completions");
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.models-path")) {
-            getConfig().set("ai.deepseek.models-path", "/models");
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.api-key")) {
-            getConfig().set("ai.deepseek.api-key", "");
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.model")) {
-            getConfig().set("ai.deepseek.model", "deepseek-chat");
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.connect-timeout-ms")) {
-            getConfig().set("ai.deepseek.connect-timeout-ms", 10000);
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.request-timeout-ms")) {
-            getConfig().set("ai.deepseek.request-timeout-ms", 45000);
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.temperature")) {
-            getConfig().set("ai.deepseek.temperature", 0.7);
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.max-tokens")) {
-            getConfig().set("ai.deepseek.max-tokens", 0);
-            changed = true;
-        }
-        if (!getConfig().contains("ai.deepseek.system-prompt")) {
-            getConfig().set("ai.deepseek.system-prompt", "");
-            changed = true;
-        }
+        changed |= ensureMissingConfigValue("ai.deepseek.enabled", false);
+        changed |= ensureMissingConfigValue("ai.deepseek.provider-name", "DeepSeek");
+        changed |= ensureMissingConfigValue("ai.deepseek.url", getConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com"));
+        changed |= ensureMissingConfigValue("ai.deepseek.chat-completions-path", "/chat/completions");
+        changed |= ensureMissingConfigValue("ai.deepseek.models-path", "/models");
+        changed |= ensureMissingConfigValue("ai.deepseek.api-key", "");
+        changed |= ensureMissingConfigValue("ai.deepseek.model", "deepseek-chat");
+        changed |= ensureMissingConfigValue("ai.deepseek.connect-timeout-ms", 10000);
+        changed |= ensureMissingConfigValue("ai.deepseek.request-timeout-ms", 45000);
+        changed |= ensureMissingConfigValue("ai.deepseek.temperature", 0.7);
+        changed |= ensureMissingConfigValue("ai.deepseek.max-tokens", 0);
+        changed |= ensureMissingConfigValue("ai.deepseek.system-prompt", DEFAULT_AI_SYSTEM_PROMPT);
         return changed;
     }
 
     private boolean ensureAvatarConfig() {
         boolean changed = false;
         double legacyScale = getConfig().getDouble("render.player-head-scale", 1.00);
+        double defaultSmallTextScale = getConfig().getDouble("render.text-scale.small", 0.46);
         changed |= ensureDoubleConfig("render.status-avatar.scale", legacyScale);
         changed |= ensureDoubleConfig("render.status-avatar-offset.lateral", 0.0);
         changed |= ensureDoubleConfig("render.status-avatar-offset.vertical", 0.82);
         changed |= ensureDoubleConfig("render.status-avatar-offset.depth", 0.0);
+        changed |= ensureDoubleConfig("render.status-name.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.status-name-offset.lateral", 0.0);
+        changed |= ensureDoubleConfig("render.status-name-offset.vertical", 0.56);
+        changed |= ensureDoubleConfig("render.status-name-offset.depth", 0.0);
         changed |= ensureDoubleConfig("render.seat-avatar.scale", legacyScale);
         changed |= ensureDoubleConfig("render.seat-avatar-offset.lateral", 0.0);
         changed |= ensureDoubleConfig("render.seat-avatar-offset.vertical", 0.18);
         changed |= ensureDoubleConfig("render.seat-avatar-offset.depth", 0.0);
+        changed |= ensureDoubleConfig("render.seat-name.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.seat-name-offset.lateral", 0.0);
+        changed |= ensureDoubleConfig("render.seat-name-offset.vertical", -0.04);
+        changed |= ensureDoubleConfig("render.seat-name-offset.depth", 0.0);
+        changed |= ensureDoubleConfig("render.empty-seat.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.empty-seat-offset.lateral", 0.0);
+        changed |= ensureDoubleConfig("render.empty-seat-offset.vertical", -0.04);
+        changed |= ensureDoubleConfig("render.empty-seat-offset.depth", 0.0);
+        changed |= ensureDoubleConfig("render.seat-info.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.seat-info-offset.lateral", 0.0);
+        changed |= ensureDoubleConfig("render.seat-info-offset.vertical", -0.22);
+        changed |= ensureDoubleConfig("render.seat-info-offset.depth", 0.0);
+        changed |= ensureDoubleConfig("render.button-layout.join-label-scale", 0.46);
         return changed;
+
     }
 
     private boolean ensureDoubleConfig(String path, double defaultValue) {
@@ -3026,13 +3177,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return changed;
     }
 
-    private void loadGuiIcons() {
-        if (guiIconsFile == null) {
-            return;
-        }
-        guiIconsConfig = YamlConfiguration.loadConfiguration(guiIconsFile);
-    }
-
     private ReloadSummary reloadVisualState(boolean exportBundle, ReloadFeedback feedback) {
         int totalStages = exportBundle ? 5 : 4;
         feedback.update(stageProgress(0, totalStages), "重载配置", "config.yml / 渲染参数");
@@ -3040,8 +3184,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         ensureConfigIntegrity();
         loadRenderSettings();
         loadAiSettings();
-        feedback.update(stageProgress(1, totalStages), "刷新界面资源", "gui-icons.yml / PlaceholderAPI");
-        loadGuiIcons();
+        feedback.update(stageProgress(1, totalStages), "刷新界面资源", "PlaceholderAPI / 渲染缓存");
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
         CraftEngineBundleExporter.BundleExportResult exportResult = CraftEngineBundleExporter.BundleExportResult.skipped("未请求同步");
@@ -3194,7 +3337,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             changed = true;
         }
         if (!getConfig().contains("render.player-head-show-id")) {
-            getConfig().set("render.player-head-show-id", true);
+            getConfig().set("render.player-head-show-id", PlayerHeadDisplayMode.BOTH.configValue());
             changed = true;
         }
         if (!getConfig().contains("storage.sql.sqlite.file")) {
@@ -4288,6 +4431,63 @@ public final class DoudizhuPlugin extends JavaPlugin {
         PREVIEW_SCALE
     }
 
+    public enum PlayerHeadDisplayMode {
+        HEAD_ONLY(0, "只显示头像"),
+        BOTH(1, "都显示"),
+        NAME_ONLY(2, "只显示名字");
+
+        private final int configValue;
+        private final String label;
+
+        PlayerHeadDisplayMode(int configValue, String label) {
+            this.configValue = configValue;
+            this.label = label;
+        }
+
+        public int configValue() {
+            return configValue;
+        }
+
+        public String label() {
+            return label;
+        }
+
+        public boolean showAvatar() {
+            return this != NAME_ONLY;
+        }
+
+        public boolean showName() {
+            return this != HEAD_ONLY;
+        }
+
+        public PlayerHeadDisplayMode next() {
+            return switch (this) {
+                case HEAD_ONLY -> BOTH;
+                case BOTH -> NAME_ONLY;
+                case NAME_ONLY -> HEAD_ONLY;
+            };
+        }
+
+        public static PlayerHeadDisplayMode fromConfig(Object raw) {
+            if (raw instanceof Boolean bool) {
+                return bool ? BOTH : HEAD_ONLY;
+            }
+            if (raw instanceof Number number) {
+                return switch (number.intValue()) {
+                    case 0 -> HEAD_ONLY;
+                    case 2 -> NAME_ONLY;
+                    default -> BOTH;
+                };
+            }
+            String normalized = raw == null ? "" : raw.toString().trim().toLowerCase(Locale.ROOT);
+            return switch (normalized) {
+                case "0", "head_only", "head-only", "avatar", "avatar_only", "avatar-only" -> HEAD_ONLY;
+                case "2", "name_only", "name-only", "name" -> NAME_ONLY;
+                default -> BOTH;
+            };
+        }
+    }
+
     public enum AdminSetting {
         TABLE_SPAWN_OFFSET_Y("table.spawn-offset-y", "桌子高度", 0.18, -5.0, 5.0, 0.05, false, false, false),
         PRIVATE_CARD_SCALE("render.private-card-scale", "实体手牌大小", DEFAULT_PRIVATE_CARD_SCALE, 0.10, 5.0, 0.02, false, false, false),
@@ -4314,15 +4514,31 @@ public final class DoudizhuPlugin extends JavaPlugin {
         CARD_LABEL_DEPTH("render.card-label-offset.depth", "牌面标签前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_SCALE("render.button-scale", "按钮大小", 0.42, 0.05, 3.0, 0.02, false, false, false),
         PLAYER_HEAD_SCALE("render.player-head-scale", "玩家头像大小", 1.00, 0.50, 4.0, 0.10, false, false, false),
-        PLAYER_HEAD_SHOW_ID("render.player-head-show-id", "头像显示名字", 1.0, 0.0, 1.0, 1.0, true, false, true),
+        PLAYER_HEAD_SHOW_ID("render.player-head-show-id", "头像/名字显示模式", 1.0, 0.0, 2.0, 1.0, false, true, false),
         STATUS_AVATAR_SCALE("render.status-avatar.scale", "顶栏头像大小", 1.00, 0.40, 4.0, 0.05, false, false, false),
         STATUS_AVATAR_LATERAL("render.status-avatar-offset.lateral", "顶栏头像左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         STATUS_AVATAR_VERTICAL("render.status-avatar-offset.vertical", "顶栏头像上下偏移", 0.82, -2.0, 4.0, 0.05, false, false, false),
         STATUS_AVATAR_DEPTH("render.status-avatar-offset.depth", "顶栏头像前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        STATUS_NAME_SCALE("render.status-name.scale", "顶栏名字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+        STATUS_NAME_LATERAL("render.status-name-offset.lateral", "顶栏名字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        STATUS_NAME_VERTICAL("render.status-name-offset.vertical", "顶栏名字上下偏移", 0.56, -2.0, 4.0, 0.05, false, false, false),
+        STATUS_NAME_DEPTH("render.status-name-offset.depth", "顶栏名字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         SEAT_AVATAR_SCALE("render.seat-avatar.scale", "座位头像大小", 1.00, 0.40, 4.0, 0.05, false, false, false),
         SEAT_AVATAR_LATERAL("render.seat-avatar-offset.lateral", "座位头像左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         SEAT_AVATAR_VERTICAL("render.seat-avatar-offset.vertical", "座位头像上下偏移", 0.18, -2.0, 4.0, 0.05, false, false, false),
         SEAT_AVATAR_DEPTH("render.seat-avatar-offset.depth", "座位头像前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        SEAT_NAME_SCALE("render.seat-name.scale", "座位名字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+        SEAT_NAME_LATERAL("render.seat-name-offset.lateral", "座位名字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        SEAT_NAME_VERTICAL("render.seat-name-offset.vertical", "座位名字上下偏移", -0.04, -2.0, 4.0, 0.05, false, false, false),
+        SEAT_NAME_DEPTH("render.seat-name-offset.depth", "座位名字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        EMPTY_SEAT_SCALE("render.empty-seat.scale", "空位主文字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+         EMPTY_SEAT_LATERAL("render.empty-seat-offset.lateral", "空位主文字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        EMPTY_SEAT_VERTICAL("render.empty-seat-offset.vertical", "空位主文字上下偏移", -0.04, -2.0, 4.0, 0.05, false, false, false),
+        EMPTY_SEAT_DEPTH("render.empty-seat-offset.depth", "空位主文字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        SEAT_INFO_SCALE("render.seat-info.scale", "座位副标题大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+        SEAT_INFO_LATERAL("render.seat-info-offset.lateral", "座位副标题左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        SEAT_INFO_VERTICAL("render.seat-info-offset.vertical", "座位副标题上下偏移", -0.22, -2.0, 4.0, 0.05, false, false, false),
+        SEAT_INFO_DEPTH("render.seat-info-offset.depth", "座位副标题前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         HOVER_GLOW_ENABLED("render.hover-glow.enabled", "预览发光", 1.0, 0.0, 1.0, 1.0, true, false, true),
         HOVER_GLOW_RED("render.hover-glow.color.red", "预览发光红", 96.0, 0.0, 255.0, 1.0, false, true, false),
         HOVER_GLOW_GREEN("render.hover-glow.color.green", "预览发光绿", 180.0, 0.0, 255.0, 1.0, false, true, false),
@@ -4368,8 +4584,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         BOT_DELAY_MIN("bot.action-delay-min-ticks", "机器人最短思考", 10.0, 0.0, 200.0, 1.0, false, true, false),
         BOT_DELAY_MAX("bot.action-delay-max-ticks", "机器人最长思考", 30.0, 0.0, 400.0, 1.0, false, true, false),
         HINT_GROUP_LIMIT("hints.max-groups", "提示组数上限", 6.0, 1.0, 20.0, 1.0, false, true, false),
-        JOIN_LABEL_HEIGHT("render.button-layout.join-label-height", "空位文字高度", 0.18, 0.0, 3.0, 0.02, false, false, false),
+        JOIN_LABEL_HEIGHT("render.button-layout.join-label-height", "空位加入文字高度", 0.18, 0.0, 3.0, 0.02, false, false, false),
+        JOIN_LABEL_SCALE("render.button-layout.join-label-scale", "空位加入文字大小", 0.46, 0.08, 4.0, 0.05, false, false, false),
         ACTION_LABEL_HEIGHT("render.button-layout.action-label-height", "按钮文字高度", 0.18, 0.0, 3.0, 0.02, false, false, false),
+        ACTION_LABEL_SCALE("render.button-layout.action-label-scale", "按钮文字大小", 0.20, 0.08, 4.0, 0.05, false, false, false),
         BUTTON_FRONT_BASE_DISTANCE("render.button-layout.front-base-distance", "前座按钮基准距离", 1.40, 0.2, 5.0, 0.02, false, false, false),
         BUTTON_SIDE_BASE_DISTANCE("render.button-layout.side-base-distance", "侧座按钮基准距离", 1.72, 0.2, 5.0, 0.02, false, false, false),
         BUTTON_DISTANCE_FACTOR("render.button-layout.distance-factor", "按钮距离增量系数", 0.45, 0.0, 2.0, 0.01, false, false, false),
@@ -4639,7 +4857,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private List<String> buildStartupInfoLines(CraftEngineBundleExporter.BundleExportResult exportResult, List<HookSnapshot> hooks, int consoleWidth) {
         int barWidth = consoleWidth >= 130 ? 20 : consoleWidth >= 104 ? 18 : 16;
         List<String> lines = new ArrayList<>();
-        lines.add(startupInfoPart(0.18, "配置", "config.yml 与 gui-icons.yml 已加载", barWidth));
+        lines.add(startupInfoPart(0.18, "配置", "config.yml 已加载", barWidth));
         lines.add(startupInfoPart(0.38, "CraftEngine", describeHookCompact(findHook(hooks, "ce")), barWidth));
         lines.add(startupInfoPart(0.58, "PAPI", describeHookCompact(findHook(hooks, "papi")), barWidth));
         lines.add(startupInfoPart(0.68, "Vault", describeHookCompact(findHook(hooks, "vault")), barWidth));
