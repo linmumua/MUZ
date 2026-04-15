@@ -436,10 +436,10 @@ public final class HandGuiListener implements Listener {
             HandInventoryHolder.AdminPage parent = switch (currentPage) {
                 case HOME -> null;
                 case DDZ_HOME, TEXAS_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
-                case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS -> HandInventoryHolder.AdminPage.DDZ_HOME;
+                case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
                 case TEXAS_FURNITURE, TEXAS_BUTTONS, TEXAS_CARDS, TEXAS_TEXT -> HandInventoryHolder.AdminPage.TEXAS_HOME;
                 case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
-                case GLOBAL_STATUS_AVATARS, GLOBAL_SEAT_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
+                case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
             };
             if (parent != null) {
                 plugin.getHandGuiService().openAdminModels(player, parent);
@@ -472,10 +472,12 @@ public final class HandGuiListener implements Listener {
             case DDZ_CARDS -> handleAdminCardsPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_LABELS -> handleAdminLabelsPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_TEXT -> handleAdminTextPage(player, rawSlot, leftClick, multiplier, current);
+            case DDZ_SEAT_TEXT -> handleAdminSeatTextPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_HITBOX -> handleAdminHitboxPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_AUDIO -> handleAdminAudioPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_PLAYER_OPTIONS -> handleAdminPlayerOptionsPage(player, rawSlot, leftClick);
             case DDZ_BOTS -> handleAdminBotsPage(player, rawSlot, leftClick, multiplier, current);
+            case DDZ_AI -> handleAdminAiPage(player, rawSlot, current);
             case TEXAS_FURNITURE -> handleAdminTexasFurniturePage(player, rawSlot, leftClick, multiplier, current);
             case TEXAS_BUTTONS -> handleAdminTexasButtonsPage(player, rawSlot, leftClick, multiplier, current);
             case TEXAS_CARDS -> handleAdminTexasCardsPage(player, rawSlot, leftClick, multiplier, current);
@@ -485,7 +487,9 @@ public final class HandGuiListener implements Listener {
             case GLOBAL_HIGHLIGHT -> handleAdminHighlightPage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_AVATARS -> handleAdminAvatarHomePage(player, rawSlot);
             case GLOBAL_STATUS_AVATARS -> handleAdminStatusAvatarPage(player, rawSlot, leftClick, multiplier, current);
+            case GLOBAL_STATUS_NAMES -> handleAdminStatusNamePage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_SEAT_AVATARS -> handleAdminSeatAvatarPage(player, rawSlot, leftClick, multiplier, current);
+            case GLOBAL_SEAT_NAMES -> handleAdminSeatNamePage(player, rawSlot, leftClick, multiplier, current);
         }
     }
 
@@ -507,10 +511,12 @@ public final class HandGuiListener implements Listener {
             case 21 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_CARDS);
             case 22 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_TEXT);
             case 23 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_LABELS);
-            case 28 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_HITBOX);
-            case 29 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_AUDIO);
-            case 30 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_PLAYER_OPTIONS);
-            case 31 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
+            case 28 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_SEAT_TEXT);
+            case 29 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_HITBOX);
+            case 30 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_AUDIO);
+            case 31 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_PLAYER_OPTIONS);
+            case 32 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
+            case 33 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_AI);
             default -> {
             }
         }
@@ -539,8 +545,15 @@ public final class HandGuiListener implements Listener {
 
     private void handleAdminAvatarHomePage(Player player, int rawSlot) {
         switch (rawSlot) {
-            case 20 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_AVATARS);
+            case 19 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_AVATARS);
+            case 20 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_NAMES);
+            case 22 -> {
+                plugin.cyclePlayerHeadDisplayMode();
+                notifySettingSaved(player, "头像/名字显示模式已切到 " + plugin.playerHeadDisplayModeLabel());
+                plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_AVATARS);
+            }
             case 24 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_AVATARS);
+            case 25 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_NAMES);
             default -> {
             }
         }
@@ -688,6 +701,18 @@ public final class HandGuiListener implements Listener {
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_AVATARS);
     }
 
+    private void handleAdminStatusNamePage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
+        switch (rawSlot) {
+            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_NAME_SCALE, increase, multiplier, page);
+            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_NAME_LATERAL, increase, multiplier, page);
+            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_NAME_VERTICAL, increase, multiplier, page);
+            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_NAME_DEPTH, increase, multiplier, page);
+            default -> {
+            }
+        }
+        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_NAMES);
+    }
+
     private void handleAdminSeatAvatarPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_SCALE, increase, multiplier, page);
@@ -698,6 +723,18 @@ public final class HandGuiListener implements Listener {
             }
         }
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_AVATARS);
+    }
+
+    private void handleAdminSeatNamePage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
+        switch (rawSlot) {
+            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_SCALE, increase, multiplier, page);
+            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_LATERAL, increase, multiplier, page);
+            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_VERTICAL, increase, multiplier, page);
+            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_DEPTH, increase, multiplier, page);
+            default -> {
+            }
+        }
+        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_NAMES);
     }
 
     private void handleAdminAnimationPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
@@ -759,13 +796,55 @@ public final class HandGuiListener implements Listener {
     private void handleAdminTextPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_HEIGHT, increase, multiplier, page);
-            case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.PLAY_DETAIL_HEIGHT, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.JOIN_LABEL_HEIGHT, increase, multiplier, page);
-            case 13 -> adjust(player, DoudizhuPlugin.AdminSetting.ACTION_LABEL_HEIGHT, increase, multiplier, page);
+            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.PLAY_DETAIL_HEIGHT, increase, multiplier, page);
+            case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.JOIN_LABEL_HEIGHT, increase, multiplier, page);
+            case 20 -> adjust(player, DoudizhuPlugin.AdminSetting.JOIN_LABEL_SCALE, increase, multiplier, page);
+            case 21 -> adjust(player, DoudizhuPlugin.AdminSetting.ACTION_LABEL_HEIGHT, increase, multiplier, page);
+            case 22 -> adjust(player, DoudizhuPlugin.AdminSetting.ACTION_LABEL_SCALE, increase, multiplier, page);
             default -> {
             }
         }
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_TEXT);
+    }
+
+    private void handleAdminSeatTextPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
+        switch (rawSlot) {
+            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_SCALE, increase, multiplier, page);
+            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_LATERAL, increase, multiplier, page);
+            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_VERTICAL, increase, multiplier, page);
+            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_DEPTH, increase, multiplier, page);
+            case 28 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_INFO_SCALE, increase, multiplier, page);
+            case 30 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_INFO_LATERAL, increase, multiplier, page);
+            case 32 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_INFO_VERTICAL, increase, multiplier, page);
+            case 34 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_INFO_DEPTH, increase, multiplier, page);
+            default -> {
+            }
+        }
+        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_SEAT_TEXT);
+    }
+
+    private void handleAdminAiPage(Player player, int rawSlot, HandInventoryHolder.AdminPage page) {
+        switch (rawSlot) {
+            case 12 -> {
+                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_URL, -1);
+                return;
+            }
+            case 13 -> {
+                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_KEY, -1);
+                return;
+            }
+            case 14 -> {
+                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_MODEL, -1);
+                return;
+            }
+            case 16 -> {
+                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_SYSTEM_PROMPT, -1);
+                return;
+            }
+            default -> {
+            }
+        }
+        plugin.getHandGuiService().openAdminModels(player, page);
     }
 
     private void handleAdminLabelsPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {

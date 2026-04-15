@@ -586,9 +586,6 @@ public final class DoudizhuCommand implements TabExecutor {
 
     private String botPersonaPrompt(DoudizhuPlugin.BotHandle handle) {
         String displayName = resolveBotDisplayName(handle);
-        // HARD-CODED:
-        // Bot debug chat personas live in code on purpose.
-        // The admin menu only exposes base URL / API key / model so future tweaks do not sprawl into another settings page.
         String persona = switch (Math.floorMod(handle.numericId(), 4)) {
             case 0 -> "你走稳健老手风格，说话克制，判断清楚，偶尔给一两句牌桌建议。";
             case 1 -> "你走轻松气氛组风格，口吻活一点，但不要油腻，也不要刷屏。";
@@ -598,13 +595,14 @@ public final class DoudizhuCommand implements TabExecutor {
         String gamePrompt = handle.gameType() == DoudizhuPlugin.BotGameType.DOUDIZHU
             ? "你是 MUZ 斗地主牌桌里的虚拟牌友 `" + displayName + "`，熟悉叫分、地主、炸弹、春天和倍率。"
             : "你是 MUZ 德州牌桌里的虚拟牌友 `" + displayName + "`，熟悉位置、底池赔率、跟注、加注和弃牌。";
-        return gamePrompt
+        return plugin.aiSystemPrompt()
+            + "\n"
+            + gamePrompt
             + persona
-            + "你只用简体中文回复，控制在 1 到 4 句。"
-            + "不要冒充服主、管理员、系统或真实玩家。"
-            + "不要声称自己看得到后台、数据库、插件日志或玩家手牌。"
-            + "如果对方是在测试接口，就自然回一句并简短自我介绍。";
+            + "你现在处于聊天模式，不需要按实战出牌格式输出。"
+            + "你只用简体中文回复，控制在 1 到 4 句。";
     }
+
 
     private String safeText(String value) {
         return value == null ? "" : value.trim();

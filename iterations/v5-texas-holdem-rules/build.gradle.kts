@@ -435,7 +435,6 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
         val preparedPackRoot = generatedResourcePackDir.get().asFile
         copyFileTree(preparedPackRoot.resolve("assets"), bundleRoot.resolve("resourcepack/assets"))
         preparedPackRoot.resolve("pack.mcmeta").copyTo(bundleRoot.resolve("resourcepack/pack.mcmeta"), overwrite = true)
-        preparedPackRoot.resolve("pack.png").copyTo(bundleRoot.resolve("resourcepack/pack.png"), overwrite = true)
 
         writeText(
             bundleRoot.resolve("pack.yml"),

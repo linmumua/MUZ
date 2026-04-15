@@ -1877,9 +1877,15 @@ public final class ZjhPhysicalTableManager {
     }
 
     private Location statusAvatarNameLocation(Location anchor, float yaw) {
-        double gap = 0.26 + Math.max(0.0f, plugin.getStatusAvatarScale() - 1.0f) * 0.10;
-        return statusAvatarLocation(anchor, yaw).clone().add(0.0, -gap, 0.0);
+        return rotate(
+            anchor,
+            yaw,
+            plugin.getStatusNameLateralOffset(),
+            plugin.getTexasStatusHeight() + plugin.getStatusNameVerticalOffset(),
+            plugin.getStatusNameDepthOffset()
+        );
     }
+
 
     private Location seatAvatarLocation(Location anchor, float yaw, int seatCount, int seatIndex) {
         List<double[]> offsets = seatOffsets(seatCount);

@@ -95,6 +95,10 @@ public final class PackSounds {
         return PREFIX + (RANDOM.nextBoolean() ? "three_left_1" : "three_left_2");
     }
 
+    public static String twoCardsWarning() {
+        return PREFIX + (RANDOM.nextBoolean() ? "left1" : "left2");
+    }
+
     public static String doubleChoice(boolean doubled, boolean landlordTurn) {
         if (!doubled) {
             return PREFIX + "double_no";

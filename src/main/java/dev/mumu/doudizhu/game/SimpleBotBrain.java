@@ -18,12 +18,27 @@ public final class SimpleBotBrain {
     private SimpleBotBrain() {
     }
 
+    public record PlayContext(boolean leadTurn, int selfRemainingCards, int minOpponentRemainingCards) {
+        public PlayContext {
+            selfRemainingCards = Math.max(0, selfRemainingCards);
+            minOpponentRemainingCards = minOpponentRemainingCards <= 0 ? Integer.MAX_VALUE : minOpponentRemainingCards;
+        }
+
+        public boolean closingWindow() {
+            return selfRemainingCards <= 4;
+        }
+
+        public boolean opponentVeryLow() {
+            return minOpponentRemainingCards <= 2;
+        }
+
+        public boolean opponentLow() {
+            return minOpponentRemainingCards <= 3;
+        }
+    }
+
     public static int chooseBid(List<DoudizhuCard> hand) {
-        Map<CardRank, Integer> counts = counts(hand);
-        long highCards = hand.stream().filter(card -> card.rank().strength() >= CardRank.ACE.strength()).count();
-        long bombs = counts.values().stream().filter(count -> count == 4).count();
-        boolean jokerBomb = counts.containsKey(CardRank.SMALL_JOKER) && counts.containsKey(CardRank.BIG_JOKER);
-        int score = (int) highCards + (int) bombs * 2 + (jokerBomb ? 3 : 0);
+        int score = handStrengthScore(hand);
         if (score >= 8) {
             return 3;
         }
@@ -36,13 +51,23 @@ public final class SimpleBotBrain {
         return 0;
     }
 
+    public static boolean chooseDouble(List<DoudizhuCard> hand) {
+        return handStrengthScore(hand) >= 5;
+    }
+
     public static List<DoudizhuCard> choosePlay(List<DoudizhuCard> hand, CardPattern target) {
+        int handSize = hand == null ? 0 : hand.size();
+        return choosePlay(hand, target, new PlayContext(target == null, handSize, Integer.MAX_VALUE));
+    }
+
+    public static List<DoudizhuCard> choosePlay(List<DoudizhuCard> hand, CardPattern target, PlayContext context) {
         if (hand == null || hand.isEmpty()) {
             return List.of();
         }
         List<DoudizhuCard> sorted = new ArrayList<>(hand);
         sorted.sort(ASCENDING);
         Map<CardRank, Integer> counts = counts(sorted);
+        PlayContext resolved = context == null ? new PlayContext(target == null, sorted.size(), Integer.MAX_VALUE) : context;
 
         if (target == null) {
             return leadMove(sorted, counts);
@@ -56,46 +81,39 @@ public final class SimpleBotBrain {
             case TRIPLE_WITH_PAIR -> higherTripleWithPair(sorted, counts, target.primaryRank());
             case FOUR_WITH_TWO_SINGLES -> higherFourWithSingles(sorted, counts, target.primaryRank());
             case FOUR_WITH_TWO_PAIRS -> higherFourWithPairs(sorted, counts, target.primaryRank());
-            case BOMB -> higherBomb(sorted, counts, target.primaryRank());
+            case BOMB -> shouldSpendBomb(resolved, target, sorted.size()) ? higherBomb(sorted, counts, target.primaryRank()) : List.of();
             case JOKER_BOMB -> List.of();
             default -> List.of();
         };
         if (!sameType.isEmpty()) {
             return sameType;
         }
-        if (!target.type().isBombFamily()) {
+
+        if (!target.type().isBombFamily() && shouldSpendBomb(resolved, target, sorted.size())) {
             List<DoudizhuCard> bomb = anyBomb(sorted, counts);
             if (!bomb.isEmpty()) {
                 return bomb;
             }
         }
-        return jokerBomb(sorted, counts);
+
+        if (shouldSpendJokerBomb(resolved, target, sorted.size())) {
+            return jokerBomb(sorted, counts);
+        }
+        return List.of();
     }
 
     private static List<DoudizhuCard> leadMove(List<DoudizhuCard> sorted, Map<CardRank, Integer> counts) {
-        CardRank singleRank = counts.entrySet().stream()
-            .filter(entry -> entry.getValue() == 1)
-            .map(Map.Entry::getKey)
-            .min(Comparator.comparingInt(CardRank::strength))
-            .orElse(null);
+        CardRank singleRank = lowestRankWithExactCount(counts, 1);
         if (singleRank != null) {
             return cardsOfRank(sorted, singleRank, 1);
         }
 
-        CardRank pairRank = counts.entrySet().stream()
-            .filter(entry -> entry.getValue() >= 2)
-            .map(Map.Entry::getKey)
-            .min(Comparator.comparingInt(CardRank::strength))
-            .orElse(null);
+        CardRank pairRank = lowestRankWithExactCount(counts, 2);
         if (pairRank != null) {
             return cardsOfRank(sorted, pairRank, 2);
         }
 
-        CardRank tripleRank = counts.entrySet().stream()
-            .filter(entry -> entry.getValue() >= 3)
-            .map(Map.Entry::getKey)
-            .min(Comparator.comparingInt(CardRank::strength))
-            .orElse(null);
+        CardRank tripleRank = lowestRankWithExactCount(counts, 3);
         if (tripleRank != null) {
             return cardsOfRank(sorted, tripleRank, 3);
         }
@@ -175,14 +193,14 @@ public final class SimpleBotBrain {
         for (CardRank bomb : ascendingRanks(counts, 4, current)) {
             return cardsOfRank(sorted, bomb, 4);
         }
-        return jokerBomb(sorted, counts);
+        return List.of();
     }
 
     private static List<DoudizhuCard> anyBomb(List<DoudizhuCard> sorted, Map<CardRank, Integer> counts) {
         for (CardRank bomb : ascendingRanks(counts, 4, null)) {
             return cardsOfRank(sorted, bomb, 4);
         }
-        return jokerBomb(sorted, counts);
+        return List.of();
     }
 
     private static List<DoudizhuCard> jokerBomb(List<DoudizhuCard> sorted, Map<CardRank, Integer> counts) {
@@ -193,6 +211,40 @@ public final class SimpleBotBrain {
             return move;
         }
         return List.of();
+    }
+
+    private static boolean shouldSpendBomb(PlayContext context, CardPattern target, int handSize) {
+        if (context == null || context.leadTurn()) {
+            return false;
+        }
+        if (context.closingWindow() || context.opponentVeryLow()) {
+            return true;
+        }
+        if (target != null && target.type() == PatternType.BOMB && (context.opponentLow() || handSize <= 6)) {
+            return true;
+        }
+        return handSize <= 5 && context.opponentLow();
+    }
+
+    private static boolean shouldSpendJokerBomb(PlayContext context, CardPattern target, int handSize) {
+        if (context == null || context.leadTurn()) {
+            return false;
+        }
+        if (context.selfRemainingCards() <= 2 || context.minOpponentRemainingCards() <= 1) {
+            return true;
+        }
+        if (target != null && target.type() == PatternType.BOMB && handSize <= 4) {
+            return true;
+        }
+        return false;
+    }
+
+    private static CardRank lowestRankWithExactCount(Map<CardRank, Integer> counts, int exactCount) {
+        return counts.entrySet().stream()
+            .filter(entry -> entry.getValue() == exactCount)
+            .map(Map.Entry::getKey)
+            .min(Comparator.comparingInt(CardRank::strength))
+            .orElse(null);
     }
 
     private static List<CardRank> ascendingRanks(Map<CardRank, Integer> counts, int minCount, CardRank higherThan) {
@@ -208,6 +260,14 @@ public final class SimpleBotBrain {
         return sorted.stream().filter(card -> card.rank() == rank).limit(amount).toList();
     }
 
+    private static int handStrengthScore(List<DoudizhuCard> hand) {
+        Map<CardRank, Integer> counts = counts(hand);
+        long highCards = hand.stream().filter(card -> card.rank().strength() >= CardRank.ACE.strength()).count();
+        long bombs = counts.values().stream().filter(count -> count == 4).count();
+        boolean jokerBomb = counts.containsKey(CardRank.SMALL_JOKER) && counts.containsKey(CardRank.BIG_JOKER);
+        return (int) highCards + (int) bombs * 2 + (jokerBomb ? 3 : 0);
+    }
+
     private static Map<CardRank, Integer> counts(List<DoudizhuCard> hand) {
         Map<CardRank, Integer> counts = new EnumMap<>(CardRank.class);
         for (DoudizhuCard card : hand) {
@@ -216,4 +276,3 @@ public final class SimpleBotBrain {
         return counts;
     }
 }
-

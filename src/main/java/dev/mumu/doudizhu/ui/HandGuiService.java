@@ -239,12 +239,14 @@ public final class HandGuiService {
                 inventory.setItem(19, item(Material.CARTOGRAPHY_TABLE, "桌椅摆位", List.of("桌子、椅子、整桌落点。")));
                 inventory.setItem(20, item(Material.STONE_BUTTON, "按钮布局", List.of("距离、弧度、悬停。")));
                 inventory.setItem(21, item(Material.PAPER, "卡牌表现", List.of("手牌、预览牌、排布。")));
-                inventory.setItem(22, item(Material.OAK_SIGN, "文字标签", List.of("桌面状态、提示、牌面标签。")));
+                inventory.setItem(22, item(Material.OAK_SIGN, "桌面文字", List.of("状态栏、上一手、加入/操作按钮文字。")));
                 inventory.setItem(23, item(Material.NAME_TAG, "牌面标签", List.of("点数标签与重复牌显示。")));
-                inventory.setItem(28, item(Material.STRUCTURE_VOID, "碰撞交互", List.of("手牌、按钮、椅子点击范围。")));
-                inventory.setItem(29, item(Material.NOTE_BLOCK, "音频", List.of("背景音乐、提示音、倒计时。")));
-                inventory.setItem(30, item(Material.BOOK, "玩家选项", List.of("音效方案、动作方案。")));
-                inventory.setItem(31, item(Material.CLOCK, "机器人", List.of("思考时长、压测入口。")));
+                inventory.setItem(28, item(Material.BIRCH_SIGN, "座位文字", List.of("空位主文字、座位副标题。")));
+                inventory.setItem(29, item(Material.STRUCTURE_VOID, "碰撞交互", List.of("手牌、按钮、椅子点击范围。")));
+                inventory.setItem(30, item(Material.NOTE_BLOCK, "音频", List.of("背景音乐、提示音、倒计时。")));
+                inventory.setItem(31, item(Material.BOOK, "玩家选项", List.of("音效方案、动作方案。")));
+                inventory.setItem(32, item(Material.CLOCK, "机器人行为", List.of("本地 bot 延迟、提示数量。")));
+                inventory.setItem(33, item(Material.ENDER_EYE, "AI 配置", List.of("DeepSeek、全局人设词、调试入口。")));
             }
             case TEXAS_HOME -> {
                 inventory.setItem(20, item(Material.CARTOGRAPHY_TABLE, "桌椅摆位", List.of("座位圈、桌面、按钮位。")));
@@ -358,11 +360,17 @@ public final class HandGuiService {
                 )));
             }
             case GLOBAL_AVATARS -> {
-                inventory.setItem(20, item(Material.ENDER_EYE, "顶栏头像", List.of("顶部状态头像与名字。")));
-                inventory.setItem(24, item(Material.PLAYER_HEAD, "座位头像", List.of("椅子外侧头像与名字。")));
+                inventory.setItem(19, item(Material.ENDER_EYE, "顶栏头像", List.of("单独调顶部头像的位置与大小。")));
+                inventory.setItem(20, item(Material.NAME_TAG, "顶栏名字", List.of("单独调顶部名字的位置与大小。")));
+                inventory.setItem(22, item(Material.COMPARATOR, "显示模式 · " + plugin.playerHeadDisplayModeLabel(), List.of(
+                    "点击切换：只显示名字、只显示头像、都显示。",
+                    "顶栏和座位会一起生效。"
+                )));
+                inventory.setItem(24, item(Material.PLAYER_HEAD, "座位头像", List.of("单独调座位头像的位置与大小。")));
+                inventory.setItem(25, item(Material.OAK_SIGN, "座位名字", List.of("单独调座位名字的位置与大小。")));
                 inventory.setItem(31, noteItem(Material.BOOK, "布局说明", List.of(
-                    "头像和名字已经拆开。",
-                    "名字固定在头像下方。"
+                    "头像、名字、附属信息必须分开调。",
+                    "这一页只做结构分流，不直接共用偏移。"
                 )));
             }
             case GLOBAL_STATUS_AVATARS -> {
@@ -371,8 +379,18 @@ public final class HandGuiService {
                 inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_VERTICAL));
                 inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_DEPTH));
                 inventory.setItem(31, noteItem(Material.BOOK, "顶栏头像", List.of(
-                    "头像和名字分开生成。",
-                    "名字固定显示在头像下方。"
+                    "这里只调顶部头像。",
+                    "不会再连带移动顶栏名字。"
+                )));
+            }
+            case GLOBAL_STATUS_NAMES -> {
+                inventory.setItem(10, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.STATUS_NAME_SCALE));
+                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.STATUS_NAME_LATERAL));
+                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.STATUS_NAME_VERTICAL));
+                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.STATUS_NAME_DEPTH));
+                inventory.setItem(31, noteItem(Material.BOOK, "顶栏名字", List.of(
+                    "这里只调顶部名字。",
+                    "不会再连带移动顶栏头像。"
                 )));
             }
             case GLOBAL_SEAT_AVATARS -> {
@@ -381,15 +399,45 @@ public final class HandGuiService {
                 inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_VERTICAL));
                 inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_DEPTH));
                 inventory.setItem(31, noteItem(Material.BOOK, "座位头像", List.of(
-                    "适用于斗地主与德州的座位头像。",
-                    "名字固定显示在头像下方。"
+                    "这里只调座位头像。",
+                    "不会再连带移动座位名字。"
+                )));
+            }
+            case GLOBAL_SEAT_NAMES -> {
+                inventory.setItem(10, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.SEAT_NAME_SCALE));
+                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_NAME_LATERAL));
+                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_NAME_VERTICAL));
+                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_NAME_DEPTH));
+                inventory.setItem(31, noteItem(Material.BOOK, "座位名字", List.of(
+                    "这里只调玩家座位名字。",
+                    "不改空位主文字、座位副标题、准备/开始/离开等按钮文字。"
                 )));
             }
             case DDZ_TEXT -> {
                 inventory.setItem(10, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.STATUS_HEIGHT));
-                inventory.setItem(11, adminSettingItem(Material.WRITABLE_BOOK, DoudizhuPlugin.AdminSetting.PLAY_DETAIL_HEIGHT));
-                inventory.setItem(12, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.JOIN_LABEL_HEIGHT));
-                inventory.setItem(13, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.ACTION_LABEL_HEIGHT));
+                inventory.setItem(12, adminSettingItem(Material.WRITABLE_BOOK, DoudizhuPlugin.AdminSetting.PLAY_DETAIL_HEIGHT));
+                inventory.setItem(19, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.JOIN_LABEL_HEIGHT));
+                inventory.setItem(20, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.JOIN_LABEL_SCALE));
+                inventory.setItem(21, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.ACTION_LABEL_HEIGHT));
+                inventory.setItem(22, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.ACTION_LABEL_SCALE));
+                inventory.setItem(31, noteItem(Material.BOOK, "桌面文字", List.of(
+                    "上排只调桌顶状态和上一手提示。",
+                    "下排只调加入按钮文字和准备/开始/离开文字。"
+                )));
+            }
+            case DDZ_SEAT_TEXT -> {
+                inventory.setItem(10, adminSettingItem(Material.BIRCH_SIGN, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_SCALE));
+                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_LATERAL));
+                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_VERTICAL));
+                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_DEPTH));
+                inventory.setItem(28, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.SEAT_INFO_SCALE));
+                inventory.setItem(30, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_INFO_LATERAL));
+                inventory.setItem(32, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_INFO_VERTICAL));
+                inventory.setItem(34, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_INFO_DEPTH));
+                inventory.setItem(31, noteItem(Material.BOOK, "座位文字", List.of(
+                    "上排是空位主文字“空位”。",
+                    "下排是座位副标题，如座位号、准备状态、分数。"
+                )));
             }
             case DDZ_LABELS -> {
                 inventory.setItem(10, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.CARD_LABEL_HEIGHT));
@@ -439,30 +487,34 @@ public final class HandGuiService {
             }
             case DDZ_BOTS -> {
                 inventory.setItem(10, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.BOT_DELAY_MIN));
-                inventory.setItem(11, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.BOT_DELAY_MAX));
-                inventory.setItem(12, adminSettingItem(Material.BOOKSHELF, DoudizhuPlugin.AdminSetting.HINT_GROUP_LIMIT));
-                inventory.setItem(14, item(Material.ENDER_EYE, "DeepSeek 链接", List.of(
-                    plugin.aiBaseUrl(),
-                    "点击后直接输入接口地址。"
+                inventory.setItem(12, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.BOT_DELAY_MAX));
+                inventory.setItem(14, adminSettingItem(Material.BOOKSHELF, DoudizhuPlugin.AdminSetting.HINT_GROUP_LIMIT));
+                inventory.setItem(19, noteItem(Material.BOOK, "行为说明", List.of(
+                    "这一页只管本地机器人行为和提示数量。",
+                    "DeepSeek 链接、模型、人设词请去 AI 配置页。"
                 )));
-                inventory.setItem(15, item(Material.TRIPWIRE_HOOK, "DeepSeek 密钥", List.of(
-                    plugin.aiApiKeyMasked(),
-                    "点击后直接输入 API Key。"
+                inventory.setItem(21, noteItem(Material.COMPARATOR, "当前模式", List.of(
+                    plugin.isBotAiEnabled() ? "外部 AI 可用，失败会回退本地规则。" : "当前主要使用本地 bot 规则。",
+                    "本地 bot 已加入炸弹/王炸保留策略。"
                 )));
-                inventory.setItem(16, item(Material.NAME_TAG, "DeepSeek 模型", List.of(
-                    plugin.aiModelName(),
-                    "点击后直接输入模型名。"
-                )));
-                inventory.setItem(19, noteItem(Material.BOOK, "AI 状态", List.of(
-                    plugin.aiStatusSummary()
-                )));
-                inventory.setItem(20, noteItem(Material.COMMAND_BLOCK, "调试命令", List.of(
+            }
+            case DDZ_AI -> {
+                inventory.setItem(10, noteItem(Material.BOOK, "AI 状态", List.of(plugin.aiStatusSummary())));
+                inventory.setItem(12, item(Material.ENDER_EYE, "DeepSeek 链接", List.of(plugin.aiBaseUrl(), "点击后直接输入接口地址。")));
+                inventory.setItem(13, item(Material.TRIPWIRE_HOOK, "DeepSeek 密钥", List.of(plugin.aiApiKeyMasked(), "点击后直接输入 API Key。")));
+                inventory.setItem(14, item(Material.NAME_TAG, "DeepSeek 模型", List.of(plugin.aiModelName(), "点击后直接输入模型名。")));
+                inventory.setItem(16, item(Material.WRITABLE_BOOK, "全局人设词", plugin.aiSystemPromptPreviewLines()));
+                inventory.setItem(19, noteItem(Material.COMMAND_BLOCK, "调试命令", List.of(
                     "/muz debug bot 信息",
                     "/muz debug bot 信息 <id> 你好"
                 )));
                 inventory.setItem(21, noteItem(Material.COMMAND_BLOCK, "压测命令", List.of(
                     "/muz debug add [数量]",
                     "在附近生成观察桌。"
+                )));
+                inventory.setItem(23, noteItem(Material.BOOKSHELF, "策略说明", List.of(
+                    "默认牌风：稳健、保炸、残局再提爆发。",
+                    "全局人设词会同时影响 bot 调试聊天和 DeepSeek 实战决策。"
                 )));
             }
             case TEXAS_FURNITURE -> {
@@ -683,6 +735,7 @@ public final class HandGuiService {
             case ADMIN_AI_URL -> player.sendMessage(component("直接输入 DeepSeek API 链接，例如 `https://api.deepseek.com`。", NamedTextColor.AQUA));
             case ADMIN_AI_KEY -> player.sendMessage(component("直接输入 DeepSeek API Key。", NamedTextColor.AQUA));
             case ADMIN_AI_MODEL -> player.sendMessage(component("直接输入 DeepSeek 模型，例如 `deepseek-chat`。", NamedTextColor.AQUA));
+            case ADMIN_AI_SYSTEM_PROMPT -> player.sendMessage(component("直接输入新的全局人设词；建议强调稳健牌风、炸弹保留和严格输出格式。", NamedTextColor.AQUA));
             default -> {
                 pendingInputs.remove(player.getUniqueId());
                 return;
@@ -744,6 +797,7 @@ public final class HandGuiService {
                 case ADMIN_AI_URL -> plugin.setAiBaseUrl(trimmed);
                 case ADMIN_AI_KEY -> plugin.setAiApiKey(trimmed);
                 case ADMIN_AI_MODEL -> plugin.setAiModelName(trimmed);
+                case ADMIN_AI_SYSTEM_PROMPT -> plugin.setAiSystemPrompt(trimmed);
                 case ADMIN_CHIP_BALANCE -> {
                     if (session.targetPlayerId() == null) {
                         throw new IllegalArgumentException("我没找到这位玩家，先重新打开面板再试一次吧。");
@@ -764,6 +818,7 @@ public final class HandGuiService {
                 case ADMIN_AI_URL -> "DeepSeek 链接已更新";
                 case ADMIN_AI_KEY -> "DeepSeek 密钥已更新";
                 case ADMIN_AI_MODEL -> "DeepSeek 模型已更新";
+                case ADMIN_AI_SYSTEM_PROMPT -> "全局人设词已更新";
                 case ADMIN_CHIP_BALANCE -> "筹码数量已更新";
                 default -> "设置已更新";
             }, session.target() != HandInventoryHolder.EditorTarget.ADMIN_PLAY_ACTION);
@@ -853,7 +908,7 @@ public final class HandGuiService {
             case ADMIN_COUNTDOWN -> openCountdownSoundPicker(player);
             case ADMIN_UNREADY_WARNING -> openUnreadyWarningSoundPicker(player);
             case ADMIN_PLACEMENT_BLOCKED_WARNING -> openPlacementBlockedSoundPicker(player);
-            case ADMIN_AI_URL, ADMIN_AI_KEY, ADMIN_AI_MODEL -> openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
+            case ADMIN_AI_URL, ADMIN_AI_KEY, ADMIN_AI_MODEL, ADMIN_AI_SYSTEM_PROMPT -> openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_AI);
             case ADMIN_CHIP_BALANCE -> openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_ECONOMY);
             default -> openSettings(player);
         }
@@ -1405,16 +1460,21 @@ public final class HandGuiService {
             case DDZ_BUTTONS, TEXAS_BUTTONS -> "按钮";
             case DDZ_CARDS, TEXAS_CARDS -> "卡牌";
             case DDZ_LABELS -> "牌面标签";
-            case DDZ_TEXT, TEXAS_TEXT -> "文字标签";
+            case DDZ_TEXT -> "桌面文字";
+            case DDZ_SEAT_TEXT -> "座位文字";
+            case TEXAS_TEXT -> "文字标签";
             case DDZ_HITBOX -> "碰撞交互";
             case DDZ_AUDIO -> "音频";
             case DDZ_PLAYER_OPTIONS -> "玩家选项";
-            case DDZ_BOTS -> "机器人";
+            case DDZ_BOTS -> "机器人行为";
+            case DDZ_AI -> "AI 配置";
             case GLOBAL_ANIMATION -> "动画";
             case GLOBAL_HIGHLIGHT -> "预选高亮";
             case GLOBAL_AVATARS -> "头像组件";
             case GLOBAL_STATUS_AVATARS -> "顶栏头像";
+            case GLOBAL_STATUS_NAMES -> "顶栏名字";
             case GLOBAL_SEAT_AVATARS -> "座位头像";
+            case GLOBAL_SEAT_NAMES -> "座位名字";
         };
     }
 
@@ -1424,7 +1484,7 @@ public final class HandGuiService {
                 "先选模块，再进入分类。"
             );
             case DDZ_HOME -> List.of(
-                "桌椅、按钮、卡牌、文字。"
+                "桌椅、按钮、卡牌、桌面文字、座位文字、机器人与 AI。"
             );
             case TEXAS_HOME -> List.of(
                 "座位、按钮、卡牌、文字。"
@@ -1447,8 +1507,14 @@ public final class HandGuiService {
             case DDZ_LABELS -> List.of(
                 "牌上方数字标签单独放在这里。"
             );
-            case DDZ_TEXT, TEXAS_TEXT -> List.of(
-                "桌面状态、按钮标签、文字高度。"
+            case DDZ_TEXT -> List.of(
+                "桌面状态、上一手、加入按钮、操作按钮。"
+            );
+            case DDZ_SEAT_TEXT -> List.of(
+                "空位主文字与座位副标题分开调。"
+            );
+            case TEXAS_TEXT -> List.of(
+                "桌面状态与座位信息。"
             );
             case DDZ_HITBOX -> List.of(
                 "只影响点击体验。"
@@ -1460,7 +1526,10 @@ public final class HandGuiService {
                 "玩家音效与动作方案。"
             );
             case DDZ_BOTS -> List.of(
-                "机器人延迟与 DeepSeek 调试。"
+                "本地 bot 延迟、提示数量与行为说明。"
+            );
+            case DDZ_AI -> List.of(
+                "DeepSeek 链接、密钥、模型与全局人设词。"
             );
             case TEXAS_FURNITURE -> List.of(
                 "座位圈、按钮位、外圈标记。"
@@ -1472,13 +1541,19 @@ public final class HandGuiService {
                 "预览色、选中色与默认高亮。"
             );
             case GLOBAL_AVATARS -> List.of(
-                "顶栏头像与座位头像。"
+                "头像与名字拆成独立页面。"
             );
             case GLOBAL_STATUS_AVATARS -> List.of(
-                "顶部状态头像与名字。"
+                "顶部状态头像位置与缩放。"
+            );
+            case GLOBAL_STATUS_NAMES -> List.of(
+                "顶部状态名字位置与缩放。"
             );
             case GLOBAL_SEAT_AVATARS -> List.of(
-                "椅子外侧头像与名字。"
+                "椅子外侧头像位置与缩放。"
+            );
+            case GLOBAL_SEAT_NAMES -> List.of(
+                "椅子外侧名字位置与缩放。"
             );
         };
     }
@@ -1487,10 +1562,10 @@ public final class HandGuiService {
         return switch (page) {
             case HOME -> null;
             case DDZ_HOME, TEXAS_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
-            case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS -> HandInventoryHolder.AdminPage.DDZ_HOME;
+            case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
             case TEXAS_FURNITURE, TEXAS_BUTTONS, TEXAS_CARDS, TEXAS_TEXT -> HandInventoryHolder.AdminPage.TEXAS_HOME;
             case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
-            case GLOBAL_STATUS_AVATARS, GLOBAL_SEAT_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
+            case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
         };
     }
 
@@ -1532,18 +1607,36 @@ public final class HandGuiService {
             case BUTTON_HEIGHT -> "桌边按钮整体高低。";
             case BUTTON_SCALE -> "桌边按钮图标大小。";
             case PLAYER_HEAD_SCALE -> "牌桌座位头像的显示大小。";
-            case PLAYER_HEAD_SHOW_ID -> "打开后显示头像+名字，关闭后只显示头像。";
+            case PLAYER_HEAD_SHOW_ID -> "点击后在只显示头像、都显示、只显示名字三种模式间循环切换。";
             case STATUS_AVATAR_SCALE -> "顶部状态头像的显示大小。";
             case STATUS_AVATAR_LATERAL -> "顶部状态头像左右移动。";
             case STATUS_AVATAR_VERTICAL -> "顶部状态头像上下移动。";
             case STATUS_AVATAR_DEPTH -> "顶部状态头像前后移动。";
+            case STATUS_NAME_SCALE -> "顶部状态名字的显示大小。";
+            case STATUS_NAME_LATERAL -> "顶部状态名字左右移动。";
+            case STATUS_NAME_VERTICAL -> "顶部状态名字上下移动。";
+            case STATUS_NAME_DEPTH -> "顶部状态名字前后移动。";
             case SEAT_AVATAR_SCALE -> "椅子外侧头像的显示大小。";
             case SEAT_AVATAR_LATERAL -> "椅子外侧头像左右移动。";
             case SEAT_AVATAR_VERTICAL -> "椅子外侧头像上下移动。";
             case SEAT_AVATAR_DEPTH -> "椅子外侧头像前后移动。";
+            case SEAT_NAME_SCALE -> "椅子外侧名字的显示大小。";
+            case SEAT_NAME_LATERAL -> "椅子外侧名字左右移动。";
+            case SEAT_NAME_VERTICAL -> "椅子外侧名字上下移动。";
+            case SEAT_NAME_DEPTH -> "椅子外侧名字前后移动。";
+            case EMPTY_SEAT_SCALE -> "椅子旁边“空位”主文字的显示大小。";
+            case EMPTY_SEAT_LATERAL -> "椅子旁边“空位”主文字左右移动。";
+            case EMPTY_SEAT_VERTICAL -> "椅子旁边“空位”主文字上下移动。";
+            case EMPTY_SEAT_DEPTH -> "椅子旁边“空位”主文字前后移动。";
+            case SEAT_INFO_SCALE -> "座位副标题（座位号、准备、分数等）的显示大小。";
+            case SEAT_INFO_LATERAL -> "座位副标题左右移动。";
+            case SEAT_INFO_VERTICAL -> "座位副标题上下移动。";
+            case SEAT_INFO_DEPTH -> "座位副标题前后移动。";
             case BUTTON_ROLL_DEGREES -> "按钮图标本身是否翻转。";
-            case JOIN_LABEL_HEIGHT -> "空位上方文字离按钮多高。";
+            case JOIN_LABEL_HEIGHT -> "空位加入文字离按钮多高。";
+            case JOIN_LABEL_SCALE -> "空位加入文字的显示大小。";
             case ACTION_LABEL_HEIGHT -> "普通按钮文字离按钮多高。";
+            case ACTION_LABEL_SCALE -> "准备、开始、离开等普通按钮文字的显示大小。";
             case BUTTON_FRONT_BASE_DISTANCE -> "正前方座位那排按钮离桌心多远。";
             case BUTTON_SIDE_BASE_DISTANCE -> "左右两侧座位那排按钮离桌心多远。";
             case BUTTON_DISTANCE_FACTOR -> "总按钮距离变化时，额外推开的速度。";
@@ -1660,4 +1753,3 @@ public final class HandGuiService {
     private record SignInputSession(HandInventoryHolder.EditorTarget target, long openedAt, Object unused) {
     }
 }
-
