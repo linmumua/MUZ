@@ -2,6 +2,7 @@ package dev.mumu.doudizhu.zhajinhua;
 
 import dev.mumu.doudizhu.DoudizhuPlugin;
 import dev.mumu.doudizhu.assets.PackAssets;
+import dev.mumu.doudizhu.compat.VersionCompat;
 import dev.mumu.doudizhu.game.GameTable;
 import dev.mumu.doudizhu.model.DoudizhuCard;
 import dev.mumu.doudizhu.room.TableLevel;
@@ -850,7 +851,7 @@ public final class ZjhPhysicalTableManager {
     }
 
     private ItemDisplay spawnFurniture(Location location, ItemStack item, float scale) {
-        return location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(), new Vector3f(scale, scale, scale), new AxisAngle4f()));
@@ -859,7 +860,7 @@ public final class ZjhPhysicalTableManager {
     }
 
     private TextDisplay spawnText(Location location, Component text, float scale) {
-        return location.getWorld().spawn(location, TextDisplay.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, TextDisplay.class, spawned -> {
             spawned.text(text);
             TypewriterTextStyle.apply(spawned, Display.Billboard.CENTER, false, scale);
             protect(spawned);
@@ -894,7 +895,7 @@ public final class ZjhPhysicalTableManager {
     }
 
     private Interaction spawnInteraction(Location location, float width, float height) {
-        return location.getWorld().spawn(location, Interaction.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, Interaction.class, spawned -> {
             spawned.setInteractionWidth(width);
             spawned.setInteractionHeight(height);
             spawned.setResponsive(true);
@@ -1025,7 +1026,7 @@ public final class ZjhPhysicalTableManager {
     private ItemStack tableItem() {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(model(plugin.getTableItemModelId(), PackAssets.furnitureModel(plugin, "table_visual")));
+        VersionCompat.setItemModel(meta, model(plugin.getTableItemModelId(), PackAssets.furnitureModel(plugin, "table_visual")));
         meta.displayName(message(plugin.getTableDisplayName(), NamedTextColor.GOLD));
         item.setItemMeta(meta);
         return item;
@@ -1039,7 +1040,7 @@ public final class ZjhPhysicalTableManager {
         }
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(model(plugin.getChairItemModelId(), PackAssets.furnitureModel(plugin, "seat_chair")));
+        VersionCompat.setItemModel(meta, model(plugin.getChairItemModelId(), PackAssets.furnitureModel(plugin, "seat_chair")));
         meta.displayName(message(plugin.getChairDisplayName(), NamedTextColor.RED));
         item.setItemMeta(meta);
         return item;
@@ -1948,7 +1949,7 @@ public final class ZjhPhysicalTableManager {
     }
 
     private ItemDisplay spawnCard(Location location, ItemStack item, float scale, float yaw) {
-        ItemDisplay display = location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(), new Vector3f(scale, scale, scale), new AxisAngle4f()));
@@ -1962,7 +1963,7 @@ public final class ZjhPhysicalTableManager {
     private ItemStack cardItem(DoudizhuCard card) {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(PackAssets.cardModel(plugin, card));
+        VersionCompat.setItemModel(meta, PackAssets.cardModel(plugin, card));
         item.setItemMeta(meta);
         return item;
     }
@@ -1970,7 +1971,7 @@ public final class ZjhPhysicalTableManager {
     private ItemStack backCardItem() {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(PackAssets.backModel(plugin));
+        VersionCompat.setItemModel(meta, PackAssets.backModel(plugin));
         item.setItemMeta(meta);
         return item;
     }

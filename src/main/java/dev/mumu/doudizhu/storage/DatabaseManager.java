@@ -18,7 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import org.bukkit.configuration.file.FileConfiguration;
+import dev.mumu.doudizhu.config.MuzYamlConfig;
 
 public final class DatabaseManager {
     private static final int READ_RETRY_COUNT = 2;
@@ -33,7 +33,7 @@ public final class DatabaseManager {
     }
 
     public boolean initialize() {
-        config = SqlConfig.fromConfig(plugin, plugin.getConfig());
+        config = SqlConfig.fromConfig(plugin, plugin.yamlConfig());
         try {
             if (config.type() == SqlType.SQLITE) {
                 Class.forName("org.sqlite.JDBC");
@@ -506,7 +506,7 @@ public final class DatabaseManager {
         String password,
         String parameters
     ) {
-        private static SqlConfig fromConfig(DoudizhuPlugin plugin, FileConfiguration configuration) {
+        private static SqlConfig fromConfig(DoudizhuPlugin plugin, MuzYamlConfig configuration) {
             String type = configuration.getString("storage.sql.type", "sqlite").trim().toLowerCase(Locale.ROOT);
             SqlType sqlType = "mysql".equals(type) ? SqlType.MYSQL : SqlType.SQLITE;
             File sqliteFile = new File(plugin.getDataFolder(), configuration.getString("storage.sql.sqlite.file", "storage/mumu-data.db"));

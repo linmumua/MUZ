@@ -5,7 +5,9 @@ import groovy.json.JsonSlurper
 
 plugins {
     java
+    kotlin("jvm") version "2.3.20"
     id("io.papermc.paperweight.userdev") version "2.0.0-beta.19"
+    id("io.izzel.taboolib") version "2.0.37"
 }
 
 group = "dev.mumu"
@@ -305,6 +307,7 @@ fun writeSeatChairModel(target: File) {
 
 repositories {
     mavenCentral()
+    maven("https://repo.tabooproject.org/repository/releases/")
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.momirealms.net/releases/")
@@ -312,7 +315,7 @@ repositories {
 }
 
 dependencies {
-    paperweight.paperDevBundle("1.21.11-R0.1-SNAPSHOT")
+    paperweight.paperDevBundle("1.20.4-R0.1-SNAPSHOT")
     compileOnly("me.clip:placeholderapi:2.12.2")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")
@@ -320,6 +323,7 @@ dependencies {
     compileOnly("net.momirealms:craft-engine-bukkit:0.0.67")
     compileOnly("net.momirealms:craft-engine-core:0.0.67")
     implementation("com.google.code.gson:gson:2.11.0")
+    implementation("org.yaml:snakeyaml:2.6")
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
@@ -330,6 +334,25 @@ dependencies {
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(21))
     withSourcesJar()
+}
+
+tasks.withType<Jar>().configureEach {
+    extensions.extraProperties["archivePath"] = archiveFile.get().asFile
+}
+
+taboolib {
+    version {
+        taboolib = "6.2.3"
+        coroutines = "1.7.3"
+        skipKotlinRelocate = true
+        skipTabooLibRelocate = true
+    }
+    env {
+        install(
+            "common",
+            "common-platform-api"
+        )
+    }
 }
 
 paperweight {
@@ -645,7 +668,7 @@ tasks {
         dependsOn(generateCraftEngineBundle)
         filteringCharset = Charsets.UTF_8.name()
         from(generatedJarResourcesDir)
-        filesMatching("plugin.yml") {
+        filesMatching(listOf("plugin.yml", "paper-plugin.yml")) {
             expand("version" to project.version)
         }
     }

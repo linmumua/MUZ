@@ -5,7 +5,7 @@ import dev.mumu.doudizhu.game.GameTable;
 import dev.mumu.doudizhu.ui.HistoryInventoryHolder;
 import dev.mumu.doudizhu.ui.HandInventoryHolder;
 import dev.mumu.doudizhu.ui.MuzTheme;
-import io.papermc.paper.event.player.AsyncChatEvent;
+// import io.papermc.paper.event.player.AsyncChatEvent; // 1.20.1 不支持
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -104,32 +104,7 @@ public final class HandGuiListener implements Listener {
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
-    public void onAsyncChat(AsyncChatEvent event) {
-        // HARD-CODED:
-        // Normal player chat must stay completely untouched by MUZ.
-        // We only intercept chat here while a GUI text-input session is pending, including silent color-input sessions,
-        // and we must never turn regular chat messages into overhead text, fake holograms, or any other world effect
-        // unless the user explicitly asks.
-        boolean pendingSound = plugin.getHandGuiService().hasPendingSoundInput(event.getPlayer().getUniqueId());
-        boolean pendingColor = plugin.getHandGuiService().hasPendingSignInput(event.getPlayer().getUniqueId());
-        if (!pendingSound && !pendingColor) {
-            return;
-        }
-        String plain = PlainTextComponentSerializer.plainText().serialize(event.message());
-        event.viewers().clear();
-        event.message(Component.empty());
-        event.setCancelled(true);
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (pendingSound) {
-                plugin.getHandGuiService().handlePendingSoundInput(event.getPlayer(), plain);
-            } else {
-                plugin.getHandGuiService().handlePendingSignInput(event.getPlayer(), plain);
-            }
-        });
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
-    public void onLegacyAsyncChat(AsyncPlayerChatEvent event) {
+    public void onAsyncChat(AsyncPlayerChatEvent event) {
         boolean pendingSound = plugin.getHandGuiService().hasPendingSoundInput(event.getPlayer().getUniqueId());
         boolean pendingColor = plugin.getHandGuiService().hasPendingSignInput(event.getPlayer().getUniqueId());
         if (!pendingSound && !pendingColor) {
@@ -139,7 +114,7 @@ public final class HandGuiListener implements Listener {
         event.getRecipients().clear();
         event.setMessage("");
         event.setCancelled(true);
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        plugin.scheduler().runSync(() -> {
             if (pendingSound) {
                 plugin.getHandGuiService().handlePendingSoundInput(event.getPlayer(), plain);
             } else {

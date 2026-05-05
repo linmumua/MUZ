@@ -62,7 +62,7 @@ final class BotAiCoordinator {
                 80
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().getServer().getScheduler().runTask(support.plugin(), () -> {
+            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.BIDDING)) {
                     return;
                 }
@@ -93,7 +93,7 @@ final class BotAiCoordinator {
                 100
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().getServer().getScheduler().runTask(support.plugin(), () -> {
+            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.DOUBLING)) {
                     return;
                 }
@@ -124,7 +124,7 @@ final class BotAiCoordinator {
                 140
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().getServer().getScheduler().runTask(support.plugin(), () -> {
+            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.PLAYING)) {
                     return;
                 }

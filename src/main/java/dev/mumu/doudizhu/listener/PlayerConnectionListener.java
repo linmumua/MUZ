@@ -84,19 +84,19 @@ public final class PlayerConnectionListener implements Listener {
     }
 
     private void scheduleViewerSync(org.bukkit.entity.Player player, long delayTicks) {
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        plugin.scheduler().runLater(delayTicks, () -> {
             if (!player.isOnline() || plugin.isShuttingDown()) {
                 return;
             }
             plugin.getPhysicalTableManager().syncViewer(player);
             plugin.getZjhPhysicalTableManager().syncViewer(player);
-        }, delayTicks);
+        });
     }
 
     private void scheduleViewerWarmup(org.bukkit.entity.Player player, String reason) {
         long[] delays = {5L, 30L, 80L, 160L, 320L};
         for (long delay : delays) {
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            plugin.scheduler().runLater(delay, () -> {
                 if (!player.isOnline() || plugin.isShuttingDown()) {
                     return;
                 }
@@ -107,7 +107,7 @@ public final class PlayerConnectionListener implements Listener {
                 plugin.getZjhPhysicalTableManager().repairIncompleteTables("viewer-" + reason + "-texas-" + delay);
                 plugin.getPhysicalTableManager().syncViewer(player);
                 plugin.getZjhPhysicalTableManager().syncViewer(player);
-            }, delay);
+            });
         }
     }
 }

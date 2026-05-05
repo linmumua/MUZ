@@ -496,7 +496,7 @@ public final class DoudizhuCommand implements TabExecutor {
             AiChatGateway.Message.user(prompt)
         );
         gateway.chatAsync(new AiChatGateway.ChatRequest(messages, plugin.aiModelName(), null, null))
-            .whenComplete((response, error) -> plugin.getServer().getScheduler().runTask(plugin, () -> {
+            .whenComplete((response, error) -> plugin.scheduler().runSync(() -> {
                 if (error != null) {
                     String detail = error.getCause() == null ? error.getMessage() : error.getCause().getMessage();
                     sender.sendMessage(message("DeepSeek 调试失败: " + safeText(detail), NamedTextColor.RED));

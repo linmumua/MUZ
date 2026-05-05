@@ -107,11 +107,11 @@ final class TableMusicCoordinator {
             return;
         }
         long delay = PackSounds.bgmDurationTicks(soundKey);
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        plugin.scheduler().runLater(delay, () -> {
             if (epoch != musicEpoch || phaseSupplier.get() == GamePhase.LOBBY) {
                 return;
             }
             startTrack(nextScheduledTrack(soundKey), epoch);
-        }, delay);
+        });
     }
 }

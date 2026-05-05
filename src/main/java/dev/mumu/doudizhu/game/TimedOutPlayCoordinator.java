@@ -71,7 +71,7 @@ final class TimedOutPlayCoordinator {
                 140
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().getServer().getScheduler().runTask(support.plugin(), () -> {
+            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
                 if (!isDecisionStillValid(playerId, epoch)) {
                     clearPending(playerId, epoch);
                     return;

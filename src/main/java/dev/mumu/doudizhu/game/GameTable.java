@@ -1104,7 +1104,7 @@ public final class GameTable {
         lobbyUiResumeAtMillis = System.currentTimeMillis() + 5500L;
         for (int index = 0; index < 5; index++) {
             long delay = index * 20L;
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            plugin.scheduler().runLater(delay, () -> {
                 if (plugin.isShuttingDown()) {
                     return;
                 }
@@ -1115,7 +1115,7 @@ public final class GameTable {
                     }
                     player.sendActionBar(winners.contains(seat) ? MuzTheme.success("胜利") : MuzTheme.danger("失利"));
                 }
-            }, delay);
+            });
         }
     }
 
@@ -1209,12 +1209,12 @@ public final class GameTable {
         if (!canScheduleTasks() || !debugAutoLoop || seats.size() != PLAYER_COUNT || !seats.stream().allMatch(this::isBot)) {
             return;
         }
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        plugin.scheduler().runLater(2L, () -> {
             try {
                 startRound(plugin.getServer().getConsoleSender());
             } catch (RuntimeException ignored) {
             }
-        }, 2L);
+        });
     }
 
     private void promptBidTurn() {
@@ -1626,10 +1626,10 @@ public final class GameTable {
         if (canScheduleTasks() && delayedUnreadyReminderAtMillis < lobbyUiResumeAtMillis) {
             delayedUnreadyReminderAtMillis = lobbyUiResumeAtMillis;
             long delayTicks = Math.max(1L, (remainingMillis + 49L) / 50L);
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            plugin.scheduler().runLater(delayTicks, () -> {
                 delayedUnreadyReminderAtMillis = 0L;
                 warnUnreadyPlayersForStartAttempt();
-            }, delayTicks);
+            });
         }
         return true;
     }
@@ -2015,7 +2015,7 @@ public final class GameTable {
         UUID botId = currentTurn;
         GamePhase scheduledPhase = phase;
         long delay = plugin.randomBotActionDelayTicks(random);
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        plugin.scheduler().runLater(delay, () -> {
             if (epoch != botActionEpoch || currentTurn == null || !isBot(currentTurn) || !Objects.equals(currentTurn, botId) || phase != scheduledPhase) {
                 return;
             }
@@ -2030,7 +2030,7 @@ public final class GameTable {
             if (scheduledPhase == GamePhase.PLAYING) {
                 executeBotPlay(botId, epoch);
             }
-        }, delay);
+        });
     }
 
     private boolean canScheduleTasks() {

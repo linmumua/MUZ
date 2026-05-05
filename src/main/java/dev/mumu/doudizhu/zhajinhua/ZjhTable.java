@@ -731,12 +731,12 @@ public final class ZjhTable {
         playTableSound("minecraft:ui.toast.challenge_complete", 0.35f, 1.00f);
         resetRound();
         if (canScheduleTasks() && debugAutoLoop && seats.size() >= 2 && seats.stream().allMatch(this::isBot)) {
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            plugin.scheduler().runLater(2L, () -> {
                 try {
                     startRound(plugin.getServer().getConsoleSender());
                 } catch (RuntimeException ignored) {
                 }
-            }, 2L);
+            });
         }
         return true;
     }
@@ -831,12 +831,12 @@ public final class ZjhTable {
         }
         resetRound();
         if (canScheduleTasks() && debugAutoLoop && seats.size() >= 2 && seats.stream().allMatch(this::isBot)) {
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            plugin.scheduler().runLater(2L, () -> {
                 try {
                     startRound(plugin.getServer().getConsoleSender());
                 } catch (RuntimeException ignored) {
                 }
-            }, 2L);
+            });
         }
     }
 
@@ -1062,12 +1062,12 @@ public final class ZjhTable {
         }
         int epoch = ++actionEpoch;
         long delay = plugin.randomBotActionDelayTicks(random);
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        plugin.scheduler().runLater(delay, () -> {
             if (epoch != actionEpoch || currentTurn == null || !isBot(currentTurn) || phase != ZjhPhase.PLAYING) {
                 return;
             }
             executeBotTurn(currentTurn);
-        }, delay);
+        });
     }
 
     private void executeBotTurn(UUID botId) {

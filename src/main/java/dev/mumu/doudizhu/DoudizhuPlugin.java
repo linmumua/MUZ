@@ -6,6 +6,7 @@ import dev.mumu.doudizhu.command.DoudizhuCommand;
 import dev.mumu.doudizhu.compat.CraftEngineBundleExporter;
 import dev.mumu.doudizhu.compat.CraftEngineFurnitureService;
 import dev.mumu.doudizhu.compat.VaultEconomyBridge;
+import dev.mumu.doudizhu.config.MuzYamlConfig;
 import dev.mumu.doudizhu.game.GameTable;
 import dev.mumu.doudizhu.game.TableManager;
 import dev.mumu.doudizhu.listener.CraftEngineLifecycleListener;
@@ -14,6 +15,7 @@ import dev.mumu.doudizhu.listener.PlayerConnectionListener;
 import dev.mumu.doudizhu.listener.WorldTableInteractionListener;
 import dev.mumu.doudizhu.placeholder.MuzPlaceholderExpansion;
 import dev.mumu.doudizhu.room.TableLevel;
+import dev.mumu.doudizhu.scheduler.MuzScheduler;
 import dev.mumu.doudizhu.storage.DatabaseManager;
 import dev.mumu.doudizhu.storage.MatchParticipantRecord;
 import dev.mumu.doudizhu.storage.MatchRecord;
@@ -47,7 +49,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
-import net.kyori.adventure.text.object.ObjectContents;
+import dev.mumu.doudizhu.compat.VersionCompat;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -58,8 +60,6 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.block.BlockFace;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
-import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
@@ -142,6 +142,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private AiChatGateway.ProviderConfig aiProviderConfig;
     private HookSnapshot lastVaultHookSnapshot;
     private DatabaseManager databaseManager;
+    private MuzScheduler scheduler;
     private PhysicalTableManager physicalTableManager;
     private boolean cardHologramLabelsEnabled;
     private boolean duplicateOnlyCardLabels;
@@ -320,10 +321,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private final Map<Integer, BotHandle> botHandlesByNumericId = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> botNumericIdsByUuid = new ConcurrentHashMap<>();
     private final Map<TableLevel, RoomLevelProfile> roomLevelProfiles = new EnumMap<>(TableLevel.class);
+    private File configFile;
+    private MuzYamlConfig config;
     private File playerSettingsFile;
-    private YamlConfiguration playerSettingsConfig;
+    private MuzYamlConfig playerSettingsConfig;
     private File optionProfilesFile;
-    private YamlConfiguration optionProfilesConfig;
+    private MuzYamlConfig optionProfilesConfig;
     private volatile boolean shuttingDown;
     private volatile boolean sqlTablesLoaded;
     private volatile List<PersistedTableRecord> pendingPersistedTables = List.of();
@@ -333,9 +336,53 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private boolean craftEngineProtectionListenerRegistered;
     private static final DateTimeFormatter HISTORY_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
 
+    public MuzScheduler scheduler() {
+        if (scheduler == null) {
+            scheduler = new MuzScheduler(this);
+        }
+        return scheduler;
+    }
+
+    public MuzYamlConfig yamlConfig() {
+        if (config == null) {
+            configFile = new File(getDataFolder(), "config.yml");
+            config = new MuzYamlConfig(configFile.toPath());
+        }
+        return config;
+    }
+
+    private void saveDefaultYamlConfig() {
+        configFile = new File(getDataFolder(), "config.yml");
+        if (!configFile.isFile()) {
+            saveResource("config.yml", false);
+        }
+        config = new MuzYamlConfig(configFile.toPath());
+    }
+
+    private void reloadYamlConfig() {
+        yamlConfig().reload();
+    }
+
+    private void saveYamlConfig() {
+        try {
+            yamlConfig().save();
+        } catch (IOException exception) {
+            getLogger().warning("保存 config.yml 失败: " + exception.getMessage());
+        }
+    }
+
+    private void mergeDefaultYamlConfig() {
+        try (java.io.InputStream stream = getResource("config.yml")) {
+            yamlConfig().mergeMissingFrom(stream);
+        } catch (IOException exception) {
+            getLogger().warning("合并默认 config.yml 失败: " + exception.getMessage());
+        }
+    }
+
     @Override
     public void onEnable() {
-        saveDefaultConfig();
+        scheduler = new MuzScheduler(this);
+        saveDefaultYamlConfig();
         ensureConfigIntegrity();
         optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
         loadRenderSettings();
@@ -372,10 +419,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new CraftEngineLifecycleListener(this), this);
         getServer().getPluginManager().registerEvents(new HandGuiListener(this), this);
         ensureCraftEngineProtectionListenerRegistered();
-        getServer().getScheduler().runTaskTimer(this, () -> physicalTableManager.tick(), 1L, 1L);
-        getServer().getScheduler().runTaskTimer(this, () -> zjhPhysicalTableManager.tick(), 1L, 1L);
-        getServer().getScheduler().runTaskTimer(this, () -> tableManager.tick(), 1L, 10L);
-        getServer().getScheduler().runTaskTimer(this, () -> zjhManager.tick(), 1L, 10L);
+        scheduler().runTimer(1L, 1L, () -> physicalTableManager.tick());
+        scheduler().runTimer(1L, 1L, () -> zjhPhysicalTableManager.tick());
+        scheduler().runTimer(1L, 10L, () -> tableManager.tick());
+        scheduler().runTimer(1L, 10L, () -> zjhManager.tick());
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
         CraftEngineBundleExporter.BundleExportResult exportResult = craftEngineBundleExporter.exportIfAvailable();
@@ -565,10 +612,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (uri.getScheme() == null || uri.getScheme().isBlank() || uri.getHost() == null || uri.getHost().isBlank()) {
             throw new IllegalArgumentException("API 链接格式不对，示例：https://api.deepseek.com");
         }
-        getConfig().set("ai.deepseek.enabled", true);
-        getConfig().set("bot.ai.enabled", true);
-        getConfig().set("ai.deepseek.url", normalized);
-        saveConfig();
+        yamlConfig().set("ai.deepseek.enabled", true);
+        yamlConfig().set("bot.ai.enabled", true);
+        yamlConfig().set("ai.deepseek.url", normalized);
+        saveYamlConfig();
         loadAiSettings();
     }
 
@@ -577,10 +624,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (normalized.isBlank()) {
             throw new IllegalArgumentException("API 密钥不能为空。");
         }
-        getConfig().set("ai.deepseek.enabled", true);
-        getConfig().set("bot.ai.enabled", true);
-        getConfig().set("ai.deepseek.api-key", normalized);
-        saveConfig();
+        yamlConfig().set("ai.deepseek.enabled", true);
+        yamlConfig().set("bot.ai.enabled", true);
+        yamlConfig().set("ai.deepseek.api-key", normalized);
+        saveYamlConfig();
         loadAiSettings();
     }
 
@@ -589,10 +636,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (normalized.isBlank()) {
             throw new IllegalArgumentException("模型不能为空。");
         }
-        getConfig().set("ai.deepseek.enabled", true);
-        getConfig().set("bot.ai.enabled", true);
-        getConfig().set("ai.deepseek.model", normalized);
-        saveConfig();
+        yamlConfig().set("ai.deepseek.enabled", true);
+        yamlConfig().set("bot.ai.enabled", true);
+        yamlConfig().set("ai.deepseek.model", normalized);
+        saveYamlConfig();
         loadAiSettings();
     }
 
@@ -601,10 +648,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (normalized.isBlank()) {
             throw new IllegalArgumentException("全局人设词不能为空。");
         }
-        getConfig().set("ai.deepseek.enabled", true);
-        getConfig().set("bot.ai.enabled", true);
-        getConfig().set("ai.deepseek.system-prompt", normalized);
-        saveConfig();
+        yamlConfig().set("ai.deepseek.enabled", true);
+        yamlConfig().set("bot.ai.enabled", true);
+        yamlConfig().set("ai.deepseek.system-prompt", normalized);
+        saveYamlConfig();
         loadAiSettings();
     }
 
@@ -619,7 +666,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         Integer numericId = getBotNumericId(botId);
         String fileId = numericId == null ? botId.toString().substring(0, 8) : String.valueOf(numericId);
         File file = new File(dir, "bot-" + fileId + ".yml");
-        YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
+        MuzYamlConfig configuration = new MuzYamlConfig(file.toPath());
         long now = System.currentTimeMillis();
         configuration.set("bot.numeric-id", numericId);
         configuration.set("bot.uuid", botId.toString());
@@ -648,7 +695,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             configuration.set("last.response", null);
         }
         try {
-            configuration.save(file);
+            configuration.save();
         } catch (IOException exception) {
             getLogger().warning("保存 bot AI 返回数据失败: " + exception.getMessage());
         }
@@ -1007,20 +1054,20 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void setChipPaymentEnabled(boolean enabled) {
         chipPaymentEnabled = enabled;
-        getConfig().set("economy.payment.use-chip", enabled);
-        saveConfig();
+        yamlConfig().set("economy.payment.use-chip", enabled);
+        saveYamlConfig();
     }
 
     public ItemStack chipPaymentItem() {
-        ItemStack stored = getConfig().getItemStack("economy.payment.chip-item-stack");
+        ItemStack stored = yamlConfig().getItemStack("economy.payment.chip-item-stack");
         return stored == null ? defaultChipItem() : stored.clone();
     }
 
     public void setChipPaymentItem(ItemStack itemStack) {
         ItemStack copy = itemStack == null ? defaultChipItem() : itemStack.clone();
         copy.setAmount(1);
-        getConfig().set("economy.payment.chip-item-stack", copy);
-        saveConfig();
+        yamlConfig().set("economy.payment.chip-item-stack", copy);
+        saveYamlConfig();
     }
 
     public int getChipBalance(UUID playerId) {
@@ -1108,7 +1155,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public TableLevel defaultCreateRoomLevel() {
-        TableLevel level = TableLevel.parse(getConfig().getString("room-levels.default-create-level", "low"));
+        TableLevel level = TableLevel.parse(yamlConfig().getString("room-levels.default-create-level", "low"));
         return level == null ? TableLevel.LOW : level;
     }
 
@@ -1152,8 +1199,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return;
         }
         double normalized = Math.max(0.0, multiplier);
-        getConfig().set("room-levels." + level.key() + ".multiplier", normalized);
-        saveConfig();
+        yamlConfig().set("room-levels." + level.key() + ".multiplier", normalized);
+        saveYamlConfig();
         loadRoomLevelProfiles();
         refreshAllPlacedTables();
     }
@@ -1163,8 +1210,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return false;
         }
         boolean next = !isRoomLevelEconomyConfigured(level);
-        getConfig().set("room-levels." + level.key() + ".economy-enabled", next);
-        saveConfig();
+        yamlConfig().set("room-levels." + level.key() + ".economy-enabled", next);
+        saveYamlConfig();
         loadRoomLevelProfiles();
         refreshAllPlacedTables();
         return next;
@@ -1493,11 +1540,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hoverGlowRed = color.getRed();
         hoverGlowGreen = color.getGreen();
         hoverGlowBlue = color.getBlue();
-        getConfig().set("render.hover-glow.color", rgbLabel(color));
-        getConfig().set("render.hover-glow.color.red", color.getRed());
-        getConfig().set("render.hover-glow.color.green", color.getGreen());
-        getConfig().set("render.hover-glow.color.blue", color.getBlue());
-        saveConfig();
+        yamlConfig().set("render.hover-glow.color", rgbLabel(color));
+        yamlConfig().set("render.hover-glow.color.red", color.getRed());
+        yamlConfig().set("render.hover-glow.color.green", color.getGreen());
+        yamlConfig().set("render.hover-glow.color.blue", color.getBlue());
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
@@ -1511,11 +1558,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         selectedGlowRed = color.getRed();
         selectedGlowGreen = color.getGreen();
         selectedGlowBlue = color.getBlue();
-        getConfig().set("render.selected-glow.color", rgbLabel(color));
-        getConfig().set("render.selected-glow.color.red", color.getRed());
-        getConfig().set("render.selected-glow.color.green", color.getGreen());
-        getConfig().set("render.selected-glow.color.blue", color.getBlue());
-        saveConfig();
+        yamlConfig().set("render.selected-glow.color", rgbLabel(color));
+        yamlConfig().set("render.selected-glow.color.red", color.getRed());
+        yamlConfig().set("render.selected-glow.color.green", color.getGreen());
+        yamlConfig().set("render.selected-glow.color.blue", color.getBlue());
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
@@ -1784,8 +1831,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void cyclePlayerHeadDisplayMode() {
         playerHeadDisplayMode = playerHeadDisplayMode().next();
-        getConfig().set("render.player-head-show-id", playerHeadDisplayMode.configValue());
-        saveConfig();
+        yamlConfig().set("render.player-head-show-id", playerHeadDisplayMode.configValue());
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
@@ -1903,6 +1950,77 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public float getPrivateCardDepthScale() {
         return privateCardDepthScale;
+    }
+
+    // Mahjong layout config getters
+    public double getMahjongDisplayCenterXOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.display-center-x-offset", 0.0);
+    }
+
+    public double getMahjongDisplayCenterYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.display-center-y-offset", 0.0);
+    }
+
+    public double getMahjongDisplayCenterZOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.display-center-z-offset", 0.0);
+    }
+
+    public double getMahjongTableVisualYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.table-visual-y-offset", 0.0);
+    }
+
+    public double getMahjongSeatDistanceFromHandBase() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-distance-from-hand-base", 0.0);
+    }
+
+    public double getMahjongSeatBaseYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-base-y-offset", 0.0);
+    }
+
+    public double getMahjongSeatAnchorYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-anchor-y-offset", 0.0);
+    }
+
+    public double getMahjongSeatLabelDepthOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-label-depth-offset", 0.0);
+    }
+
+    public double getMahjongSeatActionLabelYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-action-label-y-offset", 0.0);
+    }
+
+    public double getMahjongSeatSideActionHorizontalOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-side-action-horizontal-offset", 0.0);
+    }
+
+    public double getMahjongCenterLabelYOffset() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.center-label-y-offset", 0.0);
+    }
+
+    public double getMahjongSeatActionLabelScale() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-action-label-scale", 0.0);
+    }
+
+    public double getMahjongSeatActionHitboxWidth() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-action-hitbox-width", 0.0);
+    }
+
+    public double getMahjongSeatActionHitboxHeight() {
+        return yamlConfig().getDouble("integration.mahjong.render.layout.seat-action-hitbox-height", 0.0);
+    }
+
+    public void openExternalMahjongEntry(Player player) {
+        // Placeholder for external mahjong entry
+        player.sendMessage("External mahjong entry not implemented yet.");
+    }
+
+    public boolean isMahjongIntegrationEnabled() {
+        return yamlConfig().getBoolean("integration.mahjong.enabled", false);
+    }
+
+    public void persistMahjongTable(String id, Location center, UUID ownerUuid, String ownerName) {
+        // Placeholder for persisting mahjong table
+        getLogger().info("Persisting mahjong table: " + id + " at " + center);
     }
 
     public float getPublicCardWidthScale() {
@@ -2231,8 +2349,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void setCountdownSoundSpec(String rawSpec) {
         countdownSoundSpec = normalizeCountdownSoundSpec(rawSpec);
-        getConfig().set("actionbar.countdown-sound", countdownSoundSpec);
-        saveConfig();
+        yamlConfig().set("actionbar.countdown-sound", countdownSoundSpec);
+        saveYamlConfig();
     }
 
     public String getUnreadyWarningSoundSpec() {
@@ -2241,8 +2359,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void setUnreadyWarningSoundSpec(String rawSpec) {
         unreadyWarningSoundSpec = normalizeCountdownSoundSpec(rawSpec);
-        getConfig().set("actionbar.unready-warning-sound", unreadyWarningSoundSpec);
-        saveConfig();
+        yamlConfig().set("actionbar.unready-warning-sound", unreadyWarningSoundSpec);
+        saveYamlConfig();
     }
 
     public String getPlacementBlockedSoundSpec() {
@@ -2251,8 +2369,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void setPlacementBlockedSoundSpec(String rawSpec) {
         placementBlockedSoundSpec = normalizeCountdownSoundSpec(rawSpec);
-        getConfig().set("table.placement-blocked-sound", placementBlockedSoundSpec);
-        saveConfig();
+        yamlConfig().set("table.placement-blocked-sound", placementBlockedSoundSpec);
+        saveYamlConfig();
     }
 
     public SelectionSound selectionSoundFor(UUID playerId) {
@@ -2522,13 +2640,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
         for (int index = 0; index < delayTicks.length; index++) {
             final int pass = index + 1;
             final long delay = Math.max(1L, delayTicks[index]);
-            getServer().getScheduler().runTaskLater(this, () -> {
+            scheduler().runLater(delay, () -> {
                 if (shuttingDown) {
                     return;
                 }
                 getLogger().info("执行自动重载 MUZ: reason=" + reason + " pass=" + pass);
                 reloadPluginState();
-            }, delay);
+            });
         }
     }
 
@@ -2540,7 +2658,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         for (int index = 0; index < delayTicks.length; index++) {
             final int pass = index + 1;
             final long delay = Math.max(1L, delayTicks[index]);
-            getServer().getScheduler().runTaskLater(this, () -> {
+            scheduler().runLater(delay, () -> {
                 if (shuttingDown) {
                     return;
                 }
@@ -2557,7 +2675,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                     zjhPhysicalTableManager.rebuildAllTables();
                     zjhPhysicalTableManager.repairIncompleteTables(reason + "-texas-pass-" + pass);
                 }
-            }, delay);
+            });
         }
     }
 
@@ -2567,24 +2685,24 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (copy != null) {
             copy.setAmount(1);
         }
-        getConfig().set(base + ".item-stack", copy);
-        getConfig().set(base + ".namespace", null);
-        getConfig().set(base + ".model-path", null);
-        saveConfig();
+        yamlConfig().set(base + ".item-stack", copy);
+        yamlConfig().set(base + ".namespace", null);
+        yamlConfig().set(base + ".model-path", null);
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
     public void resetFurnitureDisplayItem(FurnitureType type) {
         String base = type.configBasePath();
-        getConfig().set(base + ".item-stack", null);
-        getConfig().set(base + ".item-model", type.defaultItemModelId());
-        getConfig().set(base + ".item-name", type.defaultDisplayName());
-        saveConfig();
+        yamlConfig().set(base + ".item-stack", null);
+        yamlConfig().set(base + ".item-model", type.defaultItemModelId());
+        yamlConfig().set(base + ".item-name", type.defaultDisplayName());
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
     public ItemStack getConfiguredFurnitureItem(FurnitureType type) {
-        ItemStack stored = getConfig().getItemStack(type.configBasePath() + ".item-stack");
+        ItemStack stored = yamlConfig().getItemStack(type.configBasePath() + ".item-stack");
         return stored == null ? null : stored.clone();
     }
 
@@ -2726,23 +2844,23 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public void adjustAdminSetting(AdminSetting setting, boolean increase, int multiplier) {
         if (setting.booleanSetting()) {
-            getConfig().set(setting.path(), !getConfig().getBoolean(setting.path(), setting.defaultBoolean()));
+            yamlConfig().set(setting.path(), !yamlConfig().getBoolean(setting.path(), setting.defaultBoolean()));
         } else if (setting.integerSetting()) {
-            int current = getConfig().getInt(setting.path(), (int) setting.defaultValue());
+            int current = yamlConfig().getInt(setting.path(), (int) setting.defaultValue());
             int delta = (int) setting.step() * Math.max(1, multiplier);
             int next = current + (increase ? delta : -delta);
             next = Math.max((int) setting.minValue(), Math.min((int) setting.maxValue(), next));
-            getConfig().set(setting.path(), next);
+            yamlConfig().set(setting.path(), next);
         } else {
-            double current = getConfig().getDouble(setting.path(), setting.defaultValue());
+            double current = yamlConfig().getDouble(setting.path(), setting.defaultValue());
             double delta = adminSettingStep(setting) * Math.max(1, multiplier);
             current = normalizeAdminCurrentValue(setting, current);
             double next = current + (increase ? delta : -delta);
             next = Math.max(setting.minValue(), Math.min(setting.maxValue(), next));
             next = normalizeAdminStoredValue(setting, next);
-            getConfig().set(setting.path(), next);
+            yamlConfig().set(setting.path(), next);
             if (setting == AdminSetting.TABLE_SPAWN_OFFSET_Y) {
-                saveConfig();
+                saveYamlConfig();
                 loadRenderSettings();
                 double shift = next - current;
                 if (physicalTableManager != null) {
@@ -2754,7 +2872,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 return;
             }
         }
-        saveConfig();
+        saveYamlConfig();
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
@@ -2769,32 +2887,30 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return playerHeadDisplayModeLabel();
         }
         if (setting.booleanSetting()) {
-            return getConfig().getBoolean(setting.path(), setting.defaultBoolean()) ? "开启" : "关闭";
+            return yamlConfig().getBoolean(setting.path(), setting.defaultBoolean()) ? "开启" : "关闭";
         }
         if (setting.integerSetting()) {
-            return String.valueOf(getConfig().getInt(setting.path(), (int) setting.defaultValue()));
+            return String.valueOf(yamlConfig().getInt(setting.path(), (int) setting.defaultValue()));
         }
         if (setting == AdminSetting.TABLE_SPAWN_OFFSET_Y && usesBlockTablePlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockTableOffset(getConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockTableOffset(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
         }
         if (setting == AdminSetting.CHAIR_ROTATION_DEGREES && usesBlockChairPlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockChairRotation(getConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockChairRotation(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
         }
         if (setting == AdminSetting.CHAIR_DISTANCE && usesBlockChairPlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockChairDistance(getConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockChairDistance(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
         }
         if (usesFinePrecision(setting)) {
-            return String.format(java.util.Locale.ROOT, "%.2f", getConfig().getDouble(setting.path(), setting.defaultValue()));
+            return String.format(java.util.Locale.ROOT, "%.2f", yamlConfig().getDouble(setting.path(), setting.defaultValue()));
         }
-        return String.format(java.util.Locale.ROOT, "%.1f", getConfig().getDouble(setting.path(), setting.defaultValue()));
+        return String.format(java.util.Locale.ROOT, "%.1f", yamlConfig().getDouble(setting.path(), setting.defaultValue()));
     }
 
     public Component playerIdentityComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
         String playerName = resolvePlayerName(playerId);
         if (playerName != null && !playerName.isBlank()) {
-            Component head = Component.object(ObjectContents.playerHead().name(playerName).build())
-                .color(NamedTextColor.WHITE)
-                .decoration(TextDecoration.ITALIC, false);
+            Component head = VersionCompat.createPlayerHeadComponent(playerName);
             Component name = MuzTheme.named(" " + playerName, fallbackColor)
                 .decoration(TextDecoration.ITALIC, false);
             return switch (playerHeadDisplayMode()) {
@@ -2810,9 +2926,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public Component playerHeadComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
         String playerName = resolvePlayerName(playerId);
         if (playerName != null && !playerName.isBlank()) {
-            return Component.object(ObjectContents.playerHead().name(playerName).build())
-                .color(NamedTextColor.WHITE)
-                .decoration(TextDecoration.ITALIC, false);
+            return VersionCompat.createPlayerHeadComponent(playerName);
         }
         return MuzTheme.named(normalizeNonBlank(fallbackText, "未知玩家"), fallbackColor)
             .decoration(TextDecoration.ITALIC, false);
@@ -2837,209 +2951,209 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private void loadRenderSettings() {
-        cardHologramLabelsEnabled = getConfig().getBoolean("cards.hologram-labels.enabled", true);
-        duplicateOnlyCardLabels = getConfig().getBoolean("cards.hologram-labels.duplicate-ranks-only", false);
-        tableSpawnOffsetY = getConfig().getDouble("table.spawn-offset-y", 0.18);
-        privateCardScale = (float) getConfig().getDouble("render.private-card-scale", DEFAULT_PRIVATE_CARD_SCALE);
-        publicCardScale = (float) getConfig().getDouble("render.public-trick-card-scale", DEFAULT_PUBLIC_CARD_SCALE);
-        privateCardWidthScale = (float) getConfig().getDouble("render.private-card-size.width", privateCardScale);
-        privateCardHeightScale = (float) getConfig().getDouble("render.private-card-size.height", privateCardScale);
-        privateCardDepthScale = (float) getConfig().getDouble("render.private-card-size.depth", privateCardScale);
-        publicCardWidthScale = (float) getConfig().getDouble("render.public-card-size.width", publicCardScale);
-        publicCardHeightScale = (float) getConfig().getDouble("render.public-card-size.height", publicCardScale);
-        publicCardDepthScale = (float) getConfig().getDouble("render.public-card-size.depth", publicCardScale);
-        hoverCardScale = (float) getConfig().getDouble("render.card-hover.scale", 1.08);
-        hoverCardLift = getConfig().getDouble("render.card-hover.lift", 0.06);
-        cardHoverInterpolationTicks = Math.max(1, getConfig().getInt("render.card-hover.interpolation-ticks", 6));
-        cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, getConfig().getInt("render.card-hover.animation-type", 1)));
-        hoverButtonScale = (float) getConfig().getDouble("render.button-hover.scale", 1.06);
-        hoverButtonLift = getConfig().getDouble("render.button-hover.lift", 0.03);
-        buttonHoverInterpolationTicks = Math.max(1, getConfig().getInt("render.button-hover.interpolation-ticks", 8));
-        buttonHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, getConfig().getInt("render.button-hover.animation-type", 3)));
-        buttonScale = (float) getConfig().getDouble("render.button-scale", 0.42);
-        tableScale = (float) getConfig().getDouble("render.furniture-scale.table", 2.25);
-        chairScale = (float) getConfig().getDouble("render.furniture-scale.chair", 1.35);
-        smallTextScale = (float) getConfig().getDouble("render.text-scale.small", 0.46);
-        statusTextScale = (float) getConfig().getDouble("render.text-scale.status", 0.72);
-        labelTextScale = (float) getConfig().getDouble("render.text-scale.label", 0.40);
-        playerHeadScale = (float) getConfig().getDouble("render.player-head-scale", 1.00);
-        playerHeadDisplayMode = PlayerHeadDisplayMode.fromConfig(getConfig().get("render.player-head-show-id"));
-        statusAvatarScale = (float) getConfig().getDouble("render.status-avatar.scale", playerHeadScale);
-        statusAvatarLateralOffset = getConfig().getDouble("render.status-avatar-offset.lateral", 0.0);
-        statusAvatarVerticalOffset = getConfig().getDouble("render.status-avatar-offset.vertical", 0.82);
-        statusAvatarDepthOffset = getConfig().getDouble("render.status-avatar-offset.depth", 0.0);
-        statusNameScale = (float) getConfig().getDouble("render.status-name.scale", smallTextScale);
-        statusNameLateralOffset = getConfig().getDouble("render.status-name-offset.lateral", 0.0);
-        statusNameVerticalOffset = getConfig().getDouble("render.status-name-offset.vertical", 0.56);
-        statusNameDepthOffset = getConfig().getDouble("render.status-name-offset.depth", 0.0);
-        seatAvatarScale = (float) getConfig().getDouble("render.seat-avatar.scale", playerHeadScale);
-        seatAvatarLateralOffset = getConfig().getDouble("render.seat-avatar-offset.lateral", 0.0);
-        seatAvatarVerticalOffset = getConfig().getDouble("render.seat-avatar-offset.vertical", 0.18);
-        seatAvatarDepthOffset = getConfig().getDouble("render.seat-avatar-offset.depth", 0.0);
-        seatNameScale = (float) getConfig().getDouble("render.seat-name.scale", smallTextScale);
-        seatNameLateralOffset = getConfig().getDouble("render.seat-name-offset.lateral", 0.0);
-        seatNameVerticalOffset = getConfig().getDouble("render.seat-name-offset.vertical", -0.04);
-        seatNameDepthOffset = getConfig().getDouble("render.seat-name-offset.depth", 0.0);
-        emptySeatScale = (float) getConfig().getDouble("render.empty-seat.scale", seatNameScale);
-        emptySeatLateralOffset = getConfig().getDouble("render.empty-seat-offset.lateral", seatNameLateralOffset);
-        emptySeatVerticalOffset = getConfig().getDouble("render.empty-seat-offset.vertical", seatNameVerticalOffset);
-        emptySeatDepthOffset = getConfig().getDouble("render.empty-seat-offset.depth", seatNameDepthOffset);
-        seatInfoScale = (float) getConfig().getDouble("render.seat-info.scale", smallTextScale);
-        seatInfoLateralOffset = getConfig().getDouble("render.seat-info-offset.lateral", 0.0);
-        seatInfoVerticalOffset = getConfig().getDouble("render.seat-info-offset.vertical", -0.22);
-        seatInfoDepthOffset = getConfig().getDouble("render.seat-info-offset.depth", 0.0);
-        selectedCardScale = (float) getConfig().getDouble("render.selected-card.scale", 1.00);
-        selectedCardLift = getConfig().getDouble("render.selected-card.lift", 0.18);
-        hoverGlowEnabled = getConfig().getBoolean("render.hover-glow.enabled", true);
+        cardHologramLabelsEnabled = yamlConfig().getBoolean("cards.hologram-labels.enabled", true);
+        duplicateOnlyCardLabels = yamlConfig().getBoolean("cards.hologram-labels.duplicate-ranks-only", false);
+        tableSpawnOffsetY = yamlConfig().getDouble("table.spawn-offset-y", 0.18);
+        privateCardScale = (float) yamlConfig().getDouble("render.private-card-scale", DEFAULT_PRIVATE_CARD_SCALE);
+        publicCardScale = (float) yamlConfig().getDouble("render.public-trick-card-scale", DEFAULT_PUBLIC_CARD_SCALE);
+        privateCardWidthScale = (float) yamlConfig().getDouble("render.private-card-size.width", privateCardScale);
+        privateCardHeightScale = (float) yamlConfig().getDouble("render.private-card-size.height", privateCardScale);
+        privateCardDepthScale = (float) yamlConfig().getDouble("render.private-card-size.depth", privateCardScale);
+        publicCardWidthScale = (float) yamlConfig().getDouble("render.public-card-size.width", publicCardScale);
+        publicCardHeightScale = (float) yamlConfig().getDouble("render.public-card-size.height", publicCardScale);
+        publicCardDepthScale = (float) yamlConfig().getDouble("render.public-card-size.depth", publicCardScale);
+        hoverCardScale = (float) yamlConfig().getDouble("render.card-hover.scale", 1.08);
+        hoverCardLift = yamlConfig().getDouble("render.card-hover.lift", 0.06);
+        cardHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.card-hover.interpolation-ticks", 6));
+        cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.card-hover.animation-type", 1)));
+        hoverButtonScale = (float) yamlConfig().getDouble("render.button-hover.scale", 1.06);
+        hoverButtonLift = yamlConfig().getDouble("render.button-hover.lift", 0.03);
+        buttonHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.button-hover.interpolation-ticks", 8));
+        buttonHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.button-hover.animation-type", 3)));
+        buttonScale = (float) yamlConfig().getDouble("render.button-scale", 0.42);
+        tableScale = (float) yamlConfig().getDouble("render.furniture-scale.table", 2.25);
+        chairScale = (float) yamlConfig().getDouble("render.furniture-scale.chair", 1.35);
+        smallTextScale = (float) yamlConfig().getDouble("render.text-scale.small", 0.46);
+        statusTextScale = (float) yamlConfig().getDouble("render.text-scale.status", 0.72);
+        labelTextScale = (float) yamlConfig().getDouble("render.text-scale.label", 0.40);
+        playerHeadScale = (float) yamlConfig().getDouble("render.player-head-scale", 1.00);
+        playerHeadDisplayMode = PlayerHeadDisplayMode.fromConfig(yamlConfig().get("render.player-head-show-id"));
+        statusAvatarScale = (float) yamlConfig().getDouble("render.status-avatar.scale", playerHeadScale);
+        statusAvatarLateralOffset = yamlConfig().getDouble("render.status-avatar-offset.lateral", 0.0);
+        statusAvatarVerticalOffset = yamlConfig().getDouble("render.status-avatar-offset.vertical", 0.82);
+        statusAvatarDepthOffset = yamlConfig().getDouble("render.status-avatar-offset.depth", 0.0);
+        statusNameScale = (float) yamlConfig().getDouble("render.status-name.scale", smallTextScale);
+        statusNameLateralOffset = yamlConfig().getDouble("render.status-name-offset.lateral", 0.0);
+        statusNameVerticalOffset = yamlConfig().getDouble("render.status-name-offset.vertical", 0.56);
+        statusNameDepthOffset = yamlConfig().getDouble("render.status-name-offset.depth", 0.0);
+        seatAvatarScale = (float) yamlConfig().getDouble("render.seat-avatar.scale", playerHeadScale);
+        seatAvatarLateralOffset = yamlConfig().getDouble("render.seat-avatar-offset.lateral", 0.0);
+        seatAvatarVerticalOffset = yamlConfig().getDouble("render.seat-avatar-offset.vertical", 0.18);
+        seatAvatarDepthOffset = yamlConfig().getDouble("render.seat-avatar-offset.depth", 0.0);
+        seatNameScale = (float) yamlConfig().getDouble("render.seat-name.scale", smallTextScale);
+        seatNameLateralOffset = yamlConfig().getDouble("render.seat-name-offset.lateral", 0.0);
+        seatNameVerticalOffset = yamlConfig().getDouble("render.seat-name-offset.vertical", -0.04);
+        seatNameDepthOffset = yamlConfig().getDouble("render.seat-name-offset.depth", 0.0);
+        emptySeatScale = (float) yamlConfig().getDouble("render.empty-seat.scale", seatNameScale);
+        emptySeatLateralOffset = yamlConfig().getDouble("render.empty-seat-offset.lateral", seatNameLateralOffset);
+        emptySeatVerticalOffset = yamlConfig().getDouble("render.empty-seat-offset.vertical", seatNameVerticalOffset);
+        emptySeatDepthOffset = yamlConfig().getDouble("render.empty-seat-offset.depth", seatNameDepthOffset);
+        seatInfoScale = (float) yamlConfig().getDouble("render.seat-info.scale", smallTextScale);
+        seatInfoLateralOffset = yamlConfig().getDouble("render.seat-info-offset.lateral", 0.0);
+        seatInfoVerticalOffset = yamlConfig().getDouble("render.seat-info-offset.vertical", -0.22);
+        seatInfoDepthOffset = yamlConfig().getDouble("render.seat-info-offset.depth", 0.0);
+        selectedCardScale = (float) yamlConfig().getDouble("render.selected-card.scale", 1.00);
+        selectedCardLift = yamlConfig().getDouble("render.selected-card.lift", 0.18);
+        hoverGlowEnabled = yamlConfig().getBoolean("render.hover-glow.enabled", true);
         Color loadedHoverGlow = parseRgbSpec(
-            getConfig().getString("render.hover-glow.color"),
+            yamlConfig().getString("render.hover-glow.color"),
             Color.fromRGB(
-                getConfig().getInt("render.hover-glow.color.red", 96),
-                getConfig().getInt("render.hover-glow.color.green", 180),
-                getConfig().getInt("render.hover-glow.color.blue", 255)
+                yamlConfig().getInt("render.hover-glow.color.red", 96),
+                yamlConfig().getInt("render.hover-glow.color.green", 180),
+                yamlConfig().getInt("render.hover-glow.color.blue", 255)
             )
         );
         hoverGlowRed = loadedHoverGlow.getRed();
         hoverGlowGreen = loadedHoverGlow.getGreen();
         hoverGlowBlue = loadedHoverGlow.getBlue();
-        selectedGlowEnabled = getConfig().getBoolean("render.selected-glow.enabled", true);
+        selectedGlowEnabled = yamlConfig().getBoolean("render.selected-glow.enabled", true);
         Color loadedSelectedGlow = parseRgbSpec(
-            getConfig().getString("render.selected-glow.color"),
+            yamlConfig().getString("render.selected-glow.color"),
             Color.fromRGB(
-                getConfig().getInt("render.selected-glow.color.red", 255),
-                getConfig().getInt("render.selected-glow.color.green", 226),
-                getConfig().getInt("render.selected-glow.color.blue", 92)
+                yamlConfig().getInt("render.selected-glow.color.red", 255),
+                yamlConfig().getInt("render.selected-glow.color.green", 226),
+                yamlConfig().getInt("render.selected-glow.color.blue", 92)
             )
         );
         selectedGlowRed = loadedSelectedGlow.getRed();
         selectedGlowGreen = loadedSelectedGlow.getGreen();
         selectedGlowBlue = loadedSelectedGlow.getBlue();
-        cardLabelHeight = getConfig().getDouble("render.card-label-height", 0.34);
-        cardLabelLateralOffset = getConfig().getDouble("render.card-label-offset.lateral", 0.0);
-        cardLabelDepthOffset = getConfig().getDouble("render.card-label-offset.depth", 0.0);
-        cardDepthOffset = (float) getConfig().getDouble("render.card-depth-offset", 0.01);
-        handSpacing = (float) getConfig().getDouble("render.hand-spacing", 0.21);
-        publicTrickSpacing = (float) getConfig().getDouble("render.public-trick-spacing", 0.22);
-        buttonRollDegrees = (float) getConfig().getDouble("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
-        buttonDistance = getConfig().getDouble("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
-        buttonHeight = getConfig().getDouble("render.button-offset.height", 1.02);
-        tableDisplayHeight = getConfig().getDouble("render.layout.table-display-height", 0.55);
-        tableColliderHeight = getConfig().getDouble("render.layout.table-collider-height", 0.72);
-        chairBaseHeight = getConfig().getDouble("render.layout.chair-base-height", 0.20);
-        chairColliderHeight = getConfig().getDouble("render.layout.chair-collider-height", 0.18);
-        chairSeatHeight = getConfig().getDouble("render.layout.chair-seat-height", 0.18);
-        chairInteractionHeight = getConfig().getDouble("render.layout.chair-interaction-height", 0.38);
-        chairLabelHeight = getConfig().getDouble("render.layout.chair-label-height", 1.35);
-        chairRotationDegrees = getConfig().getDouble("render.chair-rotation-degrees", 0.0);
-        chairVisualLateralOffset = getConfig().getDouble("render.chair-visual-offset.lateral", 0.0);
-        chairVisualVerticalOffset = getConfig().getDouble("render.chair-visual-offset.vertical", -0.04);
-        chairHitboxLateralOffset = getConfig().getDouble("render.chair-hitbox-offset.lateral", 0.0);
-        chairHitboxVerticalOffset = getConfig().getDouble("render.chair-hitbox-offset.vertical", -0.18);
-        chairHitboxWidth = getConfig().getDouble("render.chair-hitbox.width", 0.22);
-        chairHitboxHeight = getConfig().getDouble("render.chair-hitbox.height", 0.30);
-        buttonHitboxLateralOffset = getConfig().getDouble("render.button-hitbox-offset.lateral", 0.0);
-        buttonHitboxDepthOffset = getConfig().getDouble("render.button-hitbox-offset.depth", 0.0);
-        buttonHitboxVerticalOffset = getConfig().getDouble("render.button-hitbox-offset.vertical", 0.02);
-        buttonHitboxWidth = getConfig().getDouble("render.button-hitbox.width", 0.22);
-        buttonHitboxHeight = getConfig().getDouble("render.button-hitbox.height", 0.34);
-        cardHitboxLateralOffset = getConfig().getDouble("render.card-hitbox-offset.lateral", 0.0);
-        cardHitboxDepthOffset = getConfig().getDouble("render.card-hitbox-offset.depth", 0.0);
-        cardHitboxVerticalOffset = getConfig().getDouble("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
-        cardHitboxLength = getConfig().getDouble("render.card-hitbox.length", 0.30);
-        cardHitboxWidth = getConfig().getDouble("render.card-hitbox.width", 0.18);
-        cardHitboxHeight = getConfig().getDouble("render.card-hitbox.height", 0.62);
-        statusHeight = getConfig().getDouble("render.status-height", 3.10);
-        playDetailHeight = getConfig().getDouble("render.play-detail-height", 2.35);
-        publicTrickHeight = getConfig().getDouble("render.public-trick-height", 1.55);
-        statusLineWidth = getConfig().getInt("render.layout.status-line-width", 250);
-        handCenterDistance = getConfig().getDouble("render.layout.hand-center.distance", 1.62);
-        handCenterHeight = getConfig().getDouble("render.layout.hand-center.height", 1.23);
-        chairDistance = getConfig().getDouble("render.layout.chair-distance", 2.35);
-        joinLabelHeight = getConfig().getDouble("render.button-layout.join-label-height", 0.18);
-        joinLabelScale = (float) getConfig().getDouble("render.button-layout.join-label-scale", 0.46);
-        actionLabelHeight = getConfig().getDouble("render.button-layout.action-label-height", 0.18);
-        actionLabelScale = (float) getConfig().getDouble("render.button-layout.action-label-scale", 0.20);
-        buttonFrontBaseDistance = getConfig().getDouble("render.button-layout.front-base-distance", 1.40);
-        buttonSideBaseDistance = getConfig().getDouble("render.button-layout.side-base-distance", 1.72);
-        buttonDistanceFactor = getConfig().getDouble("render.button-layout.distance-factor", 0.45);
-        buttonSpacingScale = getConfig().getDouble("render.button-layout.spacing-scale", 1.0);
-        buttonArcSmallAngleDegrees = getConfig().getDouble("render.button-layout.arc-angle-small", 30.0);
-        buttonArcLargeAngleDegrees = getConfig().getDouble("render.button-layout.arc-angle-large", 42.0);
-        buttonArcSmallRadius = getConfig().getDouble("render.button-layout.arc-radius-small", 0.70);
-        buttonArcLargeRadius = getConfig().getDouble("render.button-layout.arc-radius-large", 0.86);
-        previewCardsPerRow = Math.max(1, getConfig().getInt("render.public-trick.cards-per-row", 6));
-        publicPreviewCompareRowOffset = getConfig().getDouble("render.public-trick.compare-row-offset", 0.28);
-        publicPreviewSelectedRowOffset = getConfig().getDouble("render.public-trick.selected-row-offset", -0.24);
-        publicPreviewRowDepthSpacing = getConfig().getDouble("render.public-trick.row-depth-spacing", 0.22);
-        publicPreviewLabelHeight = getConfig().getDouble("render.public-trick.label-height", 0.22);
-        globalPrivateHandLateralOffset = getConfig().getDouble("render.private-hand-offset.lateral", 0.0);
-        globalPrivateHandVerticalOffset = getConfig().getDouble("render.private-hand-offset.vertical", 0.0);
-        globalPrivateHandDepthOffset = getConfig().getDouble("render.private-hand-offset.depth", 0.0);
-        bgmVolume = (float) getConfig().getDouble("audio.bgm-volume", 0.55);
-        effectVolume = (float) getConfig().getDouble("audio.effect-volume", 1.0);
-        turnCountdownSeconds = getConfig().getInt("actionbar.turn-countdown-seconds", 20);
-        countdownSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("actionbar.countdown-sound", DEFAULT_COUNTDOWN_SOUND_SPEC));
-        unreadyWarningSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("actionbar.unready-warning-sound", DEFAULT_UNREADY_WARNING_SOUND_SPEC));
-        placementBlockedSoundSpec = safeNormalizeCountdownSoundSpec(getConfig().getString("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC));
-        botActionDelayMinTicks = getConfig().getInt("bot.action-delay-min-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
-        botActionDelayMaxTicks = getConfig().getInt("bot.action-delay-max-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
-        botAiEnabled = getConfig().getBoolean("bot.ai.enabled", false);
-        botAiTimeoutMs = Math.max(1000, getConfig().getInt("bot.ai.timeout-ms", 5000));
+        cardLabelHeight = yamlConfig().getDouble("render.card-label-height", 0.34);
+        cardLabelLateralOffset = yamlConfig().getDouble("render.card-label-offset.lateral", 0.0);
+        cardLabelDepthOffset = yamlConfig().getDouble("render.card-label-offset.depth", 0.0);
+        cardDepthOffset = (float) yamlConfig().getDouble("render.card-depth-offset", 0.01);
+        handSpacing = (float) yamlConfig().getDouble("render.hand-spacing", 0.21);
+        publicTrickSpacing = (float) yamlConfig().getDouble("render.public-trick-spacing", 0.22);
+        buttonRollDegrees = (float) yamlConfig().getDouble("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
+        buttonDistance = yamlConfig().getDouble("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
+        buttonHeight = yamlConfig().getDouble("render.button-offset.height", 1.02);
+        tableDisplayHeight = yamlConfig().getDouble("render.layout.table-display-height", 0.55);
+        tableColliderHeight = yamlConfig().getDouble("render.layout.table-collider-height", 0.72);
+        chairBaseHeight = yamlConfig().getDouble("render.layout.chair-base-height", 0.20);
+        chairColliderHeight = yamlConfig().getDouble("render.layout.chair-collider-height", 0.18);
+        chairSeatHeight = yamlConfig().getDouble("render.layout.chair-seat-height", 0.18);
+        chairInteractionHeight = yamlConfig().getDouble("render.layout.chair-interaction-height", 0.38);
+        chairLabelHeight = yamlConfig().getDouble("render.layout.chair-label-height", 1.35);
+        chairRotationDegrees = yamlConfig().getDouble("render.chair-rotation-degrees", 0.0);
+        chairVisualLateralOffset = yamlConfig().getDouble("render.chair-visual-offset.lateral", 0.0);
+        chairVisualVerticalOffset = yamlConfig().getDouble("render.chair-visual-offset.vertical", -0.04);
+        chairHitboxLateralOffset = yamlConfig().getDouble("render.chair-hitbox-offset.lateral", 0.0);
+        chairHitboxVerticalOffset = yamlConfig().getDouble("render.chair-hitbox-offset.vertical", -0.18);
+        chairHitboxWidth = yamlConfig().getDouble("render.chair-hitbox.width", 0.22);
+        chairHitboxHeight = yamlConfig().getDouble("render.chair-hitbox.height", 0.30);
+        buttonHitboxLateralOffset = yamlConfig().getDouble("render.button-hitbox-offset.lateral", 0.0);
+        buttonHitboxDepthOffset = yamlConfig().getDouble("render.button-hitbox-offset.depth", 0.0);
+        buttonHitboxVerticalOffset = yamlConfig().getDouble("render.button-hitbox-offset.vertical", 0.02);
+        buttonHitboxWidth = yamlConfig().getDouble("render.button-hitbox.width", 0.22);
+        buttonHitboxHeight = yamlConfig().getDouble("render.button-hitbox.height", 0.34);
+        cardHitboxLateralOffset = yamlConfig().getDouble("render.card-hitbox-offset.lateral", 0.0);
+        cardHitboxDepthOffset = yamlConfig().getDouble("render.card-hitbox-offset.depth", 0.0);
+        cardHitboxVerticalOffset = yamlConfig().getDouble("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
+        cardHitboxLength = yamlConfig().getDouble("render.card-hitbox.length", 0.30);
+        cardHitboxWidth = yamlConfig().getDouble("render.card-hitbox.width", 0.18);
+        cardHitboxHeight = yamlConfig().getDouble("render.card-hitbox.height", 0.62);
+        statusHeight = yamlConfig().getDouble("render.status-height", 3.10);
+        playDetailHeight = yamlConfig().getDouble("render.play-detail-height", 2.35);
+        publicTrickHeight = yamlConfig().getDouble("render.public-trick-height", 1.55);
+        statusLineWidth = yamlConfig().getInt("render.layout.status-line-width", 250);
+        handCenterDistance = yamlConfig().getDouble("render.layout.hand-center.distance", 1.62);
+        handCenterHeight = yamlConfig().getDouble("render.layout.hand-center.height", 1.23);
+        chairDistance = yamlConfig().getDouble("render.layout.chair-distance", 2.35);
+        joinLabelHeight = yamlConfig().getDouble("render.button-layout.join-label-height", 0.18);
+        joinLabelScale = (float) yamlConfig().getDouble("render.button-layout.join-label-scale", 0.46);
+        actionLabelHeight = yamlConfig().getDouble("render.button-layout.action-label-height", 0.18);
+        actionLabelScale = (float) yamlConfig().getDouble("render.button-layout.action-label-scale", 0.20);
+        buttonFrontBaseDistance = yamlConfig().getDouble("render.button-layout.front-base-distance", 1.40);
+        buttonSideBaseDistance = yamlConfig().getDouble("render.button-layout.side-base-distance", 1.72);
+        buttonDistanceFactor = yamlConfig().getDouble("render.button-layout.distance-factor", 0.45);
+        buttonSpacingScale = yamlConfig().getDouble("render.button-layout.spacing-scale", 1.0);
+        buttonArcSmallAngleDegrees = yamlConfig().getDouble("render.button-layout.arc-angle-small", 30.0);
+        buttonArcLargeAngleDegrees = yamlConfig().getDouble("render.button-layout.arc-angle-large", 42.0);
+        buttonArcSmallRadius = yamlConfig().getDouble("render.button-layout.arc-radius-small", 0.70);
+        buttonArcLargeRadius = yamlConfig().getDouble("render.button-layout.arc-radius-large", 0.86);
+        previewCardsPerRow = Math.max(1, yamlConfig().getInt("render.public-trick.cards-per-row", 6));
+        publicPreviewCompareRowOffset = yamlConfig().getDouble("render.public-trick.compare-row-offset", 0.28);
+        publicPreviewSelectedRowOffset = yamlConfig().getDouble("render.public-trick.selected-row-offset", -0.24);
+        publicPreviewRowDepthSpacing = yamlConfig().getDouble("render.public-trick.row-depth-spacing", 0.22);
+        publicPreviewLabelHeight = yamlConfig().getDouble("render.public-trick.label-height", 0.22);
+        globalPrivateHandLateralOffset = yamlConfig().getDouble("render.private-hand-offset.lateral", 0.0);
+        globalPrivateHandVerticalOffset = yamlConfig().getDouble("render.private-hand-offset.vertical", 0.0);
+        globalPrivateHandDepthOffset = yamlConfig().getDouble("render.private-hand-offset.depth", 0.0);
+        bgmVolume = (float) yamlConfig().getDouble("audio.bgm-volume", 0.55);
+        effectVolume = (float) yamlConfig().getDouble("audio.effect-volume", 1.0);
+        turnCountdownSeconds = yamlConfig().getInt("actionbar.turn-countdown-seconds", 20);
+        countdownSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("actionbar.countdown-sound", DEFAULT_COUNTDOWN_SOUND_SPEC));
+        unreadyWarningSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("actionbar.unready-warning-sound", DEFAULT_UNREADY_WARNING_SOUND_SPEC));
+        placementBlockedSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC));
+        botActionDelayMinTicks = yamlConfig().getInt("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
+        botActionDelayMaxTicks = yamlConfig().getInt("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
+        botAiEnabled = yamlConfig().getBoolean("bot.ai.enabled", false);
+        botAiTimeoutMs = Math.max(1000, yamlConfig().getInt("bot.ai.timeout-ms", 5000));
         if (botActionDelayMaxTicks < botActionDelayMinTicks) {
             int swapped = botActionDelayMinTicks;
             botActionDelayMinTicks = botActionDelayMaxTicks;
             botActionDelayMaxTicks = swapped;
         }
-        hintGroupLimit = getConfig().getInt("hints.max-groups", 6);
-        debugTableSpacing = getConfig().getDouble("debug.table-spacing", 6.5);
-        vaultEconomyEnabled = getConfig().getBoolean("economy.vault.enabled", true);
-        chipPaymentEnabled = getConfig().getBoolean("economy.payment.use-chip", false);
-        vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, getConfig().getDouble("economy.vault.doudizhu.currency-per-point", 1.0));
-        vaultTexasEnabled = getConfig().getBoolean("economy.vault.texas.enabled", true);
-        vaultTexasCurrencyPerChip = Math.max(0.0001, getConfig().getDouble("economy.vault.texas.currency-per-chip", 1.0));
-        vaultPreferredProviderNames = normalizedStringList(getConfig().getStringList("economy.vault.preferred-providers"), List.of("EzEconomy", "XConomy", "CMI"));
+        hintGroupLimit = yamlConfig().getInt("hints.max-groups", 6);
+        debugTableSpacing = yamlConfig().getDouble("debug.table-spacing", 6.5);
+        vaultEconomyEnabled = yamlConfig().getBoolean("economy.vault.enabled", true);
+        chipPaymentEnabled = yamlConfig().getBoolean("economy.payment.use-chip", false);
+        vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, yamlConfig().getDouble("economy.vault.doudizhu.currency-per-point", 1.0));
+        vaultTexasEnabled = yamlConfig().getBoolean("economy.vault.texas.enabled", true);
+        vaultTexasCurrencyPerChip = Math.max(0.0001, yamlConfig().getDouble("economy.vault.texas.currency-per-chip", 1.0));
+        vaultPreferredProviderNames = normalizedStringList(yamlConfig().getStringList("economy.vault.preferred-providers"), List.of("EzEconomy", "XConomy", "CMI"));
         loadRoomLevelProfiles();
-        texasSpawnFurniture = getConfig().getBoolean("texas.render.spawn-furniture", false);
-        texasSeatDistance = getConfig().getDouble("texas.layout.seat-distance", 3.10);
-        texasSeatLabelHeight = getConfig().getDouble("texas.layout.seat-label-height", 1.35);
-        texasJoinButtonHeight = getConfig().getDouble("texas.layout.join-button-height", 0.85);
-        texasStatusHeight = getConfig().getDouble("texas.layout.status-height", statusHeight);
-        texasActionButtonHeight = getConfig().getDouble("texas.layout.action-button-height", 0.88);
-        texasActionButtonStep = getConfig().getDouble("texas.layout.action-button-step", 0.34);
-        texasCommunityCardHeight = getConfig().getDouble("texas.cards.community-height", 1.18);
-        texasCommunityCardSpacing = getConfig().getDouble("texas.cards.community-spacing", 0.42);
-        texasHoleCardHeight = getConfig().getDouble("texas.cards.hole-height", 1.18);
-        texasHoleCardSpacing = getConfig().getDouble("texas.cards.hole-spacing", 0.36);
-        texasHoleRadiusFactor = getConfig().getDouble("texas.cards.hole-radius-factor", 0.68);
-        texasDealerMarkerHeight = getConfig().getDouble("texas.layout.dealer-marker-height", 1.56);
-        texasDealerMarkerRadiusFactor = getConfig().getDouble("texas.layout.dealer-marker-radius-factor", 0.86);
-        tableItemModelId = normalizeItemModelId(getConfig().getString("craftengine-items.table.item-model"), DEFAULT_TABLE_ITEM_MODEL);
-        tableDisplayName = normalizeNonBlank(getConfig().getString("craftengine-items.table.item-name"), DEFAULT_TABLE_DISPLAY_NAME);
-        chairItemModelId = normalizeItemModelId(getConfig().getString("craftengine-items.chair.item-model"), DEFAULT_CHAIR_ITEM_MODEL);
-        chairDisplayName = normalizeNonBlank(getConfig().getString("craftengine-items.chair.item-name"), DEFAULT_CHAIR_DISPLAY_NAME);
+        texasSpawnFurniture = yamlConfig().getBoolean("texas.render.spawn-furniture", false);
+        texasSeatDistance = yamlConfig().getDouble("texas.layout.seat-distance", 3.10);
+        texasSeatLabelHeight = yamlConfig().getDouble("texas.layout.seat-label-height", 1.35);
+        texasJoinButtonHeight = yamlConfig().getDouble("texas.layout.join-button-height", 0.85);
+        texasStatusHeight = yamlConfig().getDouble("texas.layout.status-height", statusHeight);
+        texasActionButtonHeight = yamlConfig().getDouble("texas.layout.action-button-height", 0.88);
+        texasActionButtonStep = yamlConfig().getDouble("texas.layout.action-button-step", 0.34);
+        texasCommunityCardHeight = yamlConfig().getDouble("texas.cards.community-height", 1.18);
+        texasCommunityCardSpacing = yamlConfig().getDouble("texas.cards.community-spacing", 0.42);
+        texasHoleCardHeight = yamlConfig().getDouble("texas.cards.hole-height", 1.18);
+        texasHoleCardSpacing = yamlConfig().getDouble("texas.cards.hole-spacing", 0.36);
+        texasHoleRadiusFactor = yamlConfig().getDouble("texas.cards.hole-radius-factor", 0.68);
+        texasDealerMarkerHeight = yamlConfig().getDouble("texas.layout.dealer-marker-height", 1.56);
+        texasDealerMarkerRadiusFactor = yamlConfig().getDouble("texas.layout.dealer-marker-radius-factor", 0.86);
+        tableItemModelId = normalizeItemModelId(yamlConfig().getString("craftengine-items.table.item-model"), DEFAULT_TABLE_ITEM_MODEL);
+        tableDisplayName = normalizeNonBlank(yamlConfig().getString("craftengine-items.table.item-name"), DEFAULT_TABLE_DISPLAY_NAME);
+        chairItemModelId = normalizeItemModelId(yamlConfig().getString("craftengine-items.chair.item-model"), DEFAULT_CHAIR_ITEM_MODEL);
+        chairDisplayName = normalizeNonBlank(yamlConfig().getString("craftengine-items.chair.item-name"), DEFAULT_CHAIR_DISPLAY_NAME);
         loadOptionProfiles();
     }
 
     private void loadAiSettings() {
         aiProviderConfig = new AiChatGateway.ProviderConfig(
-            getConfig().getBoolean("ai.deepseek.enabled", false),
-            getConfig().getString("ai.deepseek.provider-name", "DeepSeek"),
-            getConfig().getString("ai.deepseek.url", getConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com")),
-            getConfig().getString("ai.deepseek.chat-completions-path", "/chat/completions"),
-            getConfig().getString("ai.deepseek.models-path", "/models"),
-            getConfig().getString("ai.deepseek.api-key", ""),
-            getConfig().getString("ai.deepseek.model", "deepseek-chat"),
-            getConfig().getInt("ai.deepseek.connect-timeout-ms", 10000),
-            getConfig().getInt("ai.deepseek.request-timeout-ms", 45000),
-            roundToSingleDecimal(getConfig().getDouble("ai.deepseek.temperature", 0.7)),
-            getConfig().getInt("ai.deepseek.max-tokens", 0),
-            normalizeNonBlank(getConfig().getString("ai.deepseek.system-prompt"), DEFAULT_AI_SYSTEM_PROMPT)
+            yamlConfig().getBoolean("ai.deepseek.enabled", false),
+            yamlConfig().getString("ai.deepseek.provider-name", "DeepSeek"),
+            yamlConfig().getString("ai.deepseek.url", yamlConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com")),
+            yamlConfig().getString("ai.deepseek.chat-completions-path", "/chat/completions"),
+            yamlConfig().getString("ai.deepseek.models-path", "/models"),
+            yamlConfig().getString("ai.deepseek.api-key", ""),
+            yamlConfig().getString("ai.deepseek.model", "deepseek-chat"),
+            yamlConfig().getInt("ai.deepseek.connect-timeout-ms", 10000),
+            yamlConfig().getInt("ai.deepseek.request-timeout-ms", 45000),
+            roundToSingleDecimal(yamlConfig().getDouble("ai.deepseek.temperature", 0.7)),
+            yamlConfig().getInt("ai.deepseek.max-tokens", 0),
+            normalizeNonBlank(yamlConfig().getString("ai.deepseek.system-prompt"), DEFAULT_AI_SYSTEM_PROMPT)
         );
         aiChatGateway = new OpenAiCompatibleAiChatGateway(aiProviderConfig, getLogger());
     }
 
     private void ensureConfigIntegrity() {
-        getConfig().options().copyDefaults(true);
+        mergeDefaultYamlConfig();
         boolean changed = false;
         changed |= migrateLegacyFurnitureConfig(FurnitureType.TABLE);
         changed |= migrateLegacyFurnitureConfig(FurnitureType.CHAIR);
@@ -3052,7 +3166,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         changed |= ensurePlacementSoundConfig();
         changed |= ensureBotAiConfig();
         if (changed) {
-            saveConfig();
+            saveYamlConfig();
         }
     }
 
@@ -3064,19 +3178,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private boolean ensurePlacementSoundConfig() {
-        if (getConfig().contains("table.placement-blocked-sound")) {
+        if (yamlConfig().contains("table.placement-blocked-sound")) {
             return false;
         }
-        getConfig().set("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC);
+        yamlConfig().set("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC);
         return true;
     }
 
     private boolean ensureMissingConfigValue(String path, Object value) {
-        YamlConfiguration persisted = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "config.yml"));
-        if (persisted.contains(path)) {
+        if (yamlConfig().contains(path)) {
             return false;
         }
-        getConfig().set(path, value);
+        yamlConfig().set(path, value);
         return true;
     }
 
@@ -3084,7 +3197,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         boolean changed = false;
         changed |= ensureMissingConfigValue("ai.deepseek.enabled", false);
         changed |= ensureMissingConfigValue("ai.deepseek.provider-name", "DeepSeek");
-        changed |= ensureMissingConfigValue("ai.deepseek.url", getConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com"));
+        changed |= ensureMissingConfigValue("ai.deepseek.url", yamlConfig().getString("ai.deepseek.base-url", "https://api.deepseek.com"));
         changed |= ensureMissingConfigValue("ai.deepseek.chat-completions-path", "/chat/completions");
         changed |= ensureMissingConfigValue("ai.deepseek.models-path", "/models");
         changed |= ensureMissingConfigValue("ai.deepseek.api-key", "");
@@ -3099,8 +3212,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean ensureAvatarConfig() {
         boolean changed = false;
-        double legacyScale = getConfig().getDouble("render.player-head-scale", 1.00);
-        double defaultSmallTextScale = getConfig().getDouble("render.text-scale.small", 0.46);
+        double legacyScale = yamlConfig().getDouble("render.player-head-scale", 1.00);
+        double defaultSmallTextScale = yamlConfig().getDouble("render.text-scale.small", 0.46);
         changed |= ensureDoubleConfig("render.status-avatar.scale", legacyScale);
         changed |= ensureDoubleConfig("render.status-avatar-offset.lateral", 0.0);
         changed |= ensureDoubleConfig("render.status-avatar-offset.vertical", 0.82);
@@ -3131,46 +3244,46 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private boolean ensureDoubleConfig(String path, double defaultValue) {
-        if (getConfig().contains(path)) {
+        if (yamlConfig().contains(path)) {
             return false;
         }
-        getConfig().set(path, defaultValue);
+        yamlConfig().set(path, defaultValue);
         return true;
     }
 
     private boolean migrateLegacyRenderConfig() {
         boolean changed = false;
         if (
-            getConfig().contains("render.button-offset.distance")
+            yamlConfig().contains("render.button-offset.distance")
                 && (
-                    Math.abs(getConfig().getDouble("render.button-offset.distance") - OLDER_BUTTON_DISTANCE) < 0.0001
-                        || Math.abs(getConfig().getDouble("render.button-offset.distance") - LEGACY_BUTTON_DISTANCE) < 0.0001
+                    Math.abs(yamlConfig().getDouble("render.button-offset.distance", Double.NaN) - OLDER_BUTTON_DISTANCE) < 0.0001
+                        || Math.abs(yamlConfig().getDouble("render.button-offset.distance", Double.NaN) - LEGACY_BUTTON_DISTANCE) < 0.0001
                 )
         ) {
-            getConfig().set("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
+            yamlConfig().set("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
             changed = true;
         }
         if (
-            getConfig().contains("render.card-hitbox-offset.vertical")
-                && Math.abs(getConfig().getDouble("render.card-hitbox-offset.vertical") - LEGACY_CARD_HITBOX_VERTICAL_OFFSET) < 0.0001
+            yamlConfig().contains("render.card-hitbox-offset.vertical")
+                && Math.abs(yamlConfig().getDouble("render.card-hitbox-offset.vertical", Double.NaN) - LEGACY_CARD_HITBOX_VERTICAL_OFFSET) < 0.0001
         ) {
-            getConfig().set("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
+            yamlConfig().set("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
             changed = true;
         }
         if (
-            getConfig().contains("render.button-roll-degrees")
-                && Math.abs(getConfig().getDouble("render.button-roll-degrees") - LEGACY_BUTTON_ROLL_DEGREES) < 0.0001
+            yamlConfig().contains("render.button-roll-degrees")
+                && Math.abs(yamlConfig().getDouble("render.button-roll-degrees", Double.NaN) - LEGACY_BUTTON_ROLL_DEGREES) < 0.0001
         ) {
-            getConfig().set("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
+            yamlConfig().set("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
             changed = true;
         }
-        if (getConfig().contains("bot.action-delay-ticks")) {
-            if (!getConfig().contains("bot.action-delay-min-ticks")) {
-                getConfig().set("bot.action-delay-min-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
+        if (yamlConfig().contains("bot.action-delay-ticks")) {
+            if (!yamlConfig().contains("bot.action-delay-min-ticks")) {
+                yamlConfig().set("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
                 changed = true;
             }
-            if (!getConfig().contains("bot.action-delay-max-ticks")) {
-                getConfig().set("bot.action-delay-max-ticks", getConfig().getInt("bot.action-delay-ticks", 20));
+            if (!yamlConfig().contains("bot.action-delay-max-ticks")) {
+                yamlConfig().set("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
                 changed = true;
             }
         }
@@ -3180,7 +3293,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private ReloadSummary reloadVisualState(boolean exportBundle, ReloadFeedback feedback) {
         int totalStages = exportBundle ? 5 : 4;
         feedback.update(stageProgress(0, totalStages), "重载配置", "config.yml / 渲染参数");
-        reloadConfig();
+        reloadYamlConfig();
         ensureConfigIntegrity();
         loadRenderSettings();
         loadAiSettings();
@@ -3220,9 +3333,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean migrateLegacyFurnitureConfig(FurnitureType type) {
         String base = type.configBasePath();
-        String itemModel = getConfig().getString(base + ".item-model");
-        String namespace = getConfig().getString(base + ".namespace");
-        String modelPath = getConfig().getString(base + ".model-path");
+        String itemModel = yamlConfig().getString(base + ".item-model");
+        String namespace = yamlConfig().getString(base + ".namespace");
+        String modelPath = yamlConfig().getString(base + ".model-path");
         boolean hasLegacy = namespace != null || modelPath != null;
         if (!isBlank(itemModel) || !hasLegacy) {
             return false;
@@ -3230,42 +3343,42 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (!isBlank(namespace) && !isBlank(modelPath)) {
             String merged = namespace.trim() + ":" + modelPath.trim();
             getLogger().warning("检测到旧版 " + type.label() + " 配置键 namespace/model-path，已自动迁移为 item-model: " + merged);
-            getConfig().set(base + ".item-model", merged);
+            yamlConfig().set(base + ".item-model", merged);
         } else {
             getLogger().warning("检测到不完整的旧版 " + type.label() + " 配置，已回退为默认模型。");
-            getConfig().set(base + ".item-model", type.defaultItemModelId());
+            yamlConfig().set(base + ".item-model", type.defaultItemModelId());
         }
-        getConfig().set(base + ".namespace", null);
-        getConfig().set(base + ".model-path", null);
+        yamlConfig().set(base + ".namespace", null);
+        yamlConfig().set(base + ".model-path", null);
         return true;
     }
 
     private boolean ensureFurnitureConfig(FurnitureType type) {
         boolean changed = false;
         String base = type.configBasePath();
-        if (getConfig().getItemStack(base + ".item-stack") != null) {
+        if (yamlConfig().getItemStack(base + ".item-stack") != null) {
             return false;
         }
-        String itemModel = getConfig().getString(base + ".item-model");
+        String itemModel = yamlConfig().getString(base + ".item-model");
         if (!isBlank(itemModel)) {
             NamespacedKey parsed = NamespacedKey.fromString(itemModel.trim());
             if (parsed != null && parsed.getKey().startsWith("item/")) {
                 String corrected = parsed.getNamespace() + ":" + parsed.getKey().substring("item/".length());
                 getLogger().warning("配置里的 " + type.label() + " item-model 写成了模型路径 " + itemModel + "，已自动改为物品定义键 " + corrected);
-                getConfig().set(base + ".item-model", corrected);
+                yamlConfig().set(base + ".item-model", corrected);
                 itemModel = corrected;
                 changed = true;
             }
         }
         if (isBlank(itemModel) || NamespacedKey.fromString(itemModel.trim()) == null) {
             getLogger().warning("配置里的 " + type.label() + " item-model 无效或为空，已改回默认值 " + type.defaultItemModelId());
-            getConfig().set(base + ".item-model", type.defaultItemModelId());
+            yamlConfig().set(base + ".item-model", type.defaultItemModelId());
             changed = true;
         }
-        String itemName = getConfig().getString(base + ".item-name");
+        String itemName = yamlConfig().getString(base + ".item-name");
         if (isBlank(itemName)) {
             getLogger().warning("配置里的 " + type.label() + " item-name 为空，已改回默认显示名。");
-            getConfig().set(base + ".item-name", type.defaultDisplayName());
+            yamlConfig().set(base + ".item-name", type.defaultDisplayName());
             changed = true;
         }
         return changed;
@@ -3273,99 +3386,99 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean ensureEconomyConfig() {
         boolean changed = false;
-        if (!getConfig().contains("economy.payment.use-chip")) {
-            getConfig().set("economy.payment.use-chip", false);
+        if (!yamlConfig().contains("economy.payment.use-chip")) {
+            yamlConfig().set("economy.payment.use-chip", false);
             changed = true;
         }
-        if (!getConfig().contains("economy.payment.chip-item-stack")) {
-            getConfig().set("economy.payment.chip-item-stack", defaultChipItem());
+        if (!yamlConfig().contains("economy.payment.chip-item-stack")) {
+            yamlConfig().set("economy.payment.chip-item-stack", defaultChipItem());
             changed = true;
         }
-        if (!getConfig().contains("economy.vault.enabled")) {
-            getConfig().set("economy.vault.enabled", true);
+        if (!yamlConfig().contains("economy.vault.enabled")) {
+            yamlConfig().set("economy.vault.enabled", true);
             changed = true;
         }
-        if (!getConfig().contains("economy.vault.preferred-providers")) {
-            getConfig().set("economy.vault.preferred-providers", List.of("EzEconomy", "XConomy", "CMI"));
+        if (!yamlConfig().contains("economy.vault.preferred-providers")) {
+            yamlConfig().set("economy.vault.preferred-providers", List.of("EzEconomy", "XConomy", "CMI"));
             changed = true;
         }
-        if (!getConfig().contains("economy.vault.doudizhu.currency-per-point")) {
-            getConfig().set("economy.vault.doudizhu.currency-per-point", 1.0);
+        if (!yamlConfig().contains("economy.vault.doudizhu.currency-per-point")) {
+            yamlConfig().set("economy.vault.doudizhu.currency-per-point", 1.0);
             changed = true;
         }
-        if (!getConfig().contains("economy.vault.texas.enabled")) {
-            getConfig().set("economy.vault.texas.enabled", true);
+        if (!yamlConfig().contains("economy.vault.texas.enabled")) {
+            yamlConfig().set("economy.vault.texas.enabled", true);
             changed = true;
         }
-        if (!getConfig().contains("economy.vault.texas.currency-per-chip")) {
-            getConfig().set("economy.vault.texas.currency-per-chip", 1.0);
+        if (!yamlConfig().contains("economy.vault.texas.currency-per-chip")) {
+            yamlConfig().set("economy.vault.texas.currency-per-chip", 1.0);
             changed = true;
         }
         for (TableLevel level : TableLevel.values()) {
             String base = "room-levels." + level.key();
-            if (!getConfig().contains(base + ".label")) {
-                getConfig().set(base + ".label", level.defaultLabel());
+            if (!yamlConfig().contains(base + ".label")) {
+                yamlConfig().set(base + ".label", level.defaultLabel());
                 changed = true;
             }
-            if (!getConfig().contains(base + ".multiplier")) {
-                getConfig().set(base + ".multiplier", level.defaultMultiplier());
+            if (!yamlConfig().contains(base + ".multiplier")) {
+                yamlConfig().set(base + ".multiplier", level.defaultMultiplier());
                 changed = true;
             } else {
-                double current = getConfig().getDouble(base + ".multiplier", level.defaultMultiplier());
+                double current = yamlConfig().getDouble(base + ".multiplier", level.defaultMultiplier());
                 if (level == TableLevel.LOW && Math.abs(current - 1.0) < 0.0001) {
-                    getConfig().set(base + ".multiplier", level.defaultMultiplier());
+                    yamlConfig().set(base + ".multiplier", level.defaultMultiplier());
                     changed = true;
                 } else if (level == TableLevel.MID && Math.abs(current - 3.0) < 0.0001) {
-                    getConfig().set(base + ".multiplier", level.defaultMultiplier());
+                    yamlConfig().set(base + ".multiplier", level.defaultMultiplier());
                     changed = true;
                 } else if (level == TableLevel.HIGH && Math.abs(current - 10.0) < 0.0001) {
-                    getConfig().set(base + ".multiplier", level.defaultMultiplier());
+                    yamlConfig().set(base + ".multiplier", level.defaultMultiplier());
                     changed = true;
                 }
             }
-            if (!getConfig().contains(base + ".economy-enabled")) {
-                getConfig().set(base + ".economy-enabled", level.defaultEconomyEnabled());
+            if (!yamlConfig().contains(base + ".economy-enabled")) {
+                yamlConfig().set(base + ".economy-enabled", level.defaultEconomyEnabled());
                 changed = true;
             }
         }
-        if (!getConfig().contains("room-levels.default-create-level")) {
-            getConfig().set("room-levels.default-create-level", "low");
+        if (!yamlConfig().contains("room-levels.default-create-level")) {
+            yamlConfig().set("room-levels.default-create-level", "low");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.type")) {
-            getConfig().set("storage.sql.type", "sqlite");
+        if (!yamlConfig().contains("storage.sql.type")) {
+            yamlConfig().set("storage.sql.type", "sqlite");
             changed = true;
         }
-        if (!getConfig().contains("render.player-head-show-id")) {
-            getConfig().set("render.player-head-show-id", PlayerHeadDisplayMode.BOTH.configValue());
+        if (!yamlConfig().contains("render.player-head-show-id")) {
+            yamlConfig().set("render.player-head-show-id", PlayerHeadDisplayMode.BOTH.configValue());
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.sqlite.file")) {
-            getConfig().set("storage.sql.sqlite.file", "storage/mumu-data.db");
+        if (!yamlConfig().contains("storage.sql.sqlite.file")) {
+            yamlConfig().set("storage.sql.sqlite.file", "storage/mumu-data.db");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.host")) {
-            getConfig().set("storage.sql.mysql.host", "127.0.0.1");
+        if (!yamlConfig().contains("storage.sql.mysql.host")) {
+            yamlConfig().set("storage.sql.mysql.host", "127.0.0.1");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.port")) {
-            getConfig().set("storage.sql.mysql.port", 3306);
+        if (!yamlConfig().contains("storage.sql.mysql.port")) {
+            yamlConfig().set("storage.sql.mysql.port", 3306);
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.database")) {
-            getConfig().set("storage.sql.mysql.database", "muz");
+        if (!yamlConfig().contains("storage.sql.mysql.database")) {
+            yamlConfig().set("storage.sql.mysql.database", "muz");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.username")) {
-            getConfig().set("storage.sql.mysql.username", "root");
+        if (!yamlConfig().contains("storage.sql.mysql.username")) {
+            yamlConfig().set("storage.sql.mysql.username", "root");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.password")) {
-            getConfig().set("storage.sql.mysql.password", "");
+        if (!yamlConfig().contains("storage.sql.mysql.password")) {
+            yamlConfig().set("storage.sql.mysql.password", "");
             changed = true;
         }
-        if (!getConfig().contains("storage.sql.mysql.parameters")) {
-            getConfig().set("storage.sql.mysql.parameters", "useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
+        if (!yamlConfig().contains("storage.sql.mysql.parameters")) {
+            yamlConfig().set("storage.sql.mysql.parameters", "useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
             changed = true;
         }
         return changed;
@@ -3375,9 +3488,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         roomLevelProfiles.clear();
         for (TableLevel level : TableLevel.values()) {
             String base = "room-levels." + level.key();
-            String label = normalizeNonBlank(getConfig().getString(base + ".label"), level.defaultLabel());
-            double multiplier = Math.max(0.0, getConfig().getDouble(base + ".multiplier", level.defaultMultiplier()));
-            boolean economyEnabled = getConfig().getBoolean(base + ".economy-enabled", level.defaultEconomyEnabled());
+            String label = normalizeNonBlank(yamlConfig().getString(base + ".label"), level.defaultLabel());
+            double multiplier = Math.max(0.0, yamlConfig().getDouble(base + ".multiplier", level.defaultMultiplier()));
+            boolean economyEnabled = yamlConfig().getBoolean(base + ".economy-enabled", level.defaultEconomyEnabled());
             roomLevelProfiles.put(level, new RoomLevelProfile(level, label, multiplier, economyEnabled));
         }
     }
@@ -3467,7 +3580,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private void schedulePersistedTableRestore() {
-        getServer().getScheduler().runTaskTimer(this, task -> {
+        scheduler().runTimer(1L, 100L, task -> {
             if (sqlTablesLoaded || shuttingDown) {
                 task.cancel();
                 return;
@@ -3476,7 +3589,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             if (sqlTablesLoaded) {
                 task.cancel();
             }
-        }, 1L, 100L);
+        });
     }
 
     public void attemptPersistedTableRestore() {
@@ -3512,7 +3625,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // Run a couple of delayed rebuild passes, effectively doing an automatic "warmup reload" for persisted tables.
         long[] delays = {40L, 120L, 240L};
         for (long delay : delays) {
-            getServer().getScheduler().runTaskLater(this, () -> {
+            scheduler().runLater(delay, () -> {
                 if (shuttingDown) {
                     return;
                 }
@@ -3522,7 +3635,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 if (zjhPhysicalTableManager != null && zjhPhysicalTableManager.placedTableCount() > 0) {
                     zjhPhysicalTableManager.rebuildAllTables();
                 }
-            }, delay);
+            });
         }
     }
 
@@ -3984,8 +4097,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return rawFallbackValue == null ? List.of() : furnitureItemIdCandidates(rawFallbackValue, fallbackKey);
         }
         ItemMeta meta = itemStack.getItemMeta();
-        if (meta != null && meta.hasItemModel()) {
-            candidates.addAll(furnitureItemIdCandidates(meta.getItemModel().asString(), fallbackKey));
+        if (meta != null && VersionCompat.supportsItemModel()) {
+            try {
+                java.lang.reflect.Method hasItemModel = meta.getClass().getMethod("hasItemModel");
+                java.lang.reflect.Method getItemModel = meta.getClass().getMethod("getItemModel");
+                if ((boolean) hasItemModel.invoke(meta)) {
+                    Object model = getItemModel.invoke(meta);
+                    candidates.addAll(furnitureItemIdCandidates(model.toString(), fallbackKey));
+                }
+            } catch (Exception ignored) {
+            }
         }
         addCandidatesFromTranslationKey(candidates, itemStack.translationKey());
         if (!candidates.isEmpty()) {
@@ -4066,65 +4187,56 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (playerSettingsFile == null) {
             return;
         }
-        playerSettingsConfig = YamlConfiguration.loadConfiguration(playerSettingsFile);
-        ConfigurationSection playersSection = playerSettingsConfig.getConfigurationSection("players");
-        if (playersSection == null) {
-            return;
-        }
-        for (String rawId : playersSection.getKeys(false)) {
+        playerSettingsConfig = new MuzYamlConfig(playerSettingsFile.toPath());
+        for (String rawId : playerSettingsConfig.getKeys("players")) {
             try {
                 UUID playerId = UUID.fromString(rawId);
-                ConfigurationSection section = playersSection.getConfigurationSection(rawId);
-                if (section == null) {
-                    continue;
+                String base = "players." + rawId;
+                if (playerSettingsConfig.contains(base + ".labels-enabled")) {
+                    playerCardLabelSettings.put(playerId, playerSettingsConfig.getBoolean(base + ".labels-enabled", false));
                 }
-                if (section.contains("labels-enabled")) {
-                    playerCardLabelSettings.put(playerId, section.getBoolean("labels-enabled"));
+                if (playerSettingsConfig.contains(base + ".selection-sound")) {
+                    playerSelectionSoundSettings.put(playerId, playerSettingsConfig.getBoolean(base + ".selection-sound", false));
                 }
-                if (section.contains("selection-sound")) {
-                    playerSelectionSoundSettings.put(playerId, section.getBoolean("selection-sound"));
+                if (playerSettingsConfig.contains(base + ".opponent-preview")) {
+                    playerOpponentPreviewSettings.put(playerId, playerSettingsConfig.getBoolean(base + ".opponent-preview", false));
                 }
-                if (section.contains("opponent-preview")) {
-                    playerOpponentPreviewSettings.put(playerId, section.getBoolean("opponent-preview"));
+                if (playerSettingsConfig.contains(base + ".selection-sound-profile")) {
+                    playerSelectionSoundProfileSettings.put(playerId, clampProfileIndex(playerSettingsConfig.getInt(base + ".selection-sound-profile", 0)));
                 }
-                if (section.contains("selection-sound-profile")) {
-                    playerSelectionSoundProfileSettings.put(playerId, clampProfileIndex(section.getInt("selection-sound-profile", 0)));
+                if (playerSettingsConfig.contains(base + ".play-action-profile")) {
+                    playerPlayActionProfileSettings.put(playerId, clampProfileIndex(playerSettingsConfig.getInt(base + ".play-action-profile", 0)));
                 }
-                if (section.contains("play-action-profile")) {
-                    playerPlayActionProfileSettings.put(playerId, clampProfileIndex(section.getInt("play-action-profile", 0)));
-                }
-                ConfigurationSection actionProfilesSection = section.getConfigurationSection("play-action-profiles");
-                if (actionProfilesSection != null) {
-                    EnumMap<PlayActionKind, Integer> typed = new EnumMap<>(PlayActionKind.class);
-                    for (PlayActionKind kind : PlayActionKind.values()) {
-                        if (actionProfilesSection.contains(kind.key())) {
-                            typed.put(kind, clampProfileIndex(actionProfilesSection.getInt(kind.key(), getPlayerPlayActionProfileIndex(playerId))));
-                        }
-                    }
-                    if (!typed.isEmpty()) {
-                        playerPlayActionKindProfileSettings.put(playerId, typed);
+                EnumMap<PlayActionKind, Integer> typed = new EnumMap<>(PlayActionKind.class);
+                String actionProfilesBase = base + ".play-action-profiles";
+                for (PlayActionKind kind : PlayActionKind.values()) {
+                    if (playerSettingsConfig.contains(actionProfilesBase + "." + kind.key())) {
+                        typed.put(kind, clampProfileIndex(playerSettingsConfig.getInt(actionProfilesBase + "." + kind.key(), getPlayerPlayActionProfileIndex(playerId))));
                     }
                 }
-                if (section.contains("hover-glow-color")) {
-                    playerHoverGlowColorSettings.put(playerId, clampGlowColorIndex(section.getInt("hover-glow-color", 0)));
+                if (!typed.isEmpty()) {
+                    playerPlayActionKindProfileSettings.put(playerId, typed);
                 }
-                if (section.contains("selected-glow-color")) {
-                    playerSelectedGlowColorSettings.put(playerId, clampGlowColorIndex(section.getInt("selected-glow-color", 0)));
+                if (playerSettingsConfig.contains(base + ".hover-glow-color")) {
+                    playerHoverGlowColorSettings.put(playerId, clampGlowColorIndex(playerSettingsConfig.getInt(base + ".hover-glow-color", 0)));
                 }
-                if (section.contains("chip-balance")) {
-                    playerChipBalances.put(playerId, section.getInt("chip-balance", 0));
+                if (playerSettingsConfig.contains(base + ".selected-glow-color")) {
+                    playerSelectedGlowColorSettings.put(playerId, clampGlowColorIndex(playerSettingsConfig.getInt(base + ".selected-glow-color", 0)));
                 }
-                if (section.contains("hand-offset.lateral")
-                    || section.contains("hand-offset.vertical")
-                    || section.contains("hand-offset.depth")
-                    || section.contains("hand-offset.spacing")
-                    || section.contains("hand-offset.preview-scale")) {
+                if (playerSettingsConfig.contains(base + ".chip-balance")) {
+                    playerChipBalances.put(playerId, playerSettingsConfig.getInt(base + ".chip-balance", 0));
+                }
+                if (playerSettingsConfig.contains(base + ".hand-offset.lateral")
+                    || playerSettingsConfig.contains(base + ".hand-offset.vertical")
+                    || playerSettingsConfig.contains(base + ".hand-offset.depth")
+                    || playerSettingsConfig.contains(base + ".hand-offset.spacing")
+                    || playerSettingsConfig.contains(base + ".hand-offset.preview-scale")) {
                     PlayerHandOffsets offsets = new PlayerHandOffsets(
-                        roundToSingleDecimal(section.getDouble("hand-offset.lateral", 0.0)),
-                        roundToSingleDecimal(section.getDouble("hand-offset.vertical", 0.0)),
-                        roundToSingleDecimal(section.getDouble("hand-offset.depth", 0.0)),
-                        roundToSingleDecimal(section.getDouble("hand-offset.spacing", 0.0)),
-                        roundToSingleDecimal(section.getDouble("hand-offset.preview-scale", 0.0))
+                        roundToSingleDecimal(playerSettingsConfig.getDouble(base + ".hand-offset.lateral", 0.0)),
+                        roundToSingleDecimal(playerSettingsConfig.getDouble(base + ".hand-offset.vertical", 0.0)),
+                        roundToSingleDecimal(playerSettingsConfig.getDouble(base + ".hand-offset.depth", 0.0)),
+                        roundToSingleDecimal(playerSettingsConfig.getDouble(base + ".hand-offset.spacing", 0.0)),
+                        roundToSingleDecimal(playerSettingsConfig.getDouble(base + ".hand-offset.preview-scale", 0.0))
                     ).normalized();
                     if (!offsets.isZero()) {
                         playerHandOffsets.put(playerId, offsets);
@@ -4139,7 +4251,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (playerSettingsFile == null) {
             return;
         }
-        YamlConfiguration configuration = new YamlConfiguration();
+        MuzYamlConfig configuration = MuzYamlConfig.empty(playerSettingsFile.toPath());
         Set<UUID> players = new LinkedHashSet<>();
         players.addAll(playerCardLabelSettings.keySet());
         players.addAll(playerSelectionSoundSettings.keySet());
@@ -4151,6 +4263,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         players.addAll(playerSelectedGlowColorSettings.keySet());
         players.addAll(playerChipBalances.keySet());
         players.addAll(playerHandOffsets.keySet());
+        configuration.set("players", new LinkedHashMap<String, Object>());
         for (UUID playerId : players) {
             String base = "players." + playerId;
             if (playerCardLabelSettings.containsKey(playerId)) {
@@ -4169,7 +4282,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 configuration.set(base + ".play-action-profile", playerPlayActionProfileSettings.get(playerId));
             }
             if (playerPlayActionKindProfileSettings.containsKey(playerId)) {
-                configuration.set(base + ".play-action-profiles", null);
                 EnumMap<PlayActionKind, Integer> typed = playerPlayActionKindProfileSettings.get(playerId);
                 for (Map.Entry<PlayActionKind, Integer> entry : typed.entrySet()) {
                     configuration.set(base + ".play-action-profiles." + entry.getKey().key(), entry.getValue());
@@ -4197,7 +4309,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         try {
             getDataFolder().mkdirs();
-            configuration.save(playerSettingsFile);
+            configuration.save();
             playerSettingsConfig = configuration;
         } catch (IOException exception) {
             getLogger().warning("保存玩家微调设置失败: " + exception.getMessage());
@@ -4214,16 +4326,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
             String selectionBase = "selection-sound-profiles.profile-" + (index + 1);
             OptionProfile defaultSelection = defaultSelectionSoundProfile(index);
             selectionSoundProfiles.add(sanitizeSelectionSoundProfile(optionProfile(
-                optionProfilesConfig.getString(selectionBase + ".label", getConfig().getString(legacySelectionBase + ".label", defaultSelection.label())),
-                optionProfilesConfig.getString(selectionBase + ".spec", getConfig().getString(legacySelectionBase + ".spec", defaultSelection.spec())),
+                optionProfilesConfig.getString(selectionBase + ".label", yamlConfig().getString(legacySelectionBase + ".label", defaultSelection.label())),
+                optionProfilesConfig.getString(selectionBase + ".spec", yamlConfig().getString(legacySelectionBase + ".spec", defaultSelection.spec())),
                 true
             )));
             String legacyActionBase = "player-options.play-action-profiles.profile-" + (index + 1);
             String actionBase = "play-action-profiles.profile-" + (index + 1);
             OptionProfile defaultAction = defaultPlayActionProfile(index);
             playActionProfiles.add(sanitizePlayActionProfile(optionProfile(
-                optionProfilesConfig.getString(actionBase + ".label", getConfig().getString(legacyActionBase + ".label", defaultAction.label())),
-                optionProfilesConfig.getString(actionBase + ".spec", getConfig().getString(legacyActionBase + ".spec", defaultAction.spec())),
+                optionProfilesConfig.getString(actionBase + ".label", yamlConfig().getString(legacyActionBase + ".label", defaultAction.label())),
+                optionProfilesConfig.getString(actionBase + ".spec", yamlConfig().getString(legacyActionBase + ".spec", defaultAction.spec())),
                 false
             )));
         }
@@ -4250,7 +4362,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
         }
         getDataFolder().mkdirs();
-        optionProfilesConfig = YamlConfiguration.loadConfiguration(optionProfilesFile);
+        optionProfilesConfig = new MuzYamlConfig(optionProfilesFile.toPath());
     }
 
     private void saveOptionProfilesToStorage(String basePath, List<OptionProfile> profiles) {
@@ -4262,7 +4374,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             optionProfilesConfig.set(path + ".spec", profile.spec());
         }
         try {
-            optionProfilesConfig.save(optionProfilesFile);
+            optionProfilesConfig.save();
         } catch (IOException exception) {
             getLogger().warning("保存音效/行为方案失败: " + exception.getMessage());
         }
@@ -4277,7 +4389,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             optionProfilesConfig.set(path + ".spec", profile.spec());
         }
         try {
-            optionProfilesConfig.save(optionProfilesFile);
+            optionProfilesConfig.save();
         } catch (IOException exception) {
             getLogger().warning("保存按牌型动作方案失败: " + exception.getMessage());
         }
@@ -4963,7 +5075,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         for (int index = 0; index < delays.size(); index++) {
             long delay = delays.get(index);
             boolean finalAttempt = index == delays.size() - 1;
-            getServer().getScheduler().runTaskLater(this, () -> {
+            scheduler().runLater(delay, () -> {
                 if (!isEnabled() || shuttingDown) {
                     return;
                 }
@@ -4977,7 +5089,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 if (finalAttempt && current.state() != HookState.HOOKED) {
                     logVaultHookDiagnosis(current);
                 }
-            }, delay);
+            });
         }
     }
 
@@ -5338,11 +5450,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 bossBar.progress(1.0f);
                 bossBar.name(plugin.bossBarComponent("重载完成", plugin.bundleSummaryPlain(summary.bundleExport())));
                 if (player.isOnline()) {
-                    plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                    plugin.scheduler().runLater(40L, () -> {
                         if (player.isOnline()) {
                             player.hideBossBar(bossBar);
                         }
-                    }, 40L);
+                    });
                 }
                 player.sendMessage(plugin.reloadSummaryComponent(summary));
                 player.sendMessage(plugin.hookSummaryComponent(summary.hooks()));

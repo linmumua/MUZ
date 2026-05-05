@@ -2,6 +2,7 @@ package dev.mumu.doudizhu.world;
 
 import dev.mumu.doudizhu.DoudizhuPlugin;
 import dev.mumu.doudizhu.assets.PackAssets;
+import dev.mumu.doudizhu.compat.VersionCompat;
 import dev.mumu.doudizhu.game.SimpleBotBrain;
 import dev.mumu.doudizhu.game.GamePhase;
 import dev.mumu.doudizhu.game.GameTable;
@@ -2050,7 +2051,7 @@ public final class PhysicalTableManager {
     }
 
     private ItemDisplay spawnFurnitureDisplay(Location location, ItemStack item, float scale) {
-        return location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(new Transformation(
@@ -2064,7 +2065,7 @@ public final class PhysicalTableManager {
     }
 
     private ItemDisplay spawnBillboardItem(Location location, ItemStack item, Vector3f scale) {
-        return location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.CENTER);
             spawned.setTransformation(new Transformation(
@@ -2079,7 +2080,7 @@ public final class PhysicalTableManager {
     }
 
     private ItemDisplay spawnFlatButtonItem(Location location, ItemStack item, float scale, float yaw) {
-        ItemDisplay display = location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(new Transformation(
@@ -2100,7 +2101,7 @@ public final class PhysicalTableManager {
     }
 
     private ItemDisplay spawnPlacedCard(Location location, ItemStack item, Vector3f scale, float yaw, float lift) {
-        ItemDisplay display = location.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+        ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(cardTransformation(scale, lift));
@@ -2120,8 +2121,14 @@ public final class PhysicalTableManager {
     }
 
     private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background, float scale) {
-        return location.getWorld().spawn(location, TextDisplay.class, spawned -> {
-            spawned.text(text);
+        return VersionCompat.spawnEntity(location.getWorld(), location, TextDisplay.class, spawned -> {
+            try {
+                spawned.text(text);
+            } catch (NoSuchMethodError e) {
+                // 1.20.1 不支持 text() 方法，使用 setCustomName() 作为替代
+                spawned.setCustomName(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(text));
+                spawned.setCustomNameVisible(true);
+            }
             TypewriterTextStyle.apply(spawned, billboard, background, scale);
             protectEntity(spawned);
         });
@@ -2136,7 +2143,13 @@ public final class PhysicalTableManager {
 
     private void updateTextEntity(Entity entity, Component text) {
         if (entity instanceof TextDisplay display) {
-            display.text(MuzTheme.plain(text).decoration(TextDecoration.ITALIC, false));
+            try {
+                display.text(MuzTheme.plain(text).decoration(TextDecoration.ITALIC, false));
+            } catch (NoSuchMethodError e) {
+                // 1.20.1 不支持 text() 方法，使用 setCustomName() 作为替代
+                display.setCustomName(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(MuzTheme.plain(text).decoration(TextDecoration.ITALIC, false)));
+                display.setCustomNameVisible(true);
+            }
         }
     }
 
@@ -2147,7 +2160,7 @@ public final class PhysicalTableManager {
     }
 
     private Interaction spawnInteraction(Location location, float width, float height) {
-        return location.getWorld().spawn(location, Interaction.class, spawned -> {
+        return VersionCompat.spawnEntity(location.getWorld(), location, Interaction.class, spawned -> {
             spawned.setInteractionWidth(width);
             spawned.setInteractionHeight(height);
             spawned.setResponsive(true);
@@ -2349,7 +2362,11 @@ public final class PhysicalTableManager {
     private void configureDisplayAnimation(Display display) {
         display.setInterpolationDelay(0);
         display.setInterpolationDuration(3);
-        display.setTeleportDuration(0);
+        try {
+            display.setTeleportDuration(0);
+        } catch (NoSuchMethodError e) {
+            // 1.20.1 不支持 setTeleportDuration，忽略
+        }
     }
 
     private void configureCardAnimation(Display display) {
@@ -2357,7 +2374,11 @@ public final class PhysicalTableManager {
         display.setInterpolationDuration(Math.max(2, Math.min(4, plugin.getCardHoverInterpolationTicks() / 2)));
         // IMPORTANT REGRESSION GUARD:
         // Card teleports must not interpolate, otherwise click/hover refreshes can look like a rotate-and-rebound bug.
-        display.setTeleportDuration(0);
+        try {
+            display.setTeleportDuration(0);
+        } catch (NoSuchMethodError e) {
+            // 1.20.1 不支持 setTeleportDuration，忽略
+        }
     }
 
     private void configureButtonAnimation(Display display) {
@@ -2365,7 +2386,11 @@ public final class PhysicalTableManager {
         display.setInterpolationDuration(Math.max(2, Math.min(4, plugin.getButtonHoverInterpolationTicks() / 2)));
         // IMPORTANT REGRESSION GUARD:
         // Buttons share the same client interpolation pitfall as cards; keep teleport interpolation disabled.
-        display.setTeleportDuration(0);
+        try {
+            display.setTeleportDuration(0);
+        } catch (NoSuchMethodError e) {
+            // 1.20.1 不支持 setTeleportDuration，忽略
+        }
     }
 
     private ItemStack tableItem() {
@@ -2380,7 +2405,7 @@ public final class PhysicalTableManager {
         );
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(model);
+        VersionCompat.setItemModel(meta, model);
         meta.displayName(message(plugin.getTableDisplayName(), NamedTextColor.GOLD));
         item.setItemMeta(meta);
         return item;
@@ -2398,7 +2423,7 @@ public final class PhysicalTableManager {
         );
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(model);
+        VersionCompat.setItemModel(meta, model);
         meta.displayName(message(plugin.getChairDisplayName(), NamedTextColor.RED));
         item.setItemMeta(meta);
         return item;
@@ -2575,7 +2600,7 @@ public final class PhysicalTableManager {
     private ItemStack uiItem(String modelId) {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(PackAssets.uiModel(plugin, modelId));
+        VersionCompat.setItemModel(meta, PackAssets.uiModel(plugin, modelId));
         item.setItemMeta(meta);
         return item;
     }
@@ -2583,7 +2608,7 @@ public final class PhysicalTableManager {
     private ItemStack cardItem(DoudizhuCard card) {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(PackAssets.cardModel(plugin, card));
+        VersionCompat.setItemModel(meta, PackAssets.cardModel(plugin, card));
         item.setItemMeta(meta);
         return item;
     }
@@ -2591,7 +2616,7 @@ public final class PhysicalTableManager {
     private ItemStack backCardItem() {
         ItemStack item = new ItemStack(Material.PAPER);
         ItemMeta meta = item.getItemMeta();
-        meta.setItemModel(PackAssets.backModel(plugin));
+        VersionCompat.setItemModel(meta, PackAssets.backModel(plugin));
         item.setItemMeta(meta);
         return item;
     }
