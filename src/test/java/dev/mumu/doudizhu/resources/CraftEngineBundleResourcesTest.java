@@ -59,11 +59,13 @@ class CraftEngineBundleResourcesTest {
 
     @Test
     void generatedPluginDescriptorUsesSelectedPaperApiVersion() throws IOException {
+        String expectedPluginVersion = System.getProperty("muz.expectedPluginVersion");
         String expectedApiVersion = System.getProperty("muz.expectedApiVersion");
+        assertNotNull(expectedPluginVersion, "Missing selected plugin version");
         assertNotNull(expectedApiVersion, "Missing selected Paper API version");
 
         String pluginDescriptor = read("plugin.yml");
-        assertTrue(pluginDescriptor.contains("version: 1.8.1"));
+        assertTrue(pluginDescriptor.contains("version: " + expectedPluginVersion));
         assertTrue(pluginDescriptor.contains("api-version: \"" + expectedApiVersion + "\""));
     }
 

@@ -1,5 +1,6 @@
 import org.gradle.api.tasks.bundling.Zip
 import java.io.File
+import java.util.jar.JarFile
 
 plugins {
     java
@@ -8,7 +9,7 @@ plugins {
 }
 
 group = "dev.mumu"
-version = "1.8.1"
+version = "1.8.2"
 
 data class MuzTarget(
     val id: String,
@@ -329,6 +330,8 @@ fun writeSeatChairModel(target: File) {
     )
 }
 
+val embeddedLibraries by configurations.creating
+
 repositories {
     mavenCentral()
     maven("https://repo.tabooproject.org/repository/releases/")
@@ -348,6 +351,7 @@ dependencies {
     compileOnly("net.momirealms:craft-engine-core:0.0.67")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("org.yaml:snakeyaml:2.6")
+    embeddedLibraries("org.yaml:snakeyaml:2.6")
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
     testImplementation("io.papermc.paper:paper-api:${muzTarget.paperApiDependency}")
@@ -367,9 +371,15 @@ tasks.withType<Jar>().configureEach {
 
 tasks.named<Jar>("jar") {
     archiveFileName.set("MUZ-${project.version}-${muzTarget.id}.jar")
+    from(embeddedLibraries.map { dependency ->
+        if (dependency.isDirectory) dependency else zipTree(dependency)
+    })
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
 }
 
 taboolib {
+    relocate("org.yaml.snakeyaml", "dev.mumu.doudizhu.libs.snakeyaml")
     version {
         taboolib = "6.2.3"
         coroutines = "1.7.3"
@@ -381,6 +391,37 @@ taboolib {
             "common",
             "common-platform-api"
         )
+    }
+}
+
+val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
+    dependsOn("taboolibMainTask")
+    val pluginJar = tasks.named<Jar>("jar").flatMap { it.archiveFile }
+    inputs.file(pluginJar)
+
+    doLast {
+        val jarFile = pluginJar.get().asFile
+        JarFile(jarFile).use { jar ->
+            val relocatedLoaderOptions = "dev/mumu/doudizhu/libs/snakeyaml/LoaderOptions.class"
+            val originalLoaderOptions = "org/yaml/snakeyaml/LoaderOptions.class"
+            check(jar.getEntry(relocatedLoaderOptions) != null) {
+                "Missing relocated SnakeYAML LoaderOptions in ${jarFile.name}"
+            }
+            check(jar.getEntry(originalLoaderOptions) == null) {
+                "Unrelocated SnakeYAML LoaderOptions remains in ${jarFile.name}"
+            }
+
+            val configEntry = checkNotNull(jar.getJarEntry("dev/mumu/doudizhu/config/MuzYamlConfig.class")) {
+                "Missing MuzYamlConfig.class in ${jarFile.name}"
+            }
+            val configBytecode = jar.getInputStream(configEntry).use { it.readBytes() }.toString(Charsets.ISO_8859_1)
+            check(configBytecode.contains("dev/mumu/doudizhu/libs/snakeyaml/LoaderOptions")) {
+                "MuzYamlConfig does not reference relocated SnakeYAML"
+            }
+            check(!configBytecode.contains("org/yaml/snakeyaml/LoaderOptions")) {
+                "MuzYamlConfig still references server-provided SnakeYAML"
+            }
+        }
     }
 }
 
@@ -690,10 +731,12 @@ tasks {
 
     test {
         useJUnitPlatform()
+        systemProperty("muz.expectedPluginVersion", project.version.toString())
         systemProperty("muz.expectedApiVersion", muzTarget.pluginApiVersion)
     }
 
     build {
+        dependsOn(verifyRelocatedSnakeYaml)
         dependsOn(zipResourcePack)
         dependsOn(zipCraftEngineBundle)
     }

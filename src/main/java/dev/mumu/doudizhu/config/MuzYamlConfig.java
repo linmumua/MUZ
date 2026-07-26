@@ -39,7 +39,6 @@ public final class MuzYamlConfig {
     private static Yaml createYaml() {
         LoaderOptions loaderOptions = new LoaderOptions();
         loaderOptions.setAllowDuplicateKeys(false);
-        loaderOptions.setWarnOnDuplicateKeys(true);
         loaderOptions.setCodePointLimit(16 * 1024 * 1024);
 
         DumperOptions dumperOptions = new DumperOptions();
@@ -48,7 +47,7 @@ public final class MuzYamlConfig {
         dumperOptions.setAllowUnicode(true);
         dumperOptions.setPrettyFlow(true);
         dumperOptions.setIndent(2);
-        dumperOptions.setIndicatorIndent(2);
+        dumperOptions.setIndicatorIndent(0);
         dumperOptions.setWidth(120);
         dumperOptions.setSplitLines(false);
         return new Yaml(loaderOptions, dumperOptions);
