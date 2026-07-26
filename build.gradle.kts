@@ -6,8 +6,7 @@ import groovy.json.JsonSlurper
 plugins {
     java
     kotlin("jvm") version "2.3.20"
-    id("io.papermc.paperweight.userdev") version "2.0.0-beta.19"
-    id("io.izzel.taboolib") version "2.0.37"
+    id("io.izzel.taboolib") version "2.0.38"
 }
 
 group = "dev.mumu"
@@ -315,7 +314,7 @@ repositories {
 }
 
 dependencies {
-    paperweight.paperDevBundle("1.20.4-R0.1-SNAPSHOT")
+    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
     compileOnly("me.clip:placeholderapi:2.12.2")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")
@@ -326,13 +325,14 @@ dependencies {
     implementation("org.yaml:snakeyaml:2.6")
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
+    testImplementation("io.papermc.paper:paper-api:26.2.build.+")
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
     withSourcesJar()
 }
 
@@ -353,10 +353,6 @@ taboolib {
             "common-platform-api"
         )
     }
-}
-
-paperweight {
-    reobfArtifactConfiguration = io.papermc.paperweight.userdev.ReobfArtifactConfiguration.REOBF_PRODUCTION
 }
 
 val generateResourcePack = tasks.register("generateResourcePack") {
@@ -661,24 +657,20 @@ val zipCraftEngineBundle = tasks.register<Zip>("zipCraftEngineBundle") {
 tasks {
     withType<JavaCompile>().configureEach {
         options.encoding = Charsets.UTF_8.name()
-        options.release.set(21)
+        options.release.set(25)
     }
 
     processResources {
         dependsOn(generateCraftEngineBundle)
         filteringCharset = Charsets.UTF_8.name()
         from(generatedJarResourcesDir)
-        filesMatching(listOf("plugin.yml", "paper-plugin.yml")) {
+        filesMatching("plugin.yml") {
             expand("version" to project.version)
         }
     }
 
     test {
         useJUnitPlatform()
-    }
-
-    assemble {
-        dependsOn(reobfJar)
     }
 
     build {

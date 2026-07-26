@@ -400,7 +400,7 @@ public final class WorldTableInteractionListener implements Listener {
         for (int index = 0; index < 16; index++) {
             double angle = (Math.PI * 2.0 * index) / 16.0;
             Location point = center.clone().add(Math.cos(angle) * radius, 0.0, Math.sin(angle) * radius);
-            player.spawnParticle(Particle.REDSTONE, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
+            player.spawnParticle(Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
         }
     }
 
@@ -413,7 +413,7 @@ public final class WorldTableInteractionListener implements Listener {
                 (to.getY() - from.getY()) * progress,
                 (to.getZ() - from.getZ()) * progress
             );
-            player.spawnParticle(Particle.REDSTONE, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
+            player.spawnParticle(Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
         }
     }
 
