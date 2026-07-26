@@ -1,7 +1,5 @@
 import org.gradle.api.tasks.bundling.Zip
 import java.io.File
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 
 plugins {
     java
@@ -10,19 +8,34 @@ plugins {
 }
 
 group = "dev.mumu"
-version = "1.8.0"
+version = "1.8.1"
+
+data class MuzTarget(
+    val id: String,
+    val paperApiDependency: String,
+    val pluginApiVersion: String,
+    val javaVersion: Int
+)
+
+val supportedMuzTargets = listOf(
+    MuzTarget("paper-1.21.11", "1.21.11-R0.1-SNAPSHOT", "1.21.11", 21),
+    MuzTarget("paper-26.1.2", "26.1.2.build.74-stable", "26.1.2", 25),
+    MuzTarget("paper-26.2", "26.2.build.84-stable", "26.2", 25)
+).associateBy(MuzTarget::id)
+val muzTargetId = providers.gradleProperty("muzTarget").orElse("paper-26.2").get()
+val muzTarget = supportedMuzTargets[muzTargetId]
+    ?: throw GradleException("Unsupported muzTarget '$muzTargetId'. Supported targets: ${supportedMuzTargets.keys.joinToString()}")
+
+layout.buildDirectory.set(layout.projectDirectory.dir("build/${muzTarget.id}"))
 
 val sourceResourceNamespace = "doudizhupaper"
 val resourceNamespace = "muz"
 val generatedJarResourcesDir = layout.buildDirectory.dir("generated/resources/main")
 val generatedResourcePackDir = layout.buildDirectory.dir("generated/resourcepack")
 val resourcePackSourceDir = layout.projectDirectory.dir("resourcepack").asFile
-val playgroundRootDir = layout.projectDirectory.asFile.parentFile
 val cardTextureDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/textures/item/cards")
 val uiTextureDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/textures/item/ui")
 val soundSourceDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/sounds")
-val jokerTemplateModelFile = playgroundRootDir.resolve("joker_2.json")
-val jokerTemplateTextureFile = playgroundRootDir.resolve("joker_2.png")
 
 fun jsonString(value: String): String = buildString {
     append('"')
@@ -87,33 +100,45 @@ fun writeFlatItemModel(target: File, texturePath: String) {
     )
 }
 
-fun writeCardTemplateModel(target: File, templateText: String, texturePath: String) {
-    val parsed = JsonSlurper().parseText(templateText) as Map<*, *>
-    val display = (parsed["display"] as? Map<*, *>)?.filterKeys { key ->
-        key in setOf(
-            "thirdperson_righthand",
-            "thirdperson_lefthand",
-            "firstperson_righthand",
-            "firstperson_lefthand",
-            "ground",
-            "gui",
-            "head",
-            "fixed"
-        )
-    }.orEmpty()
-
-    val sanitized = linkedMapOf<String, Any>(
-        "textures" to mapOf(
-            "0" to texturePath,
-            "particle" to texturePath
-        ),
-        "elements" to (parsed["elements"] ?: emptyList<Any>())
+fun writeCardModel(target: File, texturePath: String) {
+    writeText(
+        target,
+        """
+        {
+          "textures": {
+            "0": ${jsonString(texturePath)},
+            "particle": ${jsonString(texturePath)}
+          },
+          "elements": [
+            {
+              "from": [8, 4.25, 5.75],
+              "to": [8.25, 10.6, 10.25],
+              "rotation": {"x": 0, "y": -90, "z": 0, "origin": [8.125, 8, 8]},
+              "faces": {
+                "north": {"uv": [2.37658, 2.5981, 2.62658, 2.94304], "texture": "#0"},
+                "east": {"uv": [0, 2.53165, 7.08228, 16], "texture": "#0"},
+                "south": {"uv": [1.82278, 2.70886, 2.07278, 2.85127], "texture": "#0"},
+                "west": {"uv": [6.88608, 2.53165, 13.96835, 16], "texture": "#0"},
+                "up": {"uv": [2.95886, 2.69304, 2.70886, 2.5981], "texture": "#0"},
+                "down": {"uv": [3.18038, 2.63291, 2.93038, 2.72785], "texture": "#0"}
+              }
+            }
+          ],
+          "gui_light": "front",
+          "display": {
+            "thirdperson_righthand": {"translation": [-2.25, 2.75, 0.75]},
+            "thirdperson_lefthand": {"translation": [-2.25, 2.75, 0.75]},
+            "firstperson_righthand": {"rotation": [-8, -37, 1], "translation": [0, 4, 0]},
+            "firstperson_lefthand": {"rotation": [-8, -37, 1], "translation": [0, 4, 0]},
+            "ground": {"translation": [0, 2.5, 0], "scale": [1.28, 1.28, 1.28]},
+            "gui": {"rotation": [0, 0, -13], "translation": [-0.25, 1, 0], "scale": [2.09, 2.09, 2.09]},
+            "head": {"rotation": [0, -180, 0], "translation": [0.75, 7.5, -7.5], "scale": [1.51, 1.51, 1.51]},
+            "fixed": {"rotation": [0, -180, 0], "translation": [0.75, 1, 0], "scale": [1.91, 1.91, 1.91]},
+            "on_shelf": {"translation": [0, 1.5, -1.75], "scale": [2.21, 2.21, 2.21]}
+          }
+        }
+        """.trimIndent() + "\n"
     )
-    parsed["gui_light"]?.let { sanitized["gui_light"] = it }
-    if (display.isNotEmpty()) {
-        sanitized["display"] = display
-    }
-    writeText(target, JsonOutput.prettyPrint(JsonOutput.toJson(sanitized)) + "\n")
 }
 
 fun writeTableVisualModel(target: File) {
@@ -314,7 +339,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
+    compileOnly("io.papermc.paper:paper-api:${muzTarget.paperApiDependency}")
     compileOnly("me.clip:placeholderapi:2.12.2")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")
@@ -325,19 +350,23 @@ dependencies {
     implementation("org.yaml:snakeyaml:2.6")
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
-    testImplementation("io.papermc.paper:paper-api:26.2.build.+")
+    testImplementation("io.papermc.paper:paper-api:${muzTarget.paperApiDependency}")
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(muzTarget.javaVersion))
     withSourcesJar()
 }
 
 tasks.withType<Jar>().configureEach {
     extensions.extraProperties["archivePath"] = archiveFile.get().asFile
+}
+
+tasks.named<Jar>("jar") {
+    archiveFileName.set("MUZ-${project.version}-${muzTarget.id}.jar")
 }
 
 taboolib {
@@ -393,28 +422,15 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         val modelCardsDir = outputAssetsRoot.resolve("models/item/cards")
         val modelUiDir = outputAssetsRoot.resolve("models/item/ui")
         val modelFurnitureDir = outputAssetsRoot.resolve("models/item/furniture")
-        val outputCardTextureDir = outputAssetsRoot.resolve("textures/item/cards")
-        val jokerTemplateModel = jokerTemplateModelFile.takeIf(File::isFile)?.readText(Charsets.UTF_8)
-        val sharedCardTexturePath = "$resourceNamespace:item/cards/joker_2"
-
-        if (jokerTemplateTextureFile.isFile) {
-            outputCardTextureDir.mkdirs()
-            jokerTemplateTextureFile.copyTo(outputCardTextureDir.resolve("joker_2.png"), overwrite = true)
-        }
 
         cardTextureDir.listFiles()
             ?.filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
             ?.sortedBy { it.nameWithoutExtension }
             ?.forEach { texture ->
                 val id = texture.nameWithoutExtension
-                writeItemDefinition(itemCardsDir.resolve("$id.json"), "$resourceNamespace:item/cards/$id")
-                if (jokerTemplateModel != null && jokerTemplateTextureFile.isFile) {
-                    writeCardTemplateModel(modelCardsDir.resolve("$id.json"), jokerTemplateModel, sharedCardTexturePath)
-                } else if (jokerTemplateTextureFile.isFile) {
-                    writeFlatItemModel(modelCardsDir.resolve("$id.json"), sharedCardTexturePath)
-                } else {
-                    writeFlatItemModel(modelCardsDir.resolve("$id.json"), "$resourceNamespace:item/cards/$id")
-                }
+                val texturePath = "$resourceNamespace:item/cards/$id"
+                writeItemDefinition(itemCardsDir.resolve("$id.json"), texturePath)
+                writeCardModel(modelCardsDir.resolve("$id.json"), texturePath)
             }
 
         uiTextureDir.listFiles()
@@ -657,7 +673,7 @@ val zipCraftEngineBundle = tasks.register<Zip>("zipCraftEngineBundle") {
 tasks {
     withType<JavaCompile>().configureEach {
         options.encoding = Charsets.UTF_8.name()
-        options.release.set(25)
+        options.release.set(muzTarget.javaVersion)
     }
 
     processResources {
@@ -665,12 +681,16 @@ tasks {
         filteringCharset = Charsets.UTF_8.name()
         from(generatedJarResourcesDir)
         filesMatching("plugin.yml") {
-            expand("version" to project.version)
+            expand(
+                "version" to project.version,
+                "apiVersion" to muzTarget.pluginApiVersion
+            )
         }
     }
 
     test {
         useJUnitPlatform()
+        systemProperty("muz.expectedApiVersion", muzTarget.pluginApiVersion)
     }
 
     build {

@@ -12,8 +12,8 @@ import java.util.function.Consumer;
 
 /**
  * 版本兼容工具类。
- * 插件基线为 Paper 26.2（见 plugin.yml api-version），
- * setItemModel 与带 Consumer 的 spawn 均为稳定 API，直接调用即可。
+ * 当前发布同时面向 Paper 1.21.11、26.1.2 与 26.2；
+ * setItemModel 与带 Consumer 的 spawn 在这些目标 API 中均可直接调用。
  */
 public final class VersionCompat {
 

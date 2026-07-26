@@ -1,7 +1,7 @@
 name: MUZ
 main: dev.mumu.doudizhu.DoudizhuPlugin
 version: ${version}
-api-version: "26.2"
+api-version: "${apiVersion}"
 folia-supported: true
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.

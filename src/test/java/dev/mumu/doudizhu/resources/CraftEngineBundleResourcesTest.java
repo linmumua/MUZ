@@ -33,11 +33,13 @@ class CraftEngineBundleResourcesTest {
     }
 
     @Test
-    void generatedCardModelUsesJokerTemplateGeometry() throws IOException {
+    void generatedCardModelUsesItsOwnDoubleSidedTextureAtlas() throws IOException {
         String cardModel = read("craftengine/muz/resourcepack/assets/muz/models/item/cards/big_joker.json");
         assertTrue(cardModel.contains("\"textures\""));
         assertTrue(cardModel.contains("\"elements\""));
-        assertTrue(cardModel.contains("\"muz:item/cards/joker_2\""));
+        assertTrue(cardModel.contains("\"0\": \"muz:item/cards/big_joker\""));
+        assertTrue(cardModel.contains("\"east\": {\"uv\": [0, 2.53165, 7.08228, 16]"));
+        assertTrue(cardModel.contains("\"west\": {\"uv\": [6.88608, 2.53165, 13.96835, 16]"));
     }
 
     @Test
@@ -53,6 +55,16 @@ class CraftEngineBundleResourcesTest {
         assertTrue(packMeta.contains("MUMU"));
         assertTrue(packMeta.contains("linmumua"));
         assertTrue(packMeta.contains("356013496"));
+    }
+
+    @Test
+    void generatedPluginDescriptorUsesSelectedPaperApiVersion() throws IOException {
+        String expectedApiVersion = System.getProperty("muz.expectedApiVersion");
+        assertNotNull(expectedApiVersion, "Missing selected Paper API version");
+
+        String pluginDescriptor = read("plugin.yml");
+        assertTrue(pluginDescriptor.contains("version: 1.8.1"));
+        assertTrue(pluginDescriptor.contains("api-version: \"" + expectedApiVersion + "\""));
     }
 
     private static String read(String path) throws IOException {
