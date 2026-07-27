@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "dev.mumu"
-version = "1.8.2"
+version = "1.8.3"
 
 data class MuzTarget(
     val id: String,
