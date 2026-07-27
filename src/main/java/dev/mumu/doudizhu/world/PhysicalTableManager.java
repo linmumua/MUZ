@@ -136,23 +136,80 @@ public final class PhysicalTableManager {
         return rotate(anchor, yaw, 0.0, plugin.getChairBaseHeight(), plugin.getChairDistance());
     }
 
+    /**
+     * 返回放桌失败的玩家提示文案
+     * @param anchor 放桌锚点
+     * @param yaw 放桌朝向
+     * @return 可以放置时返回 null，否则返回失败原因
+     */
     public String placementObstructionReason(Location anchor, float yaw) {
+        PlacementObstruction obstruction = placementObstruction(anchor, yaw);
+        return obstruction == null ? null : obstruction.reason();
+    }
+
+    /**
+     * 检测放桌区域的阻挡情况，返回第一个失败的详细结果
+     * @param anchor 放桌锚点
+     * @param yaw 放桌朝向
+     * @return 可以放置时返回 null，否则返回带原因与被挡方块的结果
+     */
+    public PlacementObstruction placementObstruction(Location anchor, float yaw) {
         if (anchor == null || anchor.getWorld() == null) {
-            return "这里暂时还不能放牌桌。";
+            return PlacementObstruction.ofReason("这里暂时还不能放牌桌。");
         }
         ensureChunkReady(anchor);
-        String tableReason = obstructionReason("桌面", blockPlacementLocation(previewTableCenter(anchor)), 0.95, -0.10, 0.95);
-        if (tableReason != null) {
-            return tableReason;
+        PlacementObstruction tableObstruction = PlacementObstruction.detect(
+            "桌面",
+            blockPlacementLocation(previewTableCenter(anchor)),
+            0.95,
+            -0.10,
+            0.95
+        );
+        if (tableObstruction != null) {
+            return tableObstruction;
         }
         List<Location> chairBases = previewChairBases(anchor, yaw);
         for (int index = 0; index < chairBases.size(); index++) {
-            String chairReason = obstructionReason("椅子 " + (index + 1), blockPlacementLocation(chairBases.get(index)), 0.55, -0.10, 1.05);
-            if (chairReason != null) {
-                return chairReason;
+            PlacementObstruction chairObstruction = PlacementObstruction.detect(
+                "椅子 " + (index + 1),
+                blockPlacementLocation(chairBases.get(index)),
+                0.55,
+                -0.10,
+                1.05
+            );
+            if (chairObstruction != null) {
+                return chairObstruction;
             }
         }
         return null;
+    }
+
+    /**
+     * 收集放桌区域内所有被挡方块，供粒子高亮复用
+     * @param anchor 放桌锚点
+     * @param yaw 放桌朝向
+     * @return 桌面与全部椅子的被挡方块整格坐标，去重后按检测顺序排列；区块未加载时返回空列表
+     */
+    public List<Location> placementBlockedBlocks(Location anchor, float yaw) {
+        if (anchor == null || anchor.getWorld() == null || !anchor.getChunk().isLoaded()) {
+            return List.of();
+        }
+        Set<Location> blocked = new LinkedHashSet<>();
+        blocked.addAll(PlacementObstruction.collectBlockingBlocks(
+            blockPlacementLocation(previewTableCenter(anchor)),
+            0.95,
+            -0.10,
+            0.95
+        ));
+        for (Location chairBase : previewChairBases(anchor, yaw)) {
+            blocked.addAll(PlacementObstruction.collectBlockingBlocks(
+                blockPlacementLocation(chairBase),
+                0.55,
+                -0.10,
+                1.05
+            ));
+        }
+        return new ArrayList<>(blocked);
     }
 
     private GameTable placeNewTableInternal(Player owner, String name, TableLevel roomLevel, Location anchor, float yaw) {
@@ -1941,36 +1998,6 @@ public final class PhysicalTableManager {
         if (!block.getType().isAir()) {
             block.setType(Material.AIR, false);
         }
-    }
-
-    private String obstructionReason(String label, Location center, double radiusXz, double minYOffset, double maxYOffset) {
-        if (!hasSolidObstruction(center, radiusXz, minYOffset, maxYOffset)) {
-            return null;
-        }
-        return label + "位置被方块挡住了，先清空附近空间。";
-    }
-
-    private boolean hasSolidObstruction(Location center, double radiusXz, double minYOffset, double maxYOffset) {
-        if (center == null || center.getWorld() == null) {
-            return false;
-        }
-        int minX = (int) Math.floor(center.getX() - radiusXz);
-        int maxX = (int) Math.floor(center.getX() + radiusXz);
-        int minY = (int) Math.floor(center.getY() + minYOffset);
-        int maxY = (int) Math.floor(center.getY() + maxYOffset);
-        int minZ = (int) Math.floor(center.getZ() - radiusXz);
-        int maxZ = (int) Math.floor(center.getZ() + radiusXz);
-        for (int x = minX; x <= maxX; x++) {
-            for (int y = minY; y <= maxY; y++) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    org.bukkit.block.Block block = center.getWorld().getBlockAt(x, y, z);
-                    if (!block.getType().isAir()) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     private void clearResidualEntities(List<Location> hotspots, double radiusXz, double radiusY) {

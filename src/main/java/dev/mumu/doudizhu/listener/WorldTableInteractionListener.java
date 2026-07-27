@@ -11,6 +11,7 @@ import java.util.UUID;
 import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.Particle;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import net.kyori.adventure.text.Component;
 import org.bukkit.event.EventHandler;
@@ -33,6 +34,15 @@ import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 
 public final class WorldTableInteractionListener implements Listener {
+    /* 被方块挡住时的红色高亮颜色 */
+    private static final Color BLOCKED_HIGHLIGHT_COLOR = Color.fromRGB(255, 64, 64);
+
+    /* 单次预览最多高亮的被挡方块数量，避免粒子包过多 */
+    private static final int MAX_HIGHLIGHTED_BLOCKED_BLOCKS = 8;
+
+    /* 每条棱的粒子采样段数，1 格棱长不需要过密 */
+    private static final int BLOCKED_EDGE_SAMPLES = 4;
+
     private final DoudizhuPlugin plugin;
     private final Map<UUID, TablePlacerPreview> tablePlacerPreviews = new LinkedHashMap<>();
     private final Map<UUID, TableRemoverPreview> tableRemoverPreviews = new LinkedHashMap<>();
@@ -191,11 +201,23 @@ public final class WorldTableInteractionListener implements Listener {
         String obstruction = mode == DoudizhuPlugin.TableMode.ZHAJINHUA
             ? plugin.getZjhPhysicalTableManager().placementObstructionReason(anchor, yaw, maxPlayers)
             : plugin.getPhysicalTableManager().placementObstructionReason(anchor, yaw);
+        long now = System.currentTimeMillis();
         if (obstruction != null) {
-            tablePlacerPreviews.remove(player.getUniqueId());
+            // 被挡时保留一个只用于红色高亮的预览，让玩家看清是哪些方块挡住了放桌位置。
+            TablePlacerPreview blockedPreview = new TablePlacerPreview(
+                mode,
+                tableId,
+                level,
+                maxPlayers,
+                anchor.clone(),
+                yaw,
+                now + 5000L,
+                true
+            );
+            tablePlacerPreviews.put(player.getUniqueId(), blockedPreview);
+            spawnTablePlacerPreview(player, blockedPreview);
             throw new IllegalStateException(obstruction);
         }
-        long now = System.currentTimeMillis();
         TablePlacerPreview previous = tablePlacerPreviews.get(player.getUniqueId());
         // HARD-CODED TABLE PLACER FLOW:
         // Right click once = particle preview.
@@ -213,7 +235,7 @@ public final class WorldTableInteractionListener implements Listener {
             player.sendActionBar(MuzTheme.success("已放置 " + tableId + " 号桌"));
             return;
         }
-        tablePlacerPreviews.put(player.getUniqueId(), new TablePlacerPreview(mode, tableId, level, maxPlayers, anchor.clone(), yaw, now + 5000L));
+        tablePlacerPreviews.put(player.getUniqueId(), new TablePlacerPreview(mode, tableId, level, maxPlayers, anchor.clone(), yaw, now + 5000L, false));
         spawnTablePlacerPreview(player, tablePlacerPreviews.get(player.getUniqueId()));
         player.sendActionBar(MuzTheme.warning("已预览 " + tableId + " 号桌，再次右键放置"));
     }
@@ -291,7 +313,7 @@ public final class WorldTableInteractionListener implements Listener {
     }
 
     private boolean matchesExistingPreview(TablePlacerPreview preview, DoudizhuPlugin.TableMode mode, Location anchor, float yaw, String tableId, TableLevel level, long now) {
-        if (preview == null || now > preview.expiresAtMillis()) {
+        if (preview == null || preview.blocked() || now > preview.expiresAtMillis()) {
             return false;
         }
         return preview.mode() == mode
@@ -357,19 +379,29 @@ public final class WorldTableInteractionListener implements Listener {
 
     private void spawnTablePlacerPreview(Player player, TablePlacerPreview preview) {
         if (preview.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA) {
-            Location tableCenter = plugin.getZjhPhysicalTableManager().previewTableCenter(preview.anchor());
-            drawRing(player, tableCenter, 1.06, Color.fromRGB(255, 208, 92));
-            for (Location seat : plugin.getZjhPhysicalTableManager().previewSeatBases(preview.anchor(), preview.yaw(), preview.maxPlayers())) {
-                drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.28, Color.fromRGB(110, 210, 255));
+            List<Location> blockedBlocks = plugin.getZjhPhysicalTableManager()
+                .placementBlockedBlocks(preview.anchor(), preview.yaw(), preview.maxPlayers());
+            if (!preview.blocked()) {
+                Location tableCenter = plugin.getZjhPhysicalTableManager().previewTableCenter(preview.anchor());
+                drawRing(player, tableCenter, 1.06, Color.fromRGB(255, 208, 92));
+                for (Location seat : plugin.getZjhPhysicalTableManager().previewSeatBases(preview.anchor(), preview.yaw(), preview.maxPlayers())) {
+                    drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.28, Color.fromRGB(110, 210, 255));
+                }
             }
+            drawBlockedBlocks(player, blockedBlocks);
             return;
         }
-        Location tableCenter = plugin.getPhysicalTableManager().previewTableCenter(preview.anchor());
-        drawRing(player, tableCenter, 0.90, Color.fromRGB(255, 208, 92));
-        for (Location seat : plugin.getPhysicalTableManager().previewChairBases(preview.anchor(), preview.yaw())) {
-            drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.34, Color.fromRGB(110, 210, 255));
+        List<Location> blockedBlocks = plugin.getPhysicalTableManager()
+            .placementBlockedBlocks(preview.anchor(), preview.yaw());
+        if (!preview.blocked()) {
+            Location tableCenter = plugin.getPhysicalTableManager().previewTableCenter(preview.anchor());
+            drawRing(player, tableCenter, 0.90, Color.fromRGB(255, 208, 92));
+            for (Location seat : plugin.getPhysicalTableManager().previewChairBases(preview.anchor(), preview.yaw())) {
+                drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.34, Color.fromRGB(110, 210, 255));
+            }
+            drawLine(player, tableCenter.clone().add(0.0, 0.05, 0.0), plugin.getPhysicalTableManager().previewOpenSide(preview.anchor(), preview.yaw()).clone().add(0.0, 0.05, 0.0), Color.fromRGB(135, 255, 165));
         }
-        drawLine(player, tableCenter.clone().add(0.0, 0.05, 0.0), plugin.getPhysicalTableManager().previewOpenSide(preview.anchor(), preview.yaw()).clone().add(0.0, 0.05, 0.0), Color.fromRGB(135, 255, 165));
+        drawBlockedBlocks(player, blockedBlocks);
     }
 
     private void spawnTableRemoverPreview(Player player, RemovalTarget target) {
@@ -393,6 +425,75 @@ public final class WorldTableInteractionListener implements Listener {
             drawRing(player, seat.clone().add(0.0, 0.08, 0.0), target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA ? 0.28 : 0.38, Color.fromRGB(255, 176, 104));
         }
         drawLine(player, tableCenter.clone().add(0.0, 0.08, 0.0), player.getEyeLocation(), Color.fromRGB(255, 215, 120));
+    }
+
+    private void drawBlockedBlocks(Player player, List<Location> blockedBlocks) {
+        int drawn = 0;
+        for (Location blockedBlock : blockedBlocks) {
+            if (drawn >= MAX_HIGHLIGHTED_BLOCKED_BLOCKS) {
+                return;
+            }
+            if (!player.getWorld().equals(blockedBlock.getWorld())) {
+                continue;
+            }
+            drawBlockOutline(player, blockedBlock, BLOCKED_HIGHLIGHT_COLOR);
+            drawn++;
+        }
+    }
+
+    private void drawBlockOutline(Player player, Location blockCorner, Color color) {
+        World world = blockCorner.getWorld();
+        if (world == null) {
+            return;
+        }
+        double minX = blockCorner.getBlockX();
+        double minY = blockCorner.getBlockY();
+        double minZ = blockCorner.getBlockZ();
+        double maxX = minX + 1.0;
+        double maxY = minY + 1.0;
+        double maxZ = minZ + 1.0;
+        for (double y : new double[] {minY, maxY}) {
+            drawEdge(player, world, minX, y, minZ, maxX, y, minZ, color);
+            drawEdge(player, world, minX, y, maxZ, maxX, y, maxZ, color);
+            drawEdge(player, world, minX, y, minZ, minX, y, maxZ, color);
+            drawEdge(player, world, maxX, y, minZ, maxX, y, maxZ, color);
+        }
+        drawEdge(player, world, minX, minY, minZ, minX, maxY, minZ, color);
+        drawEdge(player, world, maxX, minY, minZ, maxX, maxY, minZ, color);
+        drawEdge(player, world, minX, minY, maxZ, minX, maxY, maxZ, color);
+        drawEdge(player, world, maxX, minY, maxZ, maxX, maxY, maxZ, color);
+    }
+
+    private void drawEdge(
+        Player player,
+        World world,
+        double fromX,
+        double fromY,
+        double fromZ,
+        double toX,
+        double toY,
+        double toZ,
+        Color color
+    ) {
+        Particle.DustOptions dust = new Particle.DustOptions(color, 0.7f);
+        for (int index = 0; index <= BLOCKED_EDGE_SAMPLES; index++) {
+            double progress = (double) index / BLOCKED_EDGE_SAMPLES;
+            player.spawnParticle(
+                Particle.DUST,
+                new Location(
+                    world,
+                    fromX + (toX - fromX) * progress,
+                    fromY + (toY - fromY) * progress,
+                    fromZ + (toZ - fromZ) * progress
+                ),
+                1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                dust
+            );
+        }
     }
 
     private void drawRing(Player player, Location center, double radius, Color color) {
@@ -494,7 +595,7 @@ public final class WorldTableInteractionListener implements Listener {
         return null;
     }
 
-    private record TablePlacerPreview(DoudizhuPlugin.TableMode mode, String tableId, TableLevel level, int maxPlayers, Location anchor, float yaw, long expiresAtMillis) {
+    private record TablePlacerPreview(DoudizhuPlugin.TableMode mode, String tableId, TableLevel level, int maxPlayers, Location anchor, float yaw, long expiresAtMillis, boolean blocked) {
     }
 
     private record TableRemoverPreview(DoudizhuPlugin.TableMode mode, String tableName, long expiresAtMillis) {
