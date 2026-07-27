@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.bukkit.Material;
 import org.bukkit.util.BoundingBox;
 import org.junit.jupiter.api.Test;
 
@@ -91,6 +92,29 @@ class PlacementObstructionTest {
         assertTrue(fullCube.overlaps(PlacementObstruction.toBlockLocalArea(area, 10, 64, 10)));
         // 同一区域相对上方方块则不应相交。
         assertFalse(fullCube.overlaps(PlacementObstruction.toBlockLocalArea(area, 10, 66, 10)));
+    }
+
+    @Test
+    void hazardBlocksWithoutCollisionShapeStillBlockPlacement() {
+        // 实测确认这些方块 isPassable() 为 true 且没有碰撞箱，
+        // 若只看碰撞箱就会允许把牌桌放进岩浆、细雪、蜘蛛网和火里。
+        assertTrue(PlacementObstruction.isHazardMaterial(Material.LAVA));
+        assertTrue(PlacementObstruction.isHazardMaterial(Material.POWDER_SNOW));
+        assertTrue(PlacementObstruction.isHazardMaterial(Material.COBWEB));
+        assertTrue(PlacementObstruction.isHazardMaterial(Material.FIRE));
+        assertTrue(PlacementObstruction.isHazardMaterial(Material.SOUL_FIRE));
+    }
+
+    @Test
+    void walkablePassableBlocksAreNotTreatedAsHazards() {
+        // 这些是玩家最常踩在脚下的方块，必须保持可以放桌，否则又会回到放不下桌的老问题。
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.WATER));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.SHORT_GRASS));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.POPPY));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.TORCH));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.OAK_SIGN));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.SNOW));
+        assertFalse(PlacementObstruction.isHazardMaterial(Material.AIR));
     }
 
     @Test

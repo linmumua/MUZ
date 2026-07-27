@@ -3,13 +3,15 @@ package dev.mumu.doudizhu.world;
 import java.util.ArrayList;
 import java.util.List;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.BoundingBox;
 
 /**
  * 放桌阻挡检测结果，记录失败原因与具体被挡住的方块，供红色高亮复用。
- * 阻挡判定按方块真实碰撞箱进行，草、花、火把、告示牌、水等可穿过方块不算阻挡。
+ * 阻挡判定按方块真实碰撞箱进行，草、花、火把、告示牌、水等可穿过方块不算阻挡；
+ * 岩浆、细雪、蜘蛛网、火焰虽然没有碰撞箱，但不适合摆牌桌，仍按阻挡处理。
  */
 public final class PlacementObstruction {
     /* 面向玩家的失败原因 */
@@ -171,12 +173,37 @@ public final class PlacementObstruction {
     }
 
     /**
+     * 判断方块是否属于不适合放桌的危险方块。
+     * 这些方块没有碰撞箱，玩家可以穿过，但把牌桌放进去并不合理。
+     * @param block 待判断方块
+     * @return 属于危险方块时返回 true
+     */
+    private static boolean isHazardBlock(Block block) {
+        return isHazardMaterial(block.getType());
+    }
+
+    /**
+     * 判断方块类型是否属于不适合放桌的危险方块，包级可见以便单元测试直接校验清单
+     * @param material 方块类型
+     * @return 属于危险方块时返回 true
+     */
+    static boolean isHazardMaterial(Material material) {
+        return switch (material) {
+            case LAVA, POWDER_SNOW, COBWEB, FIRE, SOUL_FIRE -> true;
+            default -> false;
+        };
+    }
+
+    /**
      * 判断单个方块是否真实阻挡给定区域
      * @param block 待判断方块
      * @param area 世界坐标下的检测区域
-     * @return 真实碰撞时返回 true
+     * @return 真实碰撞或属于危险方块时返回 true
      */
     private static boolean blocksPlacement(Block block, BoundingBox area) {
+        if (isHazardBlock(block)) {
+            return true;
+        }
         if (block.isPassable()) {
             return false;
         }
