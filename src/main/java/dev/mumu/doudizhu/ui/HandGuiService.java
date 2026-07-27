@@ -211,7 +211,7 @@ public final class HandGuiService {
     }
 
     public void openAdminModels(Player player, HandInventoryHolder.AdminPage page) {
-        // 管理菜单改成“首页 -> 斗地主/德州/通用 -> 具体分类页”的三级结构。
+        // 管理菜单改成“首页 -> 斗地主/通用 -> 具体分类页”的三级结构。
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_MODELS, page);
         Inventory inventory = Bukkit.createInventory(holder, ADMIN_SIZE, "MUMU | 管理菜单 | " + pageTitle(page));
         holder.setInventory(inventory);
@@ -227,11 +227,10 @@ public final class HandGuiService {
         switch (page) {
             case HOME -> {
                 inventory.setItem(4, noteItem(Material.WRITABLE_BOOK, "系统概览", List.of(
-                    "斗地主 " + plugin.getTableManager().getTables().size() + " 张 · 德州 " + plugin.getZjhManager().getTables().size() + " 张。",
+                    "斗地主 " + plugin.getTableManager().getTables().size() + " 张。",
                     "支付模式 · " + (plugin.isChipPaymentEnabled() ? "筹码" : "金币") + "。"
                 )));
                 inventory.setItem(19, item(Material.PAPER, "斗地主牌桌", List.of("桌椅、按钮、卡牌、文字。")));
-                inventory.setItem(21, item(Material.OAK_BOAT, "德州牌桌", List.of("座位、按钮、卡牌、文字。")));
                 inventory.setItem(23, item(Material.BOOK, "通用视觉", List.of("动画、高亮、头像。")));
                 inventory.setItem(25, item(Material.GOLD_INGOT, "经济与场次", List.of("支付、筹码、场次、数据库。")));
             }
@@ -247,12 +246,6 @@ public final class HandGuiService {
                 inventory.setItem(31, item(Material.BOOK, "玩家选项", List.of("音效方案、动作方案。")));
                 inventory.setItem(32, item(Material.CLOCK, "机器人行为", List.of("本地 bot 延迟、提示数量。")));
                 inventory.setItem(33, item(Material.ENDER_EYE, "AI 配置", List.of("DeepSeek、全局人设词、调试入口。")));
-            }
-            case TEXAS_HOME -> {
-                inventory.setItem(20, item(Material.CARTOGRAPHY_TABLE, "桌椅摆位", List.of("座位圈、桌面、按钮位。")));
-                inventory.setItem(22, item(Material.STONE_BUTTON, "按钮布局", List.of("加入按钮、操作按钮。")));
-                inventory.setItem(29, item(Material.PAPER, "卡牌表现", List.of("公共牌、手牌、半径。")));
-                inventory.setItem(31, item(Material.OAK_SIGN, "文字标签", List.of("座位信息、桌面状态。")));
             }
             case GLOBAL_HOME -> {
                 inventory.setItem(20, item(Material.COMPARATOR, "动画节奏", List.of("牌和按钮的动画。")));
@@ -516,28 +509,6 @@ public final class HandGuiService {
                     "默认牌风：稳健、保炸、残局再提爆发。",
                     "全局人设词会同时影响 bot 调试聊天和 DeepSeek 实战决策。"
                 )));
-            }
-            case TEXAS_FURNITURE -> {
-                inventory.setItem(10, adminSettingItem(Material.MANGROVE_BOAT, DoudizhuPlugin.AdminSetting.TEXAS_SEAT_DISTANCE));
-                inventory.setItem(12, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.TEXAS_SPAWN_FURNITURE));
-                inventory.setItem(14, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.TEXAS_DEALER_MARKER_HEIGHT));
-                inventory.setItem(16, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.TEXAS_DEALER_MARKER_RADIUS_FACTOR));
-            }
-            case TEXAS_BUTTONS -> {
-                inventory.setItem(12, adminSettingItem(Material.LIGHT_WEIGHTED_PRESSURE_PLATE, DoudizhuPlugin.AdminSetting.TEXAS_JOIN_BUTTON_HEIGHT));
-                inventory.setItem(14, adminSettingItem(Material.STONE_BUTTON, DoudizhuPlugin.AdminSetting.TEXAS_ACTION_BUTTON_HEIGHT));
-                inventory.setItem(16, adminSettingItem(Material.STRING, DoudizhuPlugin.AdminSetting.TEXAS_ACTION_BUTTON_STEP));
-            }
-            case TEXAS_CARDS -> {
-                inventory.setItem(10, adminSettingItem(Material.MAP, DoudizhuPlugin.AdminSetting.TEXAS_COMMUNITY_CARD_HEIGHT));
-                inventory.setItem(12, adminSettingItem(Material.LEAD, DoudizhuPlugin.AdminSetting.TEXAS_COMMUNITY_CARD_SPACING));
-                inventory.setItem(14, adminSettingItem(Material.PAPER, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_CARD_HEIGHT));
-                inventory.setItem(16, adminSettingItem(Material.TRIPWIRE_HOOK, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_CARD_SPACING));
-                inventory.setItem(22, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_RADIUS_FACTOR));
-            }
-            case TEXAS_TEXT -> {
-                inventory.setItem(12, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.TEXAS_SEAT_LABEL_HEIGHT));
-                inventory.setItem(14, adminSettingItem(Material.WRITABLE_BOOK, DoudizhuPlugin.AdminSetting.TEXAS_STATUS_HEIGHT));
             }
         }
         fillAdminChrome(inventory);
@@ -1453,16 +1424,14 @@ public final class HandGuiService {
         return switch (page) {
             case HOME -> "首页";
             case DDZ_HOME -> "斗地主";
-            case TEXAS_HOME -> "德州";
             case GLOBAL_HOME -> "通用视觉";
             case GLOBAL_ECONOMY -> "经济与场次";
-            case DDZ_FURNITURE, TEXAS_FURNITURE -> "桌椅";
-            case DDZ_BUTTONS, TEXAS_BUTTONS -> "按钮";
-            case DDZ_CARDS, TEXAS_CARDS -> "卡牌";
+            case DDZ_FURNITURE -> "桌椅";
+            case DDZ_BUTTONS -> "按钮";
+            case DDZ_CARDS -> "卡牌";
             case DDZ_LABELS -> "牌面标签";
             case DDZ_TEXT -> "桌面文字";
             case DDZ_SEAT_TEXT -> "座位文字";
-            case TEXAS_TEXT -> "文字标签";
             case DDZ_HITBOX -> "碰撞交互";
             case DDZ_AUDIO -> "音频";
             case DDZ_PLAYER_OPTIONS -> "玩家选项";
@@ -1486,11 +1455,8 @@ public final class HandGuiService {
             case DDZ_HOME -> List.of(
                 "桌椅、按钮、卡牌、桌面文字、座位文字、机器人与 AI。"
             );
-            case TEXAS_HOME -> List.of(
-                "座位、按钮、卡牌、文字。"
-            );
             case GLOBAL_HOME -> List.of(
-                "两种玩法共用的视觉参数。"
+                "牌桌通用的视觉参数。"
             );
             case GLOBAL_ECONOMY -> List.of(
                 "支付、筹码、场次、数据库。"
@@ -1498,10 +1464,10 @@ public final class HandGuiService {
             case DDZ_FURNITURE -> List.of(
                 "外观替换与摆位微调。"
             );
-            case DDZ_BUTTONS, TEXAS_BUTTONS -> List.of(
+            case DDZ_BUTTONS -> List.of(
                 "按钮距离、高度与悬停。"
             );
-            case DDZ_CARDS, TEXAS_CARDS -> List.of(
+            case DDZ_CARDS -> List.of(
                 "卡牌尺寸、间距与整体排布。"
             );
             case DDZ_LABELS -> List.of(
@@ -1512,9 +1478,6 @@ public final class HandGuiService {
             );
             case DDZ_SEAT_TEXT -> List.of(
                 "空位主文字与座位副标题分开调。"
-            );
-            case TEXAS_TEXT -> List.of(
-                "桌面状态与座位信息。"
             );
             case DDZ_HITBOX -> List.of(
                 "只影响点击体验。"
@@ -1530,9 +1493,6 @@ public final class HandGuiService {
             );
             case DDZ_AI -> List.of(
                 "DeepSeek 链接、密钥、模型与全局人设词。"
-            );
-            case TEXAS_FURNITURE -> List.of(
-                "座位圈、按钮位、外圈标记。"
             );
             case GLOBAL_ANIMATION -> List.of(
                 "手牌与按钮动画。"
@@ -1561,9 +1521,8 @@ public final class HandGuiService {
     private HandInventoryHolder.AdminPage parentPage(HandInventoryHolder.AdminPage page) {
         return switch (page) {
             case HOME -> null;
-            case DDZ_HOME, TEXAS_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
+            case DDZ_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
             case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
-            case TEXAS_FURNITURE, TEXAS_BUTTONS, TEXAS_CARDS, TEXAS_TEXT -> HandInventoryHolder.AdminPage.TEXAS_HOME;
             case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
             case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
         };
@@ -1709,20 +1668,6 @@ public final class HandGuiService {
             case BOT_DELAY_MIN -> "机器人最短思考时间。";
             case BOT_DELAY_MAX -> "机器人最长思考时间。";
             case HINT_GROUP_LIMIT -> "提示按钮最多轮播多少组建议。";
-            case TEXAS_SPAWN_FURNITURE -> "德州桌是否生成桌子和椅子实体。";
-            case TEXAS_SEAT_DISTANCE -> "德州一圈座位整体离中心多远。";
-            case TEXAS_SEAT_LABEL_HEIGHT -> "德州座位信息文字高度。";
-            case TEXAS_JOIN_BUTTON_HEIGHT -> "德州空位加入按钮高度。";
-            case TEXAS_STATUS_HEIGHT -> "德州桌中央状态文字高度。";
-            case TEXAS_ACTION_BUTTON_HEIGHT -> "德州操作按钮所在一排的高度。";
-            case TEXAS_ACTION_BUTTON_STEP -> "德州操作按钮之间的间距。";
-            case TEXAS_COMMUNITY_CARD_HEIGHT -> "德州公共牌高度。";
-            case TEXAS_COMMUNITY_CARD_SPACING -> "德州公共牌之间的间距。";
-            case TEXAS_HOLE_CARD_HEIGHT -> "德州玩家手牌高度。";
-            case TEXAS_HOLE_CARD_SPACING -> "德州同一玩家两张牌的间距。";
-            case TEXAS_HOLE_RADIUS_FACTOR -> "德州玩家手牌离各自座位的外扩系数。";
-            case TEXAS_DEALER_MARKER_HEIGHT -> "德州按钮位标记高度。";
-            case TEXAS_DEALER_MARKER_RADIUS_FACTOR -> "德州按钮位标记离座位的外扩系数。";
         };
     }
 

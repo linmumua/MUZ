@@ -405,14 +405,13 @@ public final class HandGuiListener implements Listener {
         if (!player.hasPermission("muz.admin")) {
             throw new IllegalStateException("这个菜单需要管理员权限才能打开。");
         }
-        // 管理菜单采用“首页 -> 斗地主/德州/通用 -> 具体分类页”的结构。
+        // 管理菜单采用“首页 -> 斗地主/通用 -> 具体分类页”的结构。
         HandInventoryHolder.AdminPage currentPage = page == null ? HandInventoryHolder.AdminPage.HOME : page;
         if (rawSlot == 44) {
             HandInventoryHolder.AdminPage parent = switch (currentPage) {
                 case HOME -> null;
-                case DDZ_HOME, TEXAS_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
+                case DDZ_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
                 case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
-                case TEXAS_FURNITURE, TEXAS_BUTTONS, TEXAS_CARDS, TEXAS_TEXT -> HandInventoryHolder.AdminPage.TEXAS_HOME;
                 case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
                 case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
             };
@@ -440,7 +439,6 @@ public final class HandGuiListener implements Listener {
         switch (current) {
             case HOME -> handleAdminHomePage(player, rawSlot);
             case DDZ_HOME -> handleAdminDdzHomePage(player, rawSlot);
-            case TEXAS_HOME -> handleAdminTexasHomePage(player, rawSlot);
             case GLOBAL_HOME -> handleAdminGlobalHomePage(player, rawSlot);
             case DDZ_FURNITURE -> handleAdminFurniturePage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_BUTTONS -> handleAdminButtonsPage(player, rawSlot, leftClick, multiplier, current);
@@ -453,10 +451,6 @@ public final class HandGuiListener implements Listener {
             case DDZ_PLAYER_OPTIONS -> handleAdminPlayerOptionsPage(player, rawSlot, leftClick);
             case DDZ_BOTS -> handleAdminBotsPage(player, rawSlot, leftClick, multiplier, current);
             case DDZ_AI -> handleAdminAiPage(player, rawSlot, current);
-            case TEXAS_FURNITURE -> handleAdminTexasFurniturePage(player, rawSlot, leftClick, multiplier, current);
-            case TEXAS_BUTTONS -> handleAdminTexasButtonsPage(player, rawSlot, leftClick, multiplier, current);
-            case TEXAS_CARDS -> handleAdminTexasCardsPage(player, rawSlot, leftClick, multiplier, current);
-            case TEXAS_TEXT -> handleAdminTexasTextPage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_ECONOMY -> handleAdminEconomyPage(player, rawSlot, leftClick, rightClick, middleClick, multiplier);
             case GLOBAL_ANIMATION -> handleAdminAnimationPage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_HIGHLIGHT -> handleAdminHighlightPage(player, rawSlot, leftClick, multiplier, current);
@@ -471,7 +465,6 @@ public final class HandGuiListener implements Listener {
     private void handleAdminHomePage(Player player, int rawSlot) {
         switch (rawSlot) {
             case 19 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_HOME);
-            case 21 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_HOME);
             case 23 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_HOME);
             case 25 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_ECONOMY);
             default -> {
@@ -492,17 +485,6 @@ public final class HandGuiListener implements Listener {
             case 31 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_PLAYER_OPTIONS);
             case 32 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
             case 33 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_AI);
-            default -> {
-            }
-        }
-    }
-
-    private void handleAdminTexasHomePage(Player player, int rawSlot) {
-        switch (rawSlot) {
-            case 20 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_FURNITURE);
-            case 22 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_BUTTONS);
-            case 29 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_CARDS);
-            case 31 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_TEXT);
             default -> {
             }
         }
@@ -930,52 +912,6 @@ public final class HandGuiListener implements Listener {
             }
         }
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
-    }
-
-    private void handleAdminTexasFurniturePage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_SEAT_DISTANCE, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_SPAWN_FURNITURE, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_DEALER_MARKER_HEIGHT, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_DEALER_MARKER_RADIUS_FACTOR, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_FURNITURE);
-    }
-
-    private void handleAdminTexasButtonsPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_JOIN_BUTTON_HEIGHT, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_ACTION_BUTTON_HEIGHT, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_ACTION_BUTTON_STEP, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_BUTTONS);
-    }
-
-    private void handleAdminTexasCardsPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_COMMUNITY_CARD_HEIGHT, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_COMMUNITY_CARD_SPACING, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_CARD_HEIGHT, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_CARD_SPACING, increase, multiplier, page);
-            case 22 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_HOLE_RADIUS_FACTOR, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_CARDS);
-    }
-
-    private void handleAdminTexasTextPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_SEAT_LABEL_HEIGHT, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.TEXAS_STATUS_HEIGHT, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.TEXAS_TEXT);
     }
 
     private void adjust(Player player, DoudizhuPlugin.AdminSetting setting, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {

@@ -2,7 +2,7 @@ package dev.mumu.doudizhu;
 
 import dev.mumu.doudizhu.ai.AiChatGateway;
 import dev.mumu.doudizhu.ai.OpenAiCompatibleAiChatGateway;
-import dev.mumu.doudizhu.command.DoudizhuCommand;
+
 import dev.mumu.doudizhu.compat.CraftEngineBundleExporter;
 import dev.mumu.doudizhu.compat.CraftEngineFurnitureService;
 import dev.mumu.doudizhu.compat.VaultEconomyBridge;
@@ -24,9 +24,6 @@ import dev.mumu.doudizhu.storage.PlayerHistoryEntry;
 import dev.mumu.doudizhu.ui.HandGuiService;
 import dev.mumu.doudizhu.ui.MuzTheme;
 import dev.mumu.doudizhu.world.PhysicalTableManager;
-import dev.mumu.doudizhu.zhajinhua.ZjhManager;
-import dev.mumu.doudizhu.zhajinhua.ZjhPhysicalTableManager;
-import dev.mumu.doudizhu.zhajinhua.ZjhTable;
 import java.util.ArrayList;
 import java.io.File;
 import java.io.IOException;
@@ -122,8 +119,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     );
 
     private TableManager tableManager;
-    private ZjhManager zjhManager;
-    private ZjhPhysicalTableManager zjhPhysicalTableManager;
+
     private HandGuiService handGuiService;
     private MuzPlaceholderExpansion placeholderExpansion;
     private NamespacedKey cardIdKey;
@@ -276,25 +272,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private int hintGroupLimit;
     private double debugTableSpacing;
     private boolean vaultEconomyEnabled;
-    private boolean vaultTexasEnabled;
     private double vaultDoudizhuCurrencyPerPoint;
-    private double vaultTexasCurrencyPerChip;
     private List<String> vaultPreferredProviderNames = List.of();
     private boolean chipPaymentEnabled;
-    private boolean texasSpawnFurniture;
-    private double texasSeatDistance;
-    private double texasSeatLabelHeight;
-    private double texasJoinButtonHeight;
-    private double texasStatusHeight;
-    private double texasActionButtonHeight;
-    private double texasActionButtonStep;
-    private double texasCommunityCardHeight;
-    private double texasCommunityCardSpacing;
-    private double texasHoleCardHeight;
-    private double texasHoleCardSpacing;
-    private double texasHoleRadiusFactor;
-    private double texasDealerMarkerHeight;
-    private double texasDealerMarkerRadiusFactor;
     private double globalPrivateHandLateralOffset;
     private double globalPrivateHandVerticalOffset;
     private double globalPrivateHandDepthOffset;
@@ -316,7 +296,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private final List<OptionProfile> playActionProfiles = new ArrayList<>();
     private final EnumMap<PlayActionKind, List<OptionProfile>> playActionProfilesByKind = new EnumMap<>(PlayActionKind.class);
     private final Map<UUID, TableMode> playerPreferredModes = new ConcurrentHashMap<>();
-    private final Map<UUID, Integer> playerPreferredZjhSeats = new ConcurrentHashMap<>();
+
     private final AtomicInteger nextBotNumericId = new AtomicInteger(1);
     private final Map<Integer, BotHandle> botHandlesByNumericId = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> botNumericIdsByUuid = new ConcurrentHashMap<>();
@@ -400,19 +380,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         tableRemoverIdKey = new NamespacedKey(this, "table-remover-id");
         handGuiService = new HandGuiService(this);
         tableManager = new TableManager(this);
-        zjhManager = new ZjhManager(this);
         databaseManager = new DatabaseManager(this);
         craftEngineBundleExporter = new CraftEngineBundleExporter(this);
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
         vaultEconomyBridge = new VaultEconomyBridge(this);
         physicalTableManager = new PhysicalTableManager(this);
-        zjhPhysicalTableManager = new ZjhPhysicalTableManager(this);
         initializePersistence();
-
-        DoudizhuCommand command = new DoudizhuCommand(this);
-        PluginCommand pluginCommand = Objects.requireNonNull(getCommand("muz"), "muz command missing");
-        pluginCommand.setExecutor(command);
-        pluginCommand.setTabCompleter(command);
 
         getServer().getPluginManager().registerEvents(new PlayerConnectionListener(this), this);
         getServer().getPluginManager().registerEvents(new WorldTableInteractionListener(this), this);
@@ -420,9 +393,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new HandGuiListener(this), this);
         ensureCraftEngineProtectionListenerRegistered();
         scheduler().runTimer(1L, 1L, () -> physicalTableManager.tick());
-        scheduler().runTimer(1L, 1L, () -> zjhPhysicalTableManager.tick());
         scheduler().runTimer(1L, 10L, () -> tableManager.tick());
-        scheduler().runTimer(1L, 10L, () -> zjhManager.tick());
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
         CraftEngineBundleExporter.BundleExportResult exportResult = craftEngineBundleExporter.exportIfAvailable();
@@ -444,14 +415,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (tableManager != null) {
             tableManager.shutdown();
         }
-        if (zjhManager != null) {
-            zjhManager.shutdown();
-        }
         if (physicalTableManager != null) {
             physicalTableManager.shutdown();
-        }
-        if (zjhPhysicalTableManager != null) {
-            zjhPhysicalTableManager.shutdown();
         }
         if (databaseManager != null) {
             databaseManager.close();
@@ -460,14 +425,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public TableManager getTableManager() {
         return tableManager;
-    }
-
-    public ZjhManager getZjhManager() {
-        return zjhManager;
-    }
-
-    public ZjhPhysicalTableManager getZjhPhysicalTableManager() {
-        return zjhPhysicalTableManager;
     }
 
     public void ensurePlaceholderHookReady() {
@@ -752,7 +709,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         return switch (resolved.kind()) {
             case DOUDIZHU -> String.valueOf(resolved.gameTable().getScore(resolved.playerId()));
-            case TEXAS -> String.valueOf(resolved.zjhTable().chipStack(resolved.playerId()));
         };
     }
 
@@ -770,10 +726,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 dev.mumu.doudizhu.game.PlayerRole role = resolved.gameTable().getRole(resolved.playerId());
                 yield role == null ? "无" : role.displayName();
             }
-            case TEXAS -> {
-                String position = resolved.zjhTable().positionLabel(resolved.playerId());
-                yield position == null || position.isBlank() ? "无" : position;
-            }
         };
     }
 
@@ -788,7 +740,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         return switch (resolved.kind()) {
             case DOUDIZHU -> String.valueOf(resolved.gameTable().getHand(resolved.playerId()).size());
-            case TEXAS -> String.valueOf(resolved.zjhTable().handOf(resolved.playerId()).size());
         };
     }
 
@@ -803,7 +754,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         return switch (resolved.kind()) {
             case DOUDIZHU -> String.valueOf(resolved.gameTable().getBid(resolved.playerId()));
-            case TEXAS -> String.valueOf(resolved.zjhTable().getCurrentBet());
         };
     }
 
@@ -818,7 +768,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         return switch (resolved.kind()) {
             case DOUDIZHU -> resolved.gameTable().getName();
-            case TEXAS -> resolved.zjhTable().getName();
         };
     }
 
@@ -833,7 +782,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         return switch (resolved.kind()) {
             case DOUDIZHU -> resolved.gameTable().getPhase().displayName();
-            case TEXAS -> resolved.zjhTable().getPhase().displayName();
         };
     }
 
@@ -892,41 +840,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         databaseManager.insertMatch(record, participants);
     }
 
-    public void recordTexasMatch(ZjhTable table, List<UUID> winners, Map<UUID, SettlementResult> settlements) {
-        if (databaseManager == null || !databaseManager.isInitialized() || table == null) {
-            return;
-        }
-        org.bukkit.Location anchor = zjhPhysicalTableManager == null ? null : zjhPhysicalTableManager.tableAnchor(table.getName());
-        MatchRecord record = new MatchRecord(
-            "TEXAS",
-            table.getName(),
-            table.getRoomLevel(),
-            winners.size() == 1 ? "单人获胜" : "多人平分",
-            System.currentTimeMillis(),
-            anchor == null || anchor.getWorld() == null ? null : anchor.getWorld().getName(),
-            anchor == null ? 0.0 : anchor.getX(),
-            anchor == null ? 0.0 : anchor.getY(),
-            anchor == null ? 0.0 : anchor.getZ()
-        );
-        List<MatchParticipantRecord> participants = new ArrayList<>();
-        for (UUID seat : table.getSeats()) {
-            SettlementResult settlement = settlements.getOrDefault(seat, currentRoomStatus(table.getRoomLevel(), seat));
-            participants.add(new MatchParticipantRecord(
-                seat,
-                resolvePlayerName(seat) == null ? table.displayName(seat) : resolvePlayerName(seat),
-                normalizeNonBlank(table.positionLabel(seat), "玩家"),
-                winners.contains(seat) ? "WIN" : "LOSE",
-                0,
-                settlement.delta(),
-                settlement.unitLabel(),
-                settlement.debt(),
-                settlement.postBalance(),
-                settlement.bankrupt()
-            ));
-        }
-        databaseManager.insertMatch(record, participants);
-    }
-
     public List<Component> buildHistoryComponents(UUID targetPlayerId, String fallbackName, int page, int pageSize) {
         List<PlayerHistoryEntry> entries = loadPlayerHistory(targetPlayerId, pageSize, Math.max(0, page - 1) * pageSize);
         if (entries.isEmpty()) {
@@ -963,22 +876,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 }
             }
         }
-        for (ZjhTable table : zjhManager.getTables()) {
-            for (UUID seat : table.getSeats()) {
-                if (table.displayName(seat).equalsIgnoreCase(target)) {
-                    return PlaceholderTarget.texas(table, seat);
-                }
-            }
-        }
         Player online = Bukkit.getPlayerExact(target);
         if (online != null) {
             GameTable ddzTable = tableManager.getTableOf(online);
             if (ddzTable != null) {
                 return PlaceholderTarget.doudizhu(ddzTable, online.getUniqueId());
-            }
-            ZjhTable zjhTable = zjhManager.getTableOf(online);
-            if (zjhTable != null) {
-                return PlaceholderTarget.texas(zjhTable, online.getUniqueId());
             }
         }
         return null;
@@ -1132,10 +1034,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return "进入" + roomDisplayLabel(level) + "至少需要 " + required + " 金币。";
     }
 
-    public boolean isVaultTexasEnabled() {
-        return isVaultEconomyEnabled() && vaultTexasEnabled;
-    }
-
     public boolean isRoomEconomyEnabled(TableLevel level) {
         RoomLevelProfile profile = roomLevelProfile(level);
         return profile.economyEnabled() && profile.multiplier() > 0.0;
@@ -1217,65 +1115,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return next;
     }
 
-    public int syncTexasChipStack(TableLevel level, UUID playerId, int fallback) {
-        if (!isRoomEconomyEnabled(level)) {
-            return fallback;
-        }
-        if (isChipPaymentEnabled()) {
-            return getChipBalance(playerId);
-        }
-        if (!isTexasRoomEconomyEnabled(level)) {
-            return fallback;
-        }
-        OfflinePlayer player = Bukkit.getOfflinePlayer(playerId);
-        vaultEconomyBridge.ensureAccount(player);
-        return currencyToTexasChips(vaultEconomyBridge.balance(player), level);
-    }
-
-    public int withdrawTexasChips(TableLevel level, UUID playerId, int chips, int fallbackBalance) {
-        int normalizedChips = Math.max(0, chips);
-        if (isChipPaymentEnabled()) {
-            int current = getChipBalance(playerId);
-            int effective = Math.min(normalizedChips, Math.max(0, current));
-            return setChipBalance(playerId, current - effective);
-        }
-        if (!isTexasRoomEconomyEnabled(level)) {
-            return Math.max(0, fallbackBalance - normalizedChips);
-        }
-        int currentChips = syncTexasChipStack(level, playerId, fallbackBalance);
-        int effectiveChips = Math.min(normalizedChips, currentChips);
-        if (effectiveChips <= 0) {
-            return currentChips;
-        }
-        OfflinePlayer player = Bukkit.getOfflinePlayer(playerId);
-        vaultEconomyBridge.ensureAccount(player);
-        EconomyResponse response = vaultEconomyBridge.withdraw(player, texasChipsToCurrency(effectiveChips, level));
-        if (!response.transactionSuccess()) {
-            throw new IllegalStateException("Vault 扣款失败: " + safeEconomyError(response.errorMessage));
-        }
-        return currencyToTexasChips(response.balance, level);
-    }
-
-    public int depositTexasChips(TableLevel level, UUID playerId, int chips, int fallbackBalance) {
-        int normalizedChips = Math.max(0, chips);
-        if (isChipPaymentEnabled()) {
-            return adjustChipBalance(playerId, normalizedChips);
-        }
-        if (!isTexasRoomEconomyEnabled(level)) {
-            return Math.max(0, fallbackBalance + normalizedChips);
-        }
-        if (normalizedChips <= 0) {
-            return syncTexasChipStack(level, playerId, fallbackBalance);
-        }
-        OfflinePlayer player = Bukkit.getOfflinePlayer(playerId);
-        vaultEconomyBridge.ensureAccount(player);
-        EconomyResponse response = vaultEconomyBridge.deposit(player, texasChipsToCurrency(normalizedChips, level));
-        if (!response.transactionSuccess()) {
-            throw new IllegalStateException("Vault 入账失败: " + safeEconomyError(response.errorMessage));
-        }
-        return currencyToTexasChips(response.balance, level);
-    }
-
     public SettlementResult settleDoudizhuCurrency(TableLevel level, UUID playerId, int scoreDelta) {
         if (playerId == null || !isRoomEconomyEnabled(level)) {
             return currentRoomStatus(level, playerId);
@@ -1342,16 +1181,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return isRoomEconomyEnabled(level) && (isChipPaymentEnabled() || isVaultEconomyEnabled());
     }
 
-    public boolean isTexasRoomEconomyEnabled(TableLevel level) {
-        return isRoomEconomyEnabled(level) && (isChipPaymentEnabled() || isVaultTexasEnabled());
-    }
-
     public double doudizhuCurrencyPerPoint(TableLevel level) {
         return vaultDoudizhuCurrencyPerPoint * roomMultiplier(level);
-    }
-
-    public double texasCurrencyPerChip(TableLevel level) {
-        return vaultTexasCurrencyPerChip * roomMultiplier(level);
     }
 
     private SettlementResult settlementResult(TableLevel level, double delta, double debt, double postBalance, boolean chipMode) {
@@ -1359,15 +1190,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         boolean bankrupt = postBalance <= 0.0 || debt > 0.0;
         boolean insufficient = level != null && level != TableLevel.FUN && isRoomEconomyEnabled(level) && postBalance < requirement;
         return new SettlementResult(delta, debt, postBalance, bankrupt, insufficient, chipMode ? "筹码" : "金币");
-    }
-
-    private int currencyToTexasChips(double balance, TableLevel level) {
-        double rate = Math.max(0.0001, texasCurrencyPerChip(level));
-        return Math.max(0, (int) Math.floor((Math.max(0.0, balance) / rate) + 1.0E-7));
-    }
-
-    private double texasChipsToCurrency(int chips, TableLevel level) {
-        return Math.max(0, chips) * Math.max(0.0001, texasCurrencyPerChip(level));
     }
 
     private String safeEconomyError(String raw) {
@@ -1936,10 +1758,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return MuzTheme.named(phase == null ? "未知" : phase.displayName(), color).decoration(TextDecoration.ITALIC, false);
     }
 
-    public Component phaseComponent(dev.mumu.doudizhu.zhajinhua.ZjhPhase phase, NamedTextColor color) {
-        return MuzTheme.named(phase == null ? "未知" : phase.displayName(), color).decoration(TextDecoration.ITALIC, false);
-    }
-
     public float getPrivateCardWidthScale() {
         return privateCardWidthScale;
     }
@@ -2426,62 +2244,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return debugTableSpacing;
     }
 
-    public boolean isTexasSpawnFurniture() {
-        return texasSpawnFurniture;
-    }
-
-    public double getTexasSeatDistance() {
-        return texasSeatDistance;
-    }
-
-    public double getTexasSeatLabelHeight() {
-        return texasSeatLabelHeight;
-    }
-
-    public double getTexasJoinButtonHeight() {
-        return texasJoinButtonHeight;
-    }
-
-    public double getTexasStatusHeight() {
-        return texasStatusHeight;
-    }
-
-    public double getTexasActionButtonHeight() {
-        return texasActionButtonHeight;
-    }
-
-    public double getTexasActionButtonStep() {
-        return texasActionButtonStep;
-    }
-
-    public double getTexasCommunityCardHeight() {
-        return texasCommunityCardHeight;
-    }
-
-    public double getTexasCommunityCardSpacing() {
-        return texasCommunityCardSpacing;
-    }
-
-    public double getTexasHoleCardHeight() {
-        return texasHoleCardHeight;
-    }
-
-    public double getTexasHoleCardSpacing() {
-        return texasHoleCardSpacing;
-    }
-
-    public double getTexasHoleRadiusFactor() {
-        return texasHoleRadiusFactor;
-    }
-
-    public double getTexasDealerMarkerHeight() {
-        return texasDealerMarkerHeight;
-    }
-
-    public double getTexasDealerMarkerRadiusFactor() {
-        return texasDealerMarkerRadiusFactor;
-    }
-
     public double getGlobalPrivateHandLateralOffset() {
         return globalPrivateHandLateralOffset;
     }
@@ -2608,19 +2370,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
-    public int getPreferredZjhSeats(UUID playerId) {
-        return Math.max(2, Math.min(6, playerPreferredZjhSeats.getOrDefault(playerId, 6)));
-    }
-
-    public void setPreferredZjhSeats(UUID playerId, int seats) {
-        int normalized = Math.max(2, Math.min(6, seats));
-        if (normalized == 6) {
-            playerPreferredZjhSeats.remove(playerId);
-        } else {
-            playerPreferredZjhSeats.put(playerId, normalized);
-        }
-    }
-
     public void reloadPluginState() {
         reloadPluginState(null);
     }
@@ -2671,10 +2420,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                     physicalTableManager.rebuildAllTables();
                     physicalTableManager.repairIncompleteTables(reason + "-ddz-pass-" + pass);
                 }
-                if (zjhPhysicalTableManager != null && zjhPhysicalTableManager.placedTableCount() > 0) {
-                    zjhPhysicalTableManager.rebuildAllTables();
-                    zjhPhysicalTableManager.repairIncompleteTables(reason + "-texas-pass-" + pass);
-                }
+
             });
         }
     }
@@ -2710,15 +2456,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return createTablePlacerItem(TableMode.DOUDIZHU, tableId, level);
     }
 
-    public ItemStack createTexasTablePlacerItem(String tableId, TableLevel level) {
-        return createTablePlacerItem(TableMode.ZHAJINHUA, tableId, level);
-    }
-
     public ItemStack createTablePlacerItem(TableMode mode, String tableId, TableLevel level) {
         String normalizedId = normalizeNonBlank(tableId, "1");
         TableLevel normalizedLevel = level == null ? TableLevel.FUN : level;
         TableMode normalizedMode = mode == null ? TableMode.DOUDIZHU : mode;
-        ItemStack item = new ItemStack(normalizedMode == TableMode.ZHAJINHUA ? Material.OAK_BOAT : Material.CARTOGRAPHY_TABLE);
+        ItemStack item = new ItemStack(Material.CARTOGRAPHY_TABLE);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(MuzTheme.accent("MUZ 放桌器 · " + normalizedId + " 号桌"));
         meta.lore(List.of(
@@ -2759,15 +2501,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         ItemMeta meta = itemStack.getItemMeta();
         String marker = meta.getPersistentDataContainer().get(tablePlacerKey, PersistentDataType.STRING);
-        return "doudizhu".equalsIgnoreCase(marker) || "texas".equalsIgnoreCase(marker);
+        return "doudizhu".equalsIgnoreCase(marker);
     }
 
     public boolean isDoudizhuTablePlacer(ItemStack itemStack) {
         return tablePlacerMode(itemStack) == TableMode.DOUDIZHU;
-    }
-
-    public boolean isTexasTablePlacer(ItemStack itemStack) {
-        return tablePlacerMode(itemStack) == TableMode.ZHAJINHUA;
     }
 
     public String doudizhuTablePlacerId(ItemStack itemStack) {
@@ -2793,9 +2531,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         ItemMeta meta = itemStack.getItemMeta();
         String marker = meta.getPersistentDataContainer().get(tablePlacerKey, PersistentDataType.STRING);
-        if ("texas".equalsIgnoreCase(marker)) {
-            return TableMode.ZHAJINHUA;
-        }
         if ("doudizhu".equalsIgnoreCase(marker)) {
             return TableMode.DOUDIZHU;
         }
@@ -2817,9 +2552,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         ItemMeta meta = itemStack.getItemMeta();
         String marker = meta.getPersistentDataContainer().get(tableRemoverModeKey, PersistentDataType.STRING);
-        if ("texas".equalsIgnoreCase(marker)) {
-            return TableMode.ZHAJINHUA;
-        }
         if ("doudizhu".equalsIgnoreCase(marker)) {
             return TableMode.DOUDIZHU;
         }
@@ -2835,11 +2567,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public String tableModeKey(TableMode mode) {
-        return mode == TableMode.ZHAJINHUA ? "texas" : "doudizhu";
+        return "doudizhu";
     }
 
     public String tableModeLabel(TableMode mode) {
-        return mode == TableMode.ZHAJINHUA ? "德州" : "斗地主";
+        return "斗地主";
     }
 
     public void adjustAdminSetting(AdminSetting setting, boolean increase, int multiplier) {
@@ -2866,9 +2598,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 if (physicalTableManager != null) {
                     physicalTableManager.shiftAllAnchors(shift);
                 }
-                if (zjhPhysicalTableManager != null) {
-                    zjhPhysicalTableManager.shiftAllAnchors(shift);
-                }
+
                 return;
             }
         }
@@ -3109,24 +2839,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         vaultEconomyEnabled = yamlConfig().getBoolean("economy.vault.enabled", true);
         chipPaymentEnabled = yamlConfig().getBoolean("economy.payment.use-chip", false);
         vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, yamlConfig().getDouble("economy.vault.doudizhu.currency-per-point", 1.0));
-        vaultTexasEnabled = yamlConfig().getBoolean("economy.vault.texas.enabled", true);
-        vaultTexasCurrencyPerChip = Math.max(0.0001, yamlConfig().getDouble("economy.vault.texas.currency-per-chip", 1.0));
         vaultPreferredProviderNames = normalizedStringList(yamlConfig().getStringList("economy.vault.preferred-providers"), List.of("EzEconomy", "XConomy", "CMI"));
         loadRoomLevelProfiles();
-        texasSpawnFurniture = yamlConfig().getBoolean("texas.render.spawn-furniture", false);
-        texasSeatDistance = yamlConfig().getDouble("texas.layout.seat-distance", 3.10);
-        texasSeatLabelHeight = yamlConfig().getDouble("texas.layout.seat-label-height", 1.35);
-        texasJoinButtonHeight = yamlConfig().getDouble("texas.layout.join-button-height", 0.85);
-        texasStatusHeight = yamlConfig().getDouble("texas.layout.status-height", statusHeight);
-        texasActionButtonHeight = yamlConfig().getDouble("texas.layout.action-button-height", 0.88);
-        texasActionButtonStep = yamlConfig().getDouble("texas.layout.action-button-step", 0.34);
-        texasCommunityCardHeight = yamlConfig().getDouble("texas.cards.community-height", 1.18);
-        texasCommunityCardSpacing = yamlConfig().getDouble("texas.cards.community-spacing", 0.42);
-        texasHoleCardHeight = yamlConfig().getDouble("texas.cards.hole-height", 1.18);
-        texasHoleCardSpacing = yamlConfig().getDouble("texas.cards.hole-spacing", 0.36);
-        texasHoleRadiusFactor = yamlConfig().getDouble("texas.cards.hole-radius-factor", 0.68);
-        texasDealerMarkerHeight = yamlConfig().getDouble("texas.layout.dealer-marker-height", 1.56);
-        texasDealerMarkerRadiusFactor = yamlConfig().getDouble("texas.layout.dealer-marker-radius-factor", 0.86);
         tableItemModelId = normalizeItemModelId(yamlConfig().getString("craftengine-items.table.item-model"), DEFAULT_TABLE_ITEM_MODEL);
         tableDisplayName = normalizeNonBlank(yamlConfig().getString("craftengine-items.table.item-name"), DEFAULT_TABLE_DISPLAY_NAME);
         chairItemModelId = normalizeItemModelId(yamlConfig().getString("craftengine-items.chair.item-model"), DEFAULT_CHAIR_ITEM_MODEL);
@@ -3320,13 +3034,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (physicalTableManager != null) {
             physicalTableManager.rebuildAllTables();
         }
-        int texasTables = zjhPhysicalTableManager == null ? 0 : zjhPhysicalTableManager.placedTableCount();
-        int texasStageIndex = exportBundle ? 4 : 3;
-        feedback.update(stageProgress(texasStageIndex, totalStages), "刷新德州牌桌", rebuildDetail("德州牌桌", texasTables));
-        if (zjhPhysicalTableManager != null) {
-            zjhPhysicalTableManager.rebuildAllTables();
-        }
-        ReloadSummary summary = new ReloadSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook), doudizhuTables, texasTables);
+        ReloadSummary summary = new ReloadSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook), doudizhuTables);
         feedback.complete(summary);
         return summary;
     }
@@ -3404,14 +3112,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         if (!yamlConfig().contains("economy.vault.doudizhu.currency-per-point")) {
             yamlConfig().set("economy.vault.doudizhu.currency-per-point", 1.0);
-            changed = true;
-        }
-        if (!yamlConfig().contains("economy.vault.texas.enabled")) {
-            yamlConfig().set("economy.vault.texas.enabled", true);
-            changed = true;
-        }
-        if (!yamlConfig().contains("economy.vault.texas.currency-per-chip")) {
-            yamlConfig().set("economy.vault.texas.currency-per-chip", 1.0);
             changed = true;
         }
         for (TableLevel level : TableLevel.values()) {
@@ -3553,9 +3253,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
             try {
                 if ("DOUDIZHU".equalsIgnoreCase(record.gameType())) {
                     physicalTableManager.restoreTable(record.tableName(), record.roomLevel(), anchor, record.yaw(), parseNullableUuid(record.ownerUuid()), record.ownerName());
-                } else if ("TEXAS".equalsIgnoreCase(record.gameType())) {
-                    zjhPhysicalTableManager.restoreTable(record.tableName(), record.maxPlayers(), record.roomLevel(), anchor, record.yaw(), parseNullableUuid(record.ownerUuid()), record.ownerName());
                 } else {
+                    // 德州玩法已移除，遗留的旧牌桌记录直接清理掉，避免每次启动都尝试恢复。
                     databaseManager.deleteTable(record.gameType(), record.tableName());
                     continue;
                 }
@@ -3602,8 +3301,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
             getLogger().info(
                 "SQL牌桌已加载: 斗地主 "
                     + (physicalTableManager == null ? 0 : physicalTableManager.placedTableCount())
-                    + " 张 | 德州 "
-                    + (zjhPhysicalTableManager == null ? 0 : zjhPhysicalTableManager.placedTableCount())
                     + " 张 | " + persistedTableRestoreSummary
             );
         } else if (persistedTableRestorePasses <= 1 || persistedTableRestorePasses % 10 == 0) {
@@ -3616,8 +3313,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return;
         }
         int doudizhuCount = physicalTableManager == null ? 0 : physicalTableManager.placedTableCount();
-        int texasCount = zjhPhysicalTableManager == null ? 0 : zjhPhysicalTableManager.placedTableCount();
-        if (doudizhuCount + texasCount <= 0) {
+        if (doudizhuCount <= 0) {
             return;
         }
         postRestoreRebuildQueued = true;
@@ -3631,9 +3327,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 }
                 if (physicalTableManager != null && physicalTableManager.placedTableCount() > 0) {
                     physicalTableManager.rebuildAllTables();
-                }
-                if (zjhPhysicalTableManager != null && zjhPhysicalTableManager.placedTableCount() > 0) {
-                    zjhPhysicalTableManager.rebuildAllTables();
                 }
             });
         }
@@ -3653,25 +3346,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
             anchor.getZ(),
             yaw,
             3,
-            ownerId == null ? null : ownerId.toString(),
-            normalizeNonBlank(ownerName, "")
-        ));
-    }
-
-    public void persistTexasTable(String tableName, int maxPlayers, TableLevel roomLevel, org.bukkit.Location anchor, float yaw, UUID ownerId, String ownerName) {
-        if (databaseManager == null || anchor == null || anchor.getWorld() == null || isDebugTableName(tableName)) {
-            return;
-        }
-        databaseManager.upsertTable(new PersistedTableRecord(
-            "TEXAS",
-            tableName,
-            roomLevel == null ? TableLevel.FUN : roomLevel,
-            anchor.getWorld().getName(),
-            anchor.getX(),
-            anchor.getY(),
-            anchor.getZ(),
-            yaw,
-            maxPlayers,
             ownerId == null ? null : ownerId.toString(),
             normalizeNonBlank(ownerName, "")
         ));
@@ -3699,11 +3373,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (physicalTableManager != null) {
             for (GameTable table : tableManager.getTables()) {
                 physicalTableManager.refresh(table);
-            }
-        }
-        if (zjhPhysicalTableManager != null) {
-            for (ZjhTable table : zjhManager.getTables()) {
-                zjhPhysicalTableManager.refresh(table);
             }
         }
     }
@@ -4707,21 +4376,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         BUTTON_ARC_SMALL_ANGLE("render.button-layout.arc-angle-small", "三按钮弧度", 30.0, 0.0, 90.0, 1.0, false, false, false),
         BUTTON_ARC_LARGE_ANGLE("render.button-layout.arc-angle-large", "多按钮弧度", 42.0, 0.0, 120.0, 1.0, false, false, false),
         BUTTON_ARC_SMALL_RADIUS("render.button-layout.arc-radius-small", "三按钮半径", 0.70, 0.05, 3.0, 0.02, false, false, false),
-        BUTTON_ARC_LARGE_RADIUS("render.button-layout.arc-radius-large", "多按钮半径", 0.86, 0.05, 3.0, 0.02, false, false, false),
-        TEXAS_SPAWN_FURNITURE("texas.render.spawn-furniture", "德州生成桌椅", 0.0, 0.0, 1.0, 1.0, true, false, false),
-        TEXAS_SEAT_DISTANCE("texas.layout.seat-distance", "德州座位距离", 3.10, 1.0, 8.0, 0.10, false, false, false),
-        TEXAS_SEAT_LABEL_HEIGHT("texas.layout.seat-label-height", "德州座位文字高度", 1.35, 0.2, 6.0, 0.05, false, false, false),
-        TEXAS_JOIN_BUTTON_HEIGHT("texas.layout.join-button-height", "德州加入按钮高度", 0.85, 0.1, 6.0, 0.05, false, false, false),
-        TEXAS_STATUS_HEIGHT("texas.layout.status-height", "德州状态文字高度", 3.10, 0.2, 8.0, 0.05, false, false, false),
-        TEXAS_ACTION_BUTTON_HEIGHT("texas.layout.action-button-height", "德州操作按钮高度", 0.88, 0.1, 6.0, 0.05, false, false, false),
-        TEXAS_ACTION_BUTTON_STEP("texas.layout.action-button-step", "德州按钮间距", 0.34, 0.1, 2.0, 0.02, false, false, false),
-        TEXAS_COMMUNITY_CARD_HEIGHT("texas.cards.community-height", "德州公共牌高度", 1.18, 0.2, 6.0, 0.05, false, false, false),
-        TEXAS_COMMUNITY_CARD_SPACING("texas.cards.community-spacing", "德州公共牌间距", 0.42, 0.1, 2.0, 0.02, false, false, false),
-        TEXAS_HOLE_CARD_HEIGHT("texas.cards.hole-height", "德州手牌高度", 1.18, 0.2, 6.0, 0.05, false, false, false),
-        TEXAS_HOLE_CARD_SPACING("texas.cards.hole-spacing", "德州手牌间距", 0.36, 0.1, 2.0, 0.02, false, false, false),
-        TEXAS_HOLE_RADIUS_FACTOR("texas.cards.hole-radius-factor", "德州手牌外扩系数", 0.68, 0.2, 2.0, 0.02, false, false, false),
-        TEXAS_DEALER_MARKER_HEIGHT("texas.layout.dealer-marker-height", "德州按钮位高度", 1.56, 0.2, 6.0, 0.05, false, false, false),
-        TEXAS_DEALER_MARKER_RADIUS_FACTOR("texas.layout.dealer-marker-radius-factor", "德州按钮位外扩系数", 0.86, 0.2, 2.0, 0.02, false, false, false);
+        BUTTON_ARC_LARGE_RADIUS("render.button-layout.arc-radius-large", "多按钮半径", 0.86, 0.05, 3.0, 0.02, false, false, false);
 
         private final String path;
         private final String label;
@@ -4851,19 +4506,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public record OptionProfile(String label, String spec) {
     }
 
-    private record PlaceholderTarget(PlaceholderTargetKind kind, GameTable gameTable, ZjhTable zjhTable, UUID playerId) {
+    private record PlaceholderTarget(PlaceholderTargetKind kind, GameTable gameTable, UUID playerId) {
         private static PlaceholderTarget doudizhu(GameTable table, UUID playerId) {
-            return new PlaceholderTarget(PlaceholderTargetKind.DOUDIZHU, table, null, playerId);
-        }
-
-        private static PlaceholderTarget texas(ZjhTable table, UUID playerId) {
-            return new PlaceholderTarget(PlaceholderTargetKind.TEXAS, null, table, playerId);
+            return new PlaceholderTarget(PlaceholderTargetKind.DOUDIZHU, table, playerId);
         }
     }
 
     private enum PlaceholderTargetKind {
-        DOUDIZHU,
-        TEXAS
+        DOUDIZHU
     }
 
     public enum AnimationCurve {
@@ -4896,13 +4546,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public enum BotGameType {
-        DOUDIZHU,
-        TEXAS
+        DOUDIZHU
     }
 
     public enum TableMode {
-        DOUDIZHU,
-        ZHAJINHUA
+        DOUDIZHU
     }
 
     public enum PlayActionKind {
@@ -4980,8 +4628,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             startupInfoPart(
                 0.98,
                 "已放置牌桌",
-                "斗地主 " + (physicalTableManager == null ? 0 : physicalTableManager.placedTableCount())
-                    + " 张 | 德州 " + (zjhPhysicalTableManager == null ? 0 : zjhPhysicalTableManager.placedTableCount()) + " 张",
+                "斗地主 " + (physicalTableManager == null ? 0 : physicalTableManager.placedTableCount()) + " 张",
                 barWidth
             )
         );
@@ -5215,8 +4862,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 .append(MuzTheme.divider(" | "))
                 .append(MuzTheme.warm("斗地主桌 " + summary.doudizhuTables() + " 张"))
                 .append(MuzTheme.divider(" | "))
-                .append(MuzTheme.warm("德州桌 " + summary.texasTables() + " 张"))
-                .append(MuzTheme.divider(" | "))
                 .append(MuzTheme.named(bundleSummaryPlain(summary.bundleExport()), bundleSummaryColor(summary.bundleExport())))
         );
     }
@@ -5224,8 +4869,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private String reloadSummaryPlain(ReloadSummary summary) {
         return "MUZ 已重载 | ddz="
             + summary.doudizhuTables()
-            + " | texas="
-            + summary.texasTables()
             + " | "
             + bundleSummaryPlain(summary.bundleExport());
     }
@@ -5335,8 +4978,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private record ReloadSummary(
         CraftEngineBundleExporter.BundleExportResult bundleExport,
         List<HookSnapshot> hooks,
-        int doudizhuTables,
-        int texasTables
+        int doudizhuTables
     ) {
     }
 
@@ -5466,8 +5108,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private void logShutdownDiagnostics() {
         int ddzTables = tableManager == null ? 0 : tableManager.getTables().size();
-        int zjhTables = zjhManager == null ? 0 : zjhManager.getTables().size();
-        getLogger().info("[MUZ/shutdown] version=" + getDescription().getVersion() + " doudizhuTables=" + ddzTables + " zjhTables=" + zjhTables + " shuttingDown=true");
+        getLogger().info("[MUZ/shutdown] version=" + getDescription().getVersion() + " doudizhuTables=" + ddzTables + " shuttingDown=true");
     }
 }
 

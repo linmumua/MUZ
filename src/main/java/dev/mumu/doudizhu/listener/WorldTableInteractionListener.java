@@ -84,16 +84,14 @@ public final class WorldTableInteractionListener implements Listener {
         if (clickedBlock == null) {
             return;
         }
-        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(clickedBlock)
-            || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(clickedBlock)) {
+        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(clickedBlock)) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onBlockDamage(BlockDamageEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())
-            || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())) {
+        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())) {
             event.setCancelled(true);
         }
     }
@@ -101,17 +99,14 @@ public final class WorldTableInteractionListener implements Listener {
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onInteract(PlayerInteractEntityEvent event) {
         if (plugin.getPhysicalTableManager().handleInteraction(event.getPlayer(), event.getRightClicked())
-            || plugin.getZjhPhysicalTableManager().handleInteraction(event.getPlayer(), event.getRightClicked())
-            || plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
+            || plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onInteractAt(PlayerInteractAtEntityEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
+        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
             event.setCancelled(true);
         }
     }
@@ -122,41 +117,35 @@ public final class WorldTableInteractionListener implements Listener {
             return;
         }
         if (plugin.getPhysicalTableManager().handleAttack(player, event.getEntity())
-            || plugin.getZjhPhysicalTableManager().handleAttack(player, event.getEntity())
-            || plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
+            || plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onEntityDamage(EntityDamageEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
+        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onHangingBreak(HangingBreakEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
+        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onArmorStandManipulate(PlayerArmorStandManipulateEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
+        if (plugin.getPhysicalTableManager().isProtectedEntity(event.getRightClicked().getUniqueId())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())
-            || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())) {
+        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.getBlock())) {
             event.setCancelled(true);
         }
     }
@@ -165,7 +154,6 @@ public final class WorldTableInteractionListener implements Listener {
     public void onEntityExplode(EntityExplodeEvent event) {
         event.blockList().removeIf(block ->
             plugin.getPhysicalTableManager().isProtectedPlacedBlock(block)
-                || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(block)
         );
     }
 
@@ -173,12 +161,11 @@ public final class WorldTableInteractionListener implements Listener {
     public void onBlockExplode(BlockExplodeEvent event) {
         event.blockList().removeIf(block ->
             plugin.getPhysicalTableManager().isProtectedPlacedBlock(block)
-                || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(block)
         );
     }
 
     private void handleDoudizhuTablePlacer(Player player, ItemStack item, Block clickedBlock) {
-        if (plugin.getTableManager().getTableOf(player) != null || plugin.getZjhManager().getTableOf(player) != null) {
+        if (plugin.getTableManager().getTableOf(player) != null) {
             throw new IllegalStateException("你已经在牌桌里了，先离桌再放新的。");
         }
         DoudizhuPlugin.TableMode mode = plugin.tablePlacerMode(item);
@@ -192,15 +179,9 @@ public final class WorldTableInteractionListener implements Listener {
         String tableId = plugin.doudizhuTablePlacerId(item);
         TableLevel level = plugin.doudizhuTablePlacerLevel(item);
         int maxPlayers = 10;
-        Location anchor = mode == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().placementAnchor(floor)
-            : plugin.getPhysicalTableManager().placementAnchor(floor);
-        float yaw = mode == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().placementYaw(player)
-            : plugin.getPhysicalTableManager().placementYaw(player);
-        String obstruction = mode == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().placementObstructionReason(anchor, yaw, maxPlayers)
-            : plugin.getPhysicalTableManager().placementObstructionReason(anchor, yaw);
+        Location anchor = plugin.getPhysicalTableManager().placementAnchor(floor);
+        float yaw = plugin.getPhysicalTableManager().placementYaw(player);
+        String obstruction = plugin.getPhysicalTableManager().placementObstructionReason(anchor, yaw);
         long now = System.currentTimeMillis();
         if (obstruction != null) {
             // 被挡时保留一个只用于红色高亮的预览，让玩家看清是哪些方块挡住了放桌位置。
@@ -224,11 +205,7 @@ public final class WorldTableInteractionListener implements Listener {
         // Right click again on the same preview = actual placement.
         // Keep this two-step flow intact unless the user explicitly asks to change the interaction contract.
         if (matchesExistingPreview(previous, mode, anchor, yaw, tableId, level, now)) {
-            if (mode == DoudizhuPlugin.TableMode.ZHAJINHUA) {
-                plugin.getZjhPhysicalTableManager().placeNewTableAt(player, tableId, maxPlayers, level, anchor, yaw);
-            } else {
-                plugin.getPhysicalTableManager().placeNewTableAt(player, tableId, level, anchor, yaw);
-            }
+            plugin.getPhysicalTableManager().placeNewTableAt(player, tableId, level, anchor, yaw);
             consumeMainHand(player);
             tablePlacerPreviews.remove(player.getUniqueId());
             ensurePlayerHasTableRemover(player, mode, tableId);
@@ -262,11 +239,6 @@ public final class WorldTableInteractionListener implements Listener {
             tableRemoverPreviews.remove(player.getUniqueId());
             throw new IllegalStateException(plugin.getPhysicalTableManager().removeDeniedReason(player, target.tableName()));
         }
-        if (target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA
-            && !plugin.getZjhPhysicalTableManager().canRemoveTable(player, target.tableName())) {
-            tableRemoverPreviews.remove(player.getUniqueId());
-            throw new IllegalStateException(plugin.getZjhPhysicalTableManager().removeDeniedReason(player, target.tableName()));
-        }
         long now = System.currentTimeMillis();
         TableRemoverPreview previous = tableRemoverPreviews.get(player.getUniqueId());
         if (previous != null
@@ -274,23 +246,13 @@ public final class WorldTableInteractionListener implements Listener {
             && previous.tableName().equalsIgnoreCase(target.tableName())
             && now <= previous.expiresAtMillis()) {
             consumeRemover(player);
-            if (target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA) {
-                dev.mumu.doudizhu.zhajinhua.ZjhTable table = plugin.getZjhManager().getTable(target.tableName());
-                TableLevel level = table == null ? TableLevel.FUN : table.getRoomLevel();
-                if (table != null) {
-                    table.forceClose("玩家 " + player.getName() + " 拆掉了牌桌 " + target.tableName() + "。");
-                }
-                plugin.getZjhPhysicalTableManager().removeTable(target.tableName());
-                givePlacerBack(player, DoudizhuPlugin.TableMode.ZHAJINHUA, target.tableName(), level);
-            } else {
-                dev.mumu.doudizhu.game.GameTable table = plugin.getTableManager().getTable(target.tableName());
-                TableLevel level = table == null ? TableLevel.FUN : table.getRoomLevel();
-                if (table != null) {
-                    table.forceClose("玩家 " + player.getName() + " 拆掉了牌桌 " + target.tableName() + "。");
-                }
-                plugin.getPhysicalTableManager().removeTable(target.tableName());
-                givePlacerBack(player, DoudizhuPlugin.TableMode.DOUDIZHU, target.tableName(), level);
+            dev.mumu.doudizhu.game.GameTable table = plugin.getTableManager().getTable(target.tableName());
+            TableLevel level = table == null ? TableLevel.FUN : table.getRoomLevel();
+            if (table != null) {
+                table.forceClose("玩家 " + player.getName() + " 拆掉了牌桌 " + target.tableName() + "。");
             }
+            plugin.getPhysicalTableManager().removeTable(target.tableName());
+            givePlacerBack(player, DoudizhuPlugin.TableMode.DOUDIZHU, target.tableName(), level);
             tableRemoverPreviews.remove(player.getUniqueId());
             player.sendActionBar(MuzTheme.success("已拆掉 " + target.tableName() + " 号桌"));
             return;
@@ -378,19 +340,6 @@ public final class WorldTableInteractionListener implements Listener {
     }
 
     private void spawnTablePlacerPreview(Player player, TablePlacerPreview preview) {
-        if (preview.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA) {
-            List<Location> blockedBlocks = plugin.getZjhPhysicalTableManager()
-                .placementBlockedBlocks(preview.anchor(), preview.yaw(), preview.maxPlayers());
-            if (!preview.blocked()) {
-                Location tableCenter = plugin.getZjhPhysicalTableManager().previewTableCenter(preview.anchor());
-                drawRing(player, tableCenter, 1.06, Color.fromRGB(255, 208, 92));
-                for (Location seat : plugin.getZjhPhysicalTableManager().previewSeatBases(preview.anchor(), preview.yaw(), preview.maxPlayers())) {
-                    drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.28, Color.fromRGB(110, 210, 255));
-                }
-            }
-            drawBlockedBlocks(player, blockedBlocks);
-            return;
-        }
         List<Location> blockedBlocks = plugin.getPhysicalTableManager()
             .placementBlockedBlocks(preview.anchor(), preview.yaw());
         if (!preview.blocked()) {
@@ -405,24 +354,15 @@ public final class WorldTableInteractionListener implements Listener {
     }
 
     private void spawnTableRemoverPreview(Player player, RemovalTarget target) {
-        Location anchor = target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().tableAnchor(target.tableName())
-            : plugin.getPhysicalTableManager().tableAnchor(target.tableName());
+        Location anchor = plugin.getPhysicalTableManager().tableAnchor(target.tableName());
         if (anchor == null) {
             return;
         }
-        float yaw = target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().tableYaw(target.tableName())
-            : plugin.getPhysicalTableManager().tableYaw(target.tableName());
-        Location tableCenter = target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().previewTableCenter(anchor)
-            : plugin.getPhysicalTableManager().previewTableCenter(anchor);
+        float yaw = plugin.getPhysicalTableManager().tableYaw(target.tableName());
+        Location tableCenter = plugin.getPhysicalTableManager().previewTableCenter(anchor);
         drawRing(player, tableCenter, 0.96, Color.fromRGB(255, 106, 136));
-        List<Location> seats = target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA
-            ? plugin.getZjhPhysicalTableManager().previewSeatBases(anchor, yaw, 10)
-            : plugin.getPhysicalTableManager().previewChairBases(anchor, yaw);
-        for (Location seat : seats) {
-            drawRing(player, seat.clone().add(0.0, 0.08, 0.0), target.mode() == DoudizhuPlugin.TableMode.ZHAJINHUA ? 0.28 : 0.38, Color.fromRGB(255, 176, 104));
+        for (Location seat : plugin.getPhysicalTableManager().previewChairBases(anchor, yaw)) {
+            drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.38, Color.fromRGB(255, 176, 104));
         }
         drawLine(player, tableCenter.clone().add(0.0, 0.08, 0.0), player.getEyeLocation(), Color.fromRGB(255, 215, 120));
     }
@@ -587,10 +527,6 @@ public final class WorldTableInteractionListener implements Listener {
         String doudizhu = plugin.getPhysicalTableManager().targetedTable(player, 10.0);
         if (doudizhu != null) {
             return new RemovalTarget(DoudizhuPlugin.TableMode.DOUDIZHU, doudizhu);
-        }
-        String texas = plugin.getZjhPhysicalTableManager().targetedTable(player, 10.0);
-        if (texas != null) {
-            return new RemovalTarget(DoudizhuPlugin.TableMode.ZHAJINHUA, texas);
         }
         return null;
     }

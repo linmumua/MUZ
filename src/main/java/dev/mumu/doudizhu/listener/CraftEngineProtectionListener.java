@@ -21,8 +21,7 @@ public final class CraftEngineProtectionListener implements Listener {
         if (entity == null) {
             return;
         }
-        if (plugin.getPhysicalTableManager().isProtectedEntity(entity.getUniqueId())
-            || plugin.getZjhPhysicalTableManager().isProtectedEntity(entity.getUniqueId())) {
+        if (plugin.getPhysicalTableManager().isProtectedEntity(entity.getUniqueId())) {
             event.setDropItems(false);
             event.setCancelled(true);
         }
@@ -30,8 +29,7 @@ public final class CraftEngineProtectionListener implements Listener {
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onCustomBlockBreak(CustomBlockBreakEvent event) {
-        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.bukkitBlock())
-            || plugin.getZjhPhysicalTableManager().isProtectedPlacedBlock(event.bukkitBlock())) {
+        if (plugin.getPhysicalTableManager().isProtectedPlacedBlock(event.bukkitBlock())) {
             event.setDropItems(false);
             event.setCancelled(true);
         }

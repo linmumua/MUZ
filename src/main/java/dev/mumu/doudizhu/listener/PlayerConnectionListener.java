@@ -45,13 +45,11 @@ public final class PlayerConnectionListener implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 离线，当前对局已重置。");
-        plugin.getZjhManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 离线，当前德州对局已重置。");
     }
 
     @EventHandler
     public void onKick(PlayerKickEvent event) {
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 被移出服务器，当前对局已重置。");
-        plugin.getZjhManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 被移出服务器，当前德州对局已重置。");
     }
 
     @EventHandler
@@ -89,7 +87,6 @@ public final class PlayerConnectionListener implements Listener {
                 return;
             }
             plugin.getPhysicalTableManager().syncViewer(player);
-            plugin.getZjhPhysicalTableManager().syncViewer(player);
         });
     }
 
@@ -104,9 +101,7 @@ public final class PlayerConnectionListener implements Listener {
                 // Rejoining players can still miss existing TextDisplay/table visuals after startup even when the table exists server-side.
                 // We deliberately re-run both incomplete-table repair and viewer sync multiple times to force the client back into a correct state.
                 plugin.getPhysicalTableManager().repairIncompleteTables("viewer-" + reason + "-ddz-" + delay);
-                plugin.getZjhPhysicalTableManager().repairIncompleteTables("viewer-" + reason + "-texas-" + delay);
                 plugin.getPhysicalTableManager().syncViewer(player);
-                plugin.getZjhPhysicalTableManager().syncViewer(player);
             });
         }
     }

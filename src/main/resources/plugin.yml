@@ -13,15 +13,7 @@ softdepend:
   - CMILib
   - EzEconomy
   - XConomy
-commands:
-  muz:
-    aliases: [MUZ]
-    description: Manage MUZ tables and rounds.
-    usage: /muz help
-    permission: muz.command
 permissions:
-  muz.command:
-    default: true
   muz.admin:
     default: op
 

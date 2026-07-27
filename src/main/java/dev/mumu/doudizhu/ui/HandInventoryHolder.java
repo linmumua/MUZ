@@ -9,7 +9,6 @@ public final class HandInventoryHolder implements InventoryHolder {
     public enum AdminPage {
         HOME,
         DDZ_HOME,
-        TEXAS_HOME,
         GLOBAL_HOME,
         DDZ_FURNITURE,
         DDZ_BUTTONS,
@@ -22,10 +21,6 @@ public final class HandInventoryHolder implements InventoryHolder {
         DDZ_PLAYER_OPTIONS,
         DDZ_BOTS,
         DDZ_AI,
-        TEXAS_FURNITURE,
-        TEXAS_BUTTONS,
-        TEXAS_CARDS,
-        TEXAS_TEXT,
         GLOBAL_ECONOMY,
         GLOBAL_ANIMATION,
         GLOBAL_HIGHLIGHT,

@@ -380,14 +380,9 @@ economy:
     doudizhu:
       # 斗地主基础每分折算多少金币，实际结算会再乘房间倍率
       currency-per-point: 1.0
-    texas:
-      # 是否让德州筹码直接接管 Vault 余额
-      enabled: true
-      # 基础多少经济货币单位折算 1 筹码；实际结算会再乘房间倍率
-      currency-per-chip: 1.0
 
 room-levels:
-  # /muz create doudizhu 或 /muz create texas 时默认使用的场次
+  # 放置新牌桌时默认使用的场次
   default-create-level: low
   low:
     label: "低级场"
@@ -419,39 +414,6 @@ storage:
       username: "root"
       password: ""
       parameters: "useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
-
-texas:
-  render:
-    # 是否生成德州桌子和椅子实体；当前默认关闭，减少实体负担
-    spawn-furniture: false
-  layout:
-    # 德州一圈座位离中心的距离
-    seat-distance: 3.10
-    # 座位信息文字高度
-    seat-label-height: 1.35
-    # 空位加入按钮高度
-    join-button-height: 0.85
-    # 桌中央状态文字高度
-    status-height: 3.10
-    # 操作按钮所在一排的高度
-    action-button-height: 0.88
-    # 操作按钮之间的间距
-    action-button-step: 0.34
-    # 按钮位标记高度
-    dealer-marker-height: 1.56
-    # 按钮位标记离各座位的外扩系数
-    dealer-marker-radius-factor: 0.86
-  cards:
-    # 公共牌高度
-    community-height: 1.18
-    # 公共牌之间的间距
-    community-spacing: 0.42
-    # 玩家手牌高度
-    hole-height: 1.18
-    # 同一玩家两张手牌之间的间距
-    hole-spacing: 0.36
-    # 玩家手牌离各自座位的外扩系数
-    hole-radius-factor: 0.68
 
 player-options:
   selection-sound-profiles:

@@ -822,17 +822,15 @@ public final class PhysicalTableManager {
             throw new IllegalStateException("这个座位已经有人了。");
         }
         GameTable currentTable = plugin.getTableManager().getTableOf(player);
-        dev.mumu.doudizhu.zhajinhua.ZjhTable currentTexas = plugin.getZjhManager().getTableOf(player);
         boolean switchingFromOtherDdz = currentTable != null && !currentTable.getName().equalsIgnoreCase(table.getName());
-        boolean switchingFromTexas = currentTexas != null;
-        if ((switchingFromOtherDdz || switchingFromTexas) && table.getPhase() != GamePhase.LOBBY) {
+        if (switchingFromOtherDdz && table.getPhase() != GamePhase.LOBBY) {
             throw new IllegalStateException("目标牌桌这局已经开始了，暂时不能加入。");
         }
         if (currentTable != null && table.getPhase() != GamePhase.LOBBY) {
             throw new IllegalStateException("对局开始后不能切换座位。");
         }
         UUID playerId = player.getUniqueId();
-        if ((switchingFromOtherDdz || switchingFromTexas) && !plugin.canAffordEntry(playerId, table.getRoomLevel())) {
+        if (switchingFromOtherDdz && !plugin.canAffordEntry(playerId, table.getRoomLevel())) {
             throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, table.getRoomLevel()));
         }
         int previousSeat = placedSeatIndex(placed, playerId);
@@ -842,8 +840,6 @@ public final class PhysicalTableManager {
         if (switchingFromOtherDdz) {
             plugin.getTableManager().leaveTable(player);
             currentTable = null;
-        } else if (switchingFromTexas) {
-            plugin.getZjhManager().leaveTable(player);
         }
         if (previousSeat >= 0) {
             placed.seatAssignments().remove(previousSeat);
