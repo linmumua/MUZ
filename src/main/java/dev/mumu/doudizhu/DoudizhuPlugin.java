@@ -16,6 +16,7 @@ import dev.mumu.doudizhu.listener.WorldTableInteractionListener;
 import dev.mumu.doudizhu.placeholder.MuzPlaceholderExpansion;
 import dev.mumu.doudizhu.room.TableLevel;
 import dev.mumu.doudizhu.scheduler.MuzScheduler;
+import dev.mumu.doudizhu.tabooruntime.MuzTabooRuntime;
 import dev.mumu.doudizhu.storage.DatabaseManager;
 import dev.mumu.doudizhu.storage.MatchParticipantRecord;
 import dev.mumu.doudizhu.storage.MatchRecord;
@@ -361,6 +362,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        // 引导放在 onEnable：Paper 在 onLoad 阶段不允许向插件 ClassLoader 追加类，
+        // 会导致 TabooLib 注入 Kotlin 后仍找不到 kotlin.Lazy。
+        MuzTabooRuntime.bootstrap(getLogger());
+        MuzTabooRuntime.enable(getLogger());
         scheduler = new MuzScheduler(this);
         saveDefaultYamlConfig();
         ensureConfigIntegrity();
@@ -421,6 +426,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (databaseManager != null) {
             databaseManager.close();
         }
+        MuzTabooRuntime.disable(getLogger());
     }
 
     public TableManager getTableManager() {

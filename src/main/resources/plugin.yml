@@ -5,6 +5,12 @@ api-version: "${apiVersion}"
 folia-supported: true
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.
+libraries:
+  # 由 Paper 在启动时从 Maven 下载并加入插件 ClassLoader。
+  # TabooLib 自带的 ClassAppender 无法注入 Paper 的 PluginClassLoader，
+  # 因此 Kotlin 运行时改由服务端提供，仍然不打进插件 JAR。
+  - org.jetbrains.kotlin:kotlin-stdlib:2.3.20
+  - org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.7.3
 softdepend:
   - CraftEngine
   - PlaceholderAPI

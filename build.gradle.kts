@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "dev.mumu"
-version = "1.9.0"
+version = "1.10.0"
 
 data class MuzTarget(
     val id: String,
@@ -381,15 +381,24 @@ tasks.named<Jar>("jar") {
 taboolib {
     relocate("org.yaml.snakeyaml", "dev.mumu.doudizhu.libs.snakeyaml")
     version {
-        taboolib = "6.2.3"
+        taboolib = "6.3.0-75b18a2"
         coroutines = "1.7.3"
-        skipKotlinRelocate = true
         skipTabooLibRelocate = true
+
+        // MUZ 自己维护 plugin.yml（含 api-version、folia-supported、softdepend 与权限），
+        // 不能让 TabooLib 的 Bukkit 平台覆盖它，否则命令与权限会丢失。
+        skipPlatformFile = true
     }
     env {
+        // 只把 TabooLib 的 loader 引导层打进 JAR，
+        // 平台实现与功能模块在首次启动时由 loader 从仓库下载到 libraries 目录。
         install(
             "common",
-            "common-platform-api"
+            "common-platform-api",
+            "platform-bukkit",
+            "platform-bukkit-impl",
+            "basic-configuration",
+            "basic-submit-chain"
         )
     }
 }
