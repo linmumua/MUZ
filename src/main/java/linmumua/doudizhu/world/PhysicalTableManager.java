@@ -484,12 +484,14 @@ public final class PhysicalTableManager {
                 boolean chairFurniture = isChairFurnitureEntity(id);
                 boolean bound = actionBindings.containsKey(id) || cardBindings.containsKey(id);
                 int resolvedSeat = chairFurniture ? nearestChairSeatIndex(nearby, placed) : -1;
+                String owner = chairFurniture ? resolveChairOwnerLabel(nearby, tableName) : "-";
                 hits.add(String.format(
-                    "%s[保护=%s 椅子家具=%s 解析座位=%s 有绑定=%s 右键放行=%s]",
+                    "%s[保护=%s 椅子家具=%s 解析座位=%s 归属=%s 有绑定=%s 右键放行=%s]",
                     nearby.getType(),
                     protectedEntity,
                     chairFurniture,
                     resolvedSeat < 0 ? "-" : String.valueOf(resolvedSeat + 1),
+                    owner,
                     bound,
                     !bound && (!protectedEntity || chairFurniture)
                 ));
@@ -1112,6 +1114,41 @@ public final class PhysicalTableManager {
             return true;
         }
         return true;
+    }
+
+    /**
+     * 判断这把椅子是不是这张牌桌自己生成的
+     * 沿载具链往上找，CE 家具的子实体也算归属。
+     * @param placed 已放置的牌桌
+     * @param entity 待判定的实体
+     * @return 属于这张桌返回 true
+     */
+    /**
+     * 报告这把椅子登记在哪张牌桌名下，用于排查相邻牌桌串座
+     * @param entity 椅子实体
+     * @param expectedTable 当前正在查看的牌桌名
+     * @return 本桌返回"本桌"，别的桌返回桌名，没登记返回"未登记"
+     */
+    private String resolveChairOwnerLabel(Entity entity, String expectedTable) {
+        for (PlacedTable placed : placedTables.values()) {
+            if (ownsChairEntity(placed, entity)) {
+                return placed.tableName().equalsIgnoreCase(expectedTable)
+                    ? "本桌"
+                    : placed.tableName();
+            }
+        }
+        return "未登记";
+    }
+
+    private boolean ownsChairEntity(PlacedTable placed, Entity entity) {
+        Entity current = entity;
+        while (current != null) {
+            if (placed.craftEngineVisualEntities().contains(current.getUniqueId())) {
+                return true;
+            }
+            current = current.getVehicle();
+        }
+        return false;
     }
 
     /**
