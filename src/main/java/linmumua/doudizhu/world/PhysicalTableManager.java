@@ -483,11 +483,13 @@ public final class PhysicalTableManager {
                 boolean protectedEntity = isProtectedEntity(id);
                 boolean chairFurniture = isChairFurnitureEntity(id);
                 boolean bound = actionBindings.containsKey(id) || cardBindings.containsKey(id);
+                int resolvedSeat = chairFurniture ? nearestChairSeatIndex(nearby, placed) : -1;
                 hits.add(String.format(
-                    "%s[保护=%s 椅子家具=%s 有绑定=%s 右键放行=%s]",
+                    "%s[保护=%s 椅子家具=%s 解析座位=%s 有绑定=%s 右键放行=%s]",
                     nearby.getType(),
                     protectedEntity,
                     chairFurniture,
+                    resolvedSeat < 0 ? "-" : String.valueOf(resolvedSeat + 1),
                     bound,
                     !bound && (!protectedEntity || chairFurniture)
                 ));
