@@ -37,6 +37,18 @@ public final class TypewriterTextStyle {
         display.setViewRange(Math.max(display.getViewRange(), 32.0f));
     }
 
+    /**
+     * 取出文字的基准位移，供 hover 抬升在此之上叠加
+     * hover 动画会整体重写 Transformation。不叠在这个基准上的话，
+     * apply 设的那点抬高会在 hover 触发瞬间丢掉，文字看起来会先往下一跳。
+     * @param billboard 朝向模式
+     * @param panel 是否带背景板
+     * @return 基准位移
+     */
+    public static Vector3f baseTranslationFor(Display.Billboard billboard, boolean panel) {
+        return baseTranslation(billboard, panel);
+    }
+
     private static Vector3f baseTranslation(Display.Billboard billboard, boolean panel) {
         return billboard == Display.Billboard.CENTER
             ? new Vector3f(0.0f, panel ? 0.05f : 0.03f, 0.0f)

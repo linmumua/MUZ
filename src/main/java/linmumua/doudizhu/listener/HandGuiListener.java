@@ -628,8 +628,6 @@ public final class HandGuiListener implements Listener {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE, increase, multiplier, page);
             case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HEIGHT, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_SCALE, increase, multiplier, page);
-            case 13 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_ROLL_DEGREES, increase, multiplier, page);
             case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_SCALE, increase, multiplier, page);
             case 15 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_LIFT, increase, multiplier, page);
             case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_FRONT_BASE_DISTANCE, increase, multiplier, page);
@@ -822,8 +820,6 @@ public final class HandGuiListener implements Listener {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_LATERAL, increase, multiplier, page);
             case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_DEPTH, increase, multiplier, page);
             case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_VERTICAL, increase, multiplier, page);
-            case 13 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_WIDTH, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_HEIGHT, increase, multiplier, page);
             case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LATERAL, increase, multiplier, page);
             case 20 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_DEPTH, increase, multiplier, page);
             case 21 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_VERTICAL, increase, multiplier, page);
@@ -832,8 +828,6 @@ public final class HandGuiListener implements Listener {
             case 24 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_HEIGHT, increase, multiplier, page);
             case 28 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_LATERAL, increase, multiplier, page);
             case 29 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_VERTICAL, increase, multiplier, page);
-            case 30 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_WIDTH, increase, multiplier, page);
-            case 31 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_HEIGHT, increase, multiplier, page);
             default -> {
             }
         }

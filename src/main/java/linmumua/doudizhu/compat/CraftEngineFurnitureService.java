@@ -3,8 +3,10 @@ package linmumua.doudizhu.compat;
 import linmumua.doudizhu.DoudizhuPlugin;
 import java.lang.reflect.Method;
 import java.util.Optional;
+import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 
@@ -28,7 +30,16 @@ public final class CraftEngineFurnitureService {
     private Method keyAsStringMethod;
     private Method blockDeserializeMethod;
     private Method blockPlaceMethod;
+    private Method getLoadedFurnitureByMetaEntityMethod;
+    private Method getLoadedFurnitureBySeatMethod;
+    private Method getLoadedFurnitureByColliderMethod;
+    private Method networkManagerInstanceMethod;
+    private Method getOnlineUserMethod;
+    private Method furnitureSnapshotStateMethod;
+    private Method hideHitboxesMethod;
+    private Method showHitboxesMethod;
     private boolean unavailable;
+    private boolean hitboxVisibilityUnavailable;
 
     public CraftEngineFurnitureService(DoudizhuPlugin plugin) {
         this.plugin = plugin;
@@ -162,6 +173,45 @@ public final class CraftEngineFurnitureService {
         }
     }
 
+    public boolean setFurnitureHitboxesVisible(Entity entity, Player viewer, boolean visible) {
+        if (entity == null || viewer == null || bridge() == null || hitboxVisibilityUnavailable) {
+            return false;
+        }
+        try {
+            Object furniture = resolveLoadedFurniture(entity);
+            if (furniture == null) {
+                return false;
+            }
+            Object networkManager = networkManagerInstanceMethod.invoke(null);
+            Object craftEnginePlayer = getOnlineUserMethod.invoke(networkManager, viewer.getUniqueId());
+            if (craftEnginePlayer == null) {
+                return false;
+            }
+            Object snapshot = furnitureSnapshotStateMethod.invoke(furniture);
+            if (snapshot == null) {
+                return false;
+            }
+            Method visibilityMethod = visible ? showHitboxesMethod : hideHitboxesMethod;
+            visibilityMethod.invoke(snapshot, craftEnginePlayer);
+            return true;
+        } catch (ReflectiveOperationException exception) {
+            hitboxVisibilityUnavailable = true;
+            plugin.getLogger().warning("CraftEngine furniture hitbox visibility bridge failed: " + exception.getMessage());
+            return false;
+        }
+    }
+
+    private Object resolveLoadedFurniture(Entity entity) throws ReflectiveOperationException {
+        Object furniture = getLoadedFurnitureByMetaEntityMethod.invoke(null, entity);
+        if (furniture == null) {
+            furniture = getLoadedFurnitureBySeatMethod.invoke(null, entity);
+        }
+        if (furniture == null) {
+            furniture = getLoadedFurnitureByColliderMethod.invoke(null, entity);
+        }
+        return furniture;
+    }
+
     private Plugin bridge() {
         if (unavailable) {
             return null;
@@ -201,6 +251,12 @@ public final class CraftEngineFurnitureService {
             } catch (NoSuchMethodException ignored) {
                 removeMethod = furnitureClass.getMethod("remove", Entity.class);
             }
+            try {
+                initializeHitboxVisibilityBridge(loader, furnitureClass);
+            } catch (ReflectiveOperationException exception) {
+                hitboxVisibilityUnavailable = true;
+                plugin.getLogger().warning("CraftEngine furniture hitbox visibility bridge unavailable: " + exception.getMessage());
+            }
             craftEngine = detected;
             return craftEngine;
         } catch (ReflectiveOperationException exception) {
@@ -208,6 +264,21 @@ public final class CraftEngineFurnitureService {
             plugin.getLogger().warning("CraftEngine detected but furniture bridge could not initialize: " + exception.getMessage());
             return null;
         }
+    }
+
+    private void initializeHitboxVisibilityBridge(ClassLoader loader, Class<?> furnitureApiClass) throws ReflectiveOperationException {
+        Class<?> furnitureClass = Class.forName("net.momirealms.craftengine.core.entity.furniture.Furniture", true, loader);
+        Class<?> snapshotClass = Class.forName("net.momirealms.craftengine.core.entity.furniture.FurnitureSnapshotState", true, loader);
+        Class<?> playerClass = Class.forName("net.momirealms.craftengine.core.entity.player.Player", true, loader);
+        Class<?> networkManagerClass = Class.forName("net.momirealms.craftengine.bukkit.plugin.network.BukkitNetworkManager", true, loader);
+        getLoadedFurnitureByMetaEntityMethod = furnitureApiClass.getMethod("getLoadedFurnitureByMetaEntity", Entity.class);
+        getLoadedFurnitureBySeatMethod = furnitureApiClass.getMethod("getLoadedFurnitureBySeat", Entity.class);
+        getLoadedFurnitureByColliderMethod = furnitureApiClass.getMethod("getLoadedFurnitureByCollider", Entity.class);
+        networkManagerInstanceMethod = networkManagerClass.getMethod("instance");
+        getOnlineUserMethod = networkManagerClass.getMethod("getOnlineUser", UUID.class);
+        furnitureSnapshotStateMethod = furnitureClass.getMethod("snapshotState");
+        hideHitboxesMethod = snapshotClass.getMethod("hideHitboxes", playerClass);
+        showHitboxesMethod = snapshotClass.getMethod("showHitboxes", playerClass);
     }
 
     public enum PlacementKind {

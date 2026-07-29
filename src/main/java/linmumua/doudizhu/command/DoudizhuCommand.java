@@ -2,6 +2,7 @@ package linmumua.doudizhu.command;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.ai.AiChatGateway;
+import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.ui.MuzTheme;
@@ -434,7 +435,18 @@ public final class DoudizhuCommand implements TabExecutor {
      * @param args 命令参数
      */
     private void handleDebugHitbox(CommandSender sender, String[] args) {
-        requireArgs(args, 3, "/muz debug hitbox <牌桌id> [世界 x y z|bot]");
+        requireArgs(args, 3, "/muz debug hitbox <牌桌id> [世界 x y z|bot|player 玩家]");
+        if (args.length == 5 && args[3].equalsIgnoreCase("player")) {
+            Player targetPlayer = Bukkit.getPlayerExact(args[4]);
+            if (targetPlayer == null) {
+                throw new IllegalArgumentException("玩家不在线: " + args[4]);
+            }
+            sender.sendMessage(message(
+                plugin.getPhysicalTableManager().describePlayerInteractionState(args[2], targetPlayer),
+                NamedTextColor.AQUA
+            ));
+            return;
+        }
         if (args.length == 4 && args[3].equalsIgnoreCase("bot")) {
             // 让控制台也能占一个座，用来确认座位被占后判定框会不会正确收掉。
             linmumua.doudizhu.game.GameTable target = plugin.getTableManager().getTable(args[2]);
@@ -447,6 +459,12 @@ public final class DoudizhuCommand implements TabExecutor {
                 "已往 " + args[2] + " 加入 bot " + plugin.getBotNumericId(botId) + "。",
                 NamedTextColor.GREEN
             ));
+            // 满座就直接起局。bot 加入时已经是准备状态，但开局要有人点"开始"，
+            // 控制台点不了按钮。不发牌就测不到手牌相关的判定框和清场豁免。
+            if (target.getSeats().size() >= 3 && target.getPhase() == GamePhase.LOBBY) {
+                target.startRound(sender);
+                sender.sendMessage(message("三家已满，已自动开局发牌。", NamedTextColor.GREEN));
+            }
         }
         if (args.length >= 7) {
             // 控制台也能放一张诊断桌，用来确认判定框是否真的生成在椅子上。
@@ -470,6 +488,10 @@ public final class DoudizhuCommand implements TabExecutor {
             sender.sendMessage(message("牌桌 " + args[2] + " 的空位判定框：", NamedTextColor.GOLD));
             lines.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
+        sender.sendMessage(message(
+            plugin.getPhysicalTableManager().describeHandEntityHealth(args[2]),
+            NamedTextColor.AQUA
+        ));
         List<String> guards = plugin.getPhysicalTableManager().describeChairInteractGuards(args[2]);
         if (!guards.isEmpty()) {
             sender.sendMessage(message("椅子右键放行情况：", NamedTextColor.GOLD));
@@ -485,8 +507,30 @@ public final class DoudizhuCommand implements TabExecutor {
             sender.sendMessage(message("右键椅子会走哪条分支：", NamedTextColor.GOLD));
             decisions.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
+        List<String> unfiltered = plugin.getPhysicalTableManager().describeUnfilteredHoverRays(args[2]);
+        if (!unfiltered.isEmpty()) {
+            sender.sendMessage(message("无过滤射线（等价 hover 的 getTargetEntity）：", NamedTextColor.GOLD));
+            unfiltered.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
+        }
+        List<String> overlaps = plugin.getPhysicalTableManager().describeHitboxOverlaps(args[2]);
+        if (!overlaps.isEmpty()) {
+            sender.sendMessage(message("判定框重叠检查：", NamedTextColor.GOLD));
+            overlaps.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
+        }
+        int actionEntities = plugin.getPhysicalTableManager().actionEntityCount(args[2]);
+        if (actionEntities >= 0) {
+            sender.sendMessage(message(
+                "按钮实体数: " + actionEntities
+                    + (actionEntities % 2 == 0 ? "（成对，无旧实体残留）" : "（落单！有旧实体没收掉）"),
+                NamedTextColor.GRAY
+            ));
+        }
+        // 这行不依赖牌桌是否存在，拆桌后仍会输出，用来确认椅子映射没泄漏。
+        sender.sendMessage(message(
+            "hover 映射总数: " + plugin.getPhysicalTableManager().hoverMappingCount(),
+            NamedTextColor.GRAY
+        ));
     }
-
     private void handleDebugBot(CommandSender sender, String[] args) {
         if (args.length < 3 || (!args[2].equalsIgnoreCase("info") && !args[2].equalsIgnoreCase("信息"))) {
             throw new IllegalArgumentException("用法: /muz debug bot 信息 [bot数字id] [消息]");

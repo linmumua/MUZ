@@ -298,8 +298,6 @@ public final class HandGuiService {
             case DDZ_BUTTONS -> {
                 inventory.setItem(10, adminSettingItem(Material.STONE_BUTTON, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE));
                 inventory.setItem(11, adminSettingItem(Material.LIGHT_WEIGHTED_PRESSURE_PLATE, DoudizhuPlugin.AdminSetting.BUTTON_HEIGHT));
-                inventory.setItem(12, adminSettingItem(Material.SMALL_AMETHYST_BUD, DoudizhuPlugin.AdminSetting.BUTTON_SCALE));
-                inventory.setItem(13, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.BUTTON_ROLL_DEGREES));
                 inventory.setItem(14, adminSettingItem(Material.STONE_BUTTON, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_SCALE));
                 inventory.setItem(15, adminSettingItem(Material.RABBIT_FOOT, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_LIFT));
                 inventory.setItem(19, adminSettingItem(Material.IRON_NUGGET, DoudizhuPlugin.AdminSetting.BUTTON_FRONT_BASE_DISTANCE));
@@ -447,8 +445,6 @@ public final class HandGuiService {
                 inventory.setItem(10, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_LATERAL));
                 inventory.setItem(11, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_DEPTH));
                 inventory.setItem(12, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_VERTICAL));
-                inventory.setItem(13, adminSettingItem(Material.SLIME_BALL, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_WIDTH));
-                inventory.setItem(14, adminSettingItem(Material.SLIME_BALL, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_HEIGHT));
                 inventory.setItem(19, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LATERAL));
                 inventory.setItem(20, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_DEPTH));
                 inventory.setItem(21, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_VERTICAL));
@@ -457,8 +453,6 @@ public final class HandGuiService {
                 inventory.setItem(24, adminSettingItem(Material.HONEY_BLOCK, DoudizhuPlugin.AdminSetting.CARD_HITBOX_HEIGHT));
                 inventory.setItem(28, adminSettingItem(Material.MINECART, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_LATERAL));
                 inventory.setItem(29, adminSettingItem(Material.MINECART, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_VERTICAL));
-                inventory.setItem(30, adminSettingItem(Material.SADDLE, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_WIDTH));
-                inventory.setItem(31, adminSettingItem(Material.SADDLE, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_HEIGHT));
             }
             case DDZ_AUDIO -> {
                 inventory.setItem(10, adminSettingItem(Material.MUSIC_DISC_CAT, DoudizhuPlugin.AdminSetting.BGM_VOLUME));
@@ -1564,7 +1558,6 @@ public final class HandGuiService {
             case TABLE_SPAWN_OFFSET_Y -> "整套桌椅一起升降；方块类按整格，家具类高精度。";
             case BUTTON_DISTANCE -> "桌边按钮离桌子的远近。";
             case BUTTON_HEIGHT -> "桌边按钮整体高低。";
-            case BUTTON_SCALE -> "桌边按钮图标大小。";
             case PLAYER_HEAD_SCALE -> "牌桌座位头像的显示大小。";
             case PLAYER_HEAD_SHOW_ID -> "点击后在只显示头像、都显示、只显示名字三种模式间循环切换。";
             case STATUS_AVATAR_SCALE -> "顶部状态头像的显示大小。";
@@ -1591,7 +1584,6 @@ public final class HandGuiService {
             case SEAT_INFO_LATERAL -> "座位副标题左右移动。";
             case SEAT_INFO_VERTICAL -> "座位副标题上下移动。";
             case SEAT_INFO_DEPTH -> "座位副标题前后移动。";
-            case BUTTON_ROLL_DEGREES -> "按钮图标本身是否翻转。";
             case JOIN_LABEL_HEIGHT -> "空位加入文字离按钮多高。";
             case JOIN_LABEL_SCALE -> "空位加入文字的显示大小。";
             case ACTION_LABEL_HEIGHT -> "普通按钮文字离按钮多高。";
@@ -1650,8 +1642,6 @@ public final class HandGuiService {
             case BUTTON_HITBOX_LATERAL -> "按钮点击范围左右微调。";
             case BUTTON_HITBOX_DEPTH -> "按钮点击范围前后微调。";
             case BUTTON_HITBOX_VERTICAL -> "按钮点击范围上下微调。";
-            case BUTTON_HITBOX_WIDTH -> "按钮点击范围宽度。";
-            case BUTTON_HITBOX_HEIGHT -> "按钮点击范围高度。";
             case CARD_HITBOX_LATERAL -> "手牌点击范围左右微调。";
             case CARD_HITBOX_DEPTH -> "手牌点击范围前后微调。";
             case CARD_HITBOX_VERTICAL -> "手牌点击范围上下微调。";
@@ -1660,8 +1650,6 @@ public final class HandGuiService {
             case CARD_HITBOX_HEIGHT -> "手牌点击范围高度。";
             case CHAIR_HITBOX_LATERAL -> "椅子点击范围左右微调。";
             case CHAIR_HITBOX_VERTICAL -> "椅子点击范围上下微调。";
-            case CHAIR_HITBOX_WIDTH -> "椅子点击范围宽度。";
-            case CHAIR_HITBOX_HEIGHT -> "椅子点击范围高度。";
             case BGM_VOLUME -> "背景音乐音量。";
             case EFFECT_VOLUME -> "出牌和提示音量。";
             case TURN_COUNTDOWN_SECONDS -> "一回合最多等多久。";

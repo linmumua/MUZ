@@ -98,6 +98,9 @@ public final class WorldTableInteractionListener implements Listener {
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onInteract(PlayerInteractEntityEvent event) {
+        if (event instanceof PlayerInteractAtEntityEvent) {
+            return;
+        }
         if (plugin.getPhysicalTableManager().handleInteraction(event.getPlayer(), event.getRightClicked())) {
             event.setCancelled(true);
             return;
@@ -107,8 +110,13 @@ public final class WorldTableInteractionListener implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onInteractAt(PlayerInteractAtEntityEvent event) {
+        boolean handled = plugin.getPhysicalTableManager().handleInteraction(event.getPlayer(), event.getRightClicked());
+        if (handled) {
+            event.setCancelled(true);
+            return;
+        }
         if (shouldCancelProtectedInteract(event.getRightClicked().getUniqueId())) {
             event.setCancelled(true);
         }

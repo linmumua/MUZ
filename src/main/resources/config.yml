@@ -166,10 +166,6 @@ render:
   hand-spacing: 0.21
   # 公共出牌区左右间距
   public-trick-spacing: 0.22
-  # 座位旁操作按钮的缩放
-  button-scale: 0.42
-  # 按钮图标自身的翻转角度；正常建议保持 0
-  button-roll-degrees: 0.0
   button-offset:
     # 按钮离桌子的远近
     distance: 2.10
@@ -213,12 +209,8 @@ render:
     lateral: 0.00
     # 空位"加入座位"交互箱上下偏移
     vertical: 0.02
-  # 空位"加入座位"按钮的可点范围；坐下椅子由 CraftEngine 椅子自带 hitbox 负责，别在这里放大
-  chair-hitbox:
-    # 交互箱宽度
-    width: 0.34
-    # 交互箱高度
-    height: 0.48
+  # 按钮判定框的尺寸不再手调，改为按 button-layout 里的文字缩放自动贴合文字。
+  # 想让点击范围变大就调 join-label-scale / action-label-scale，文字大了判定框跟着大。
   button-hitbox-offset:
     # 按钮点击范围左右偏移
     lateral: 0.00
@@ -226,11 +218,6 @@ render:
     depth: 0.00
     # 按钮点击范围上下偏移
     vertical: 0.02
-  button-hitbox:
-    # 按钮交互箱宽度
-    width: 0.22
-    # 按钮交互箱高度
-    height: 0.34
   card-hitbox-offset:
     # 手牌点击范围左右偏移
     lateral: 0.00
@@ -240,11 +227,11 @@ render:
     vertical: -0.45
   card-hitbox:
     # 扑克牌交互箱长度
-    length: 0.30
+    length: 0.28
     # 扑克牌交互箱宽度
-    width: 0.18
+    width: 0.16
     # 扑克牌交互箱高度
-    height: 0.62
+    height: 0.56
   # 相邻牌之间的前后错层，用来减少闪烁
   card-depth-offset: 0.01
   # 桌面状态文字高度

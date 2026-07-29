@@ -88,8 +88,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private static final double OLDER_BUTTON_DISTANCE = 1.10;
     private static final double LEGACY_BUTTON_DISTANCE = 1.45;
     private static final double DEFAULT_BUTTON_DISTANCE = 2.10;
-    private static final double LEGACY_BUTTON_ROLL_DEGREES = 90.0;
-    private static final double DEFAULT_BUTTON_ROLL_DEGREES = 0.0;
+
     private static final double LEGACY_CARD_HITBOX_VERTICAL_OFFSET = 0.05;
     private static final double DEFAULT_CARD_HITBOX_VERTICAL_OFFSET = -0.45;
     private static final boolean DEFAULT_SELECTION_SOUND_ENABLED = true;
@@ -161,7 +160,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double hoverButtonLift;
     private int buttonHoverInterpolationTicks;
     private int buttonHoverAnimationTypeIndex;
-    private float buttonScale;
     private float tableScale;
     private float chairScale;
     private float smallTextScale;
@@ -196,7 +194,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private float cardDepthOffset;
     private float handSpacing;
     private float publicTrickSpacing;
-    private float buttonRollDegrees;
     private float selectedCardScale;
     private double selectedCardLift;
     private boolean hoverGlowEnabled;
@@ -224,13 +221,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double chairVisualVerticalOffset;
     private double chairHitboxLateralOffset;
     private double chairHitboxVerticalOffset;
-    private double chairHitboxWidth;
-    private double chairHitboxHeight;
     private double buttonHitboxLateralOffset;
     private double buttonHitboxDepthOffset;
     private double buttonHitboxVerticalOffset;
-    private double buttonHitboxWidth;
-    private double buttonHitboxHeight;
     private double cardHitboxLateralOffset;
     private double cardHitboxDepthOffset;
     private double cardHitboxVerticalOffset;
@@ -1615,9 +1608,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return publicCardScale;
     }
 
-    public float getButtonScale() {
-        return buttonScale;
-    }
+
 
     public float getTableScale() {
         return tableScale;
@@ -1905,9 +1896,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return publicTrickSpacing;
     }
 
-    public float getButtonRollDegrees() {
-        return buttonRollDegrees;
-    }
+
 
     public float getSelectedCardScale() {
         return selectedCardScale;
@@ -2017,13 +2006,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return chairHitboxVerticalOffset;
     }
 
-    public double getChairHitboxWidth() {
-        return chairHitboxWidth;
-    }
 
-    public double getChairHitboxHeight() {
-        return chairHitboxHeight;
-    }
 
     public double getButtonHitboxLateralOffset() {
         return buttonHitboxLateralOffset;
@@ -2037,13 +2020,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return buttonHitboxVerticalOffset;
     }
 
-    public double getButtonHitboxWidth() {
-        return buttonHitboxWidth;
-    }
 
-    public double getButtonHitboxHeight() {
-        return buttonHitboxHeight;
-    }
 
     public double getCardHitboxLateralOffset() {
         return cardHitboxLateralOffset;
@@ -2708,7 +2685,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hoverButtonLift = yamlConfig().getDouble("render.button-hover.lift", 0.03);
         buttonHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.button-hover.interpolation-ticks", 8));
         buttonHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.button-hover.animation-type", 3)));
-        buttonScale = (float) yamlConfig().getDouble("render.button-scale", 0.42);
         tableScale = (float) yamlConfig().getDouble("render.furniture-scale.table", 2.25);
         chairScale = (float) yamlConfig().getDouble("render.furniture-scale.chair", 1.35);
         smallTextScale = (float) yamlConfig().getDouble("render.text-scale.small", 0.46);
@@ -2772,7 +2748,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         cardDepthOffset = (float) yamlConfig().getDouble("render.card-depth-offset", 0.01);
         handSpacing = (float) yamlConfig().getDouble("render.hand-spacing", 0.21);
         publicTrickSpacing = (float) yamlConfig().getDouble("render.public-trick-spacing", 0.22);
-        buttonRollDegrees = (float) yamlConfig().getDouble("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
         buttonDistance = yamlConfig().getDouble("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
         buttonHeight = yamlConfig().getDouble("render.button-offset.height", 1.02);
         tableDisplayHeight = yamlConfig().getDouble("render.layout.table-display-height", 0.55);
@@ -2787,20 +2762,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
         chairVisualVerticalOffset = yamlConfig().getDouble("render.chair-visual-offset.vertical", -0.04);
         chairHitboxLateralOffset = yamlConfig().getDouble("render.chair-hitbox-offset.lateral", 0.0);
         chairHitboxVerticalOffset = yamlConfig().getDouble("render.chair-hitbox-offset.vertical", 0.02);
-        // JOIN 判定框贴在"加入座位"图标上，比普通按钮略大一点就够，别去包整张椅子。
-        chairHitboxWidth = yamlConfig().getDouble("render.chair-hitbox.width", 0.34);
-        chairHitboxHeight = yamlConfig().getDouble("render.chair-hitbox.height", 0.48);
+        // 判定框尺寸不再配置，改为按按钮文字缩放自动推算，只保留位置微调。
         buttonHitboxLateralOffset = yamlConfig().getDouble("render.button-hitbox-offset.lateral", 0.0);
         buttonHitboxDepthOffset = yamlConfig().getDouble("render.button-hitbox-offset.depth", 0.0);
         buttonHitboxVerticalOffset = yamlConfig().getDouble("render.button-hitbox-offset.vertical", 0.02);
-        buttonHitboxWidth = yamlConfig().getDouble("render.button-hitbox.width", 0.22);
-        buttonHitboxHeight = yamlConfig().getDouble("render.button-hitbox.height", 0.34);
         cardHitboxLateralOffset = yamlConfig().getDouble("render.card-hitbox-offset.lateral", 0.0);
         cardHitboxDepthOffset = yamlConfig().getDouble("render.card-hitbox-offset.depth", 0.0);
         cardHitboxVerticalOffset = yamlConfig().getDouble("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
-        cardHitboxLength = yamlConfig().getDouble("render.card-hitbox.length", 0.30);
-        cardHitboxWidth = yamlConfig().getDouble("render.card-hitbox.width", 0.18);
-        cardHitboxHeight = yamlConfig().getDouble("render.card-hitbox.height", 0.62);
+        cardHitboxLength = yamlConfig().getDouble("render.card-hitbox.length", 0.28);
+        cardHitboxWidth = yamlConfig().getDouble("render.card-hitbox.width", 0.16);
+        cardHitboxHeight = yamlConfig().getDouble("render.card-hitbox.height", 0.56);
         statusHeight = yamlConfig().getDouble("render.status-height", 3.10);
         playDetailHeight = yamlConfig().getDouble("render.play-detail-height", 2.35);
         publicTrickHeight = yamlConfig().getDouble("render.public-trick-height", 1.55);
@@ -2898,18 +2869,45 @@ public final class DoudizhuPlugin extends JavaPlugin {
      * 把旧版偏小的椅子交互箱升级成能包住椅子的尺寸
      * @return 配置是否发生变化
      */
+    /**
+     * 已退役的渲染配置键，启动时会从 config.yml 里清掉
+     * 按钮图标删掉、判定框改为按文字缩放自动推算之后，这些手调项都失去作用。
+     * 留在配置里只会让人以为还能调。
+     */
+    static final String[] RETIRED_RENDER_KEYS = {
+        "render.chair-hitbox.width",
+        "render.chair-hitbox.height",
+        "render.chair-hitbox",
+        "render.button-hitbox.width",
+        "render.button-hitbox.height",
+        "render.button-scale",
+        "render.button-roll-degrees"
+    };
+
+    /**
+     * 必须保留的渲染配置键，迁移时绝不能顺手删掉
+     * 用户明确要求保留按钮远近高低和判定框位置微调。
+     */
+    static final String[] PRESERVED_RENDER_KEYS = {
+        "render.button-offset.distance",
+        "render.button-offset.height",
+        "render.button-hitbox-offset.lateral",
+        "render.button-hitbox-offset.depth",
+        "render.button-hitbox-offset.vertical",
+        "render.card-hitbox.length",
+        "render.card-hitbox.width",
+        "render.card-hitbox.height"
+    };
+
     private boolean migrateChairHitboxConfig() {
-        // 上一版把这三个值放大到 0.85/1.05/0.10，想让玩家直接点椅子入座。
-        // 那样会在椅子上多出一个插件判定框，抢掉 CraftEngine 椅子自带 hitbox 的射线命中，
-        // 结果既坐不上椅子又点不动按钮。判定框改回贴按钮，这里把放大过的值收回来。
+        // 判定框尺寸改为按按钮文字缩放自动推算后，这些手调项已经没有作用。
+        // 留在配置里只会让人以为还能调，所以直接清掉。
         boolean changed = false;
-        if (yamlConfig().getDouble("render.chair-hitbox.width", 0.34) >= 0.80) {
-            yamlConfig().set("render.chair-hitbox.width", 0.34);
-            changed = true;
-        }
-        if (yamlConfig().getDouble("render.chair-hitbox.height", 0.48) >= 1.00) {
-            yamlConfig().set("render.chair-hitbox.height", 0.48);
-            changed = true;
+        for (String stale : RETIRED_RENDER_KEYS) {
+            if (yamlConfig().contains(stale)) {
+                yamlConfig().set(stale, null);
+                changed = true;
+            }
         }
         if (yamlConfig().getDouble("render.chair-hitbox-offset.vertical", 0.02) >= 0.08) {
             yamlConfig().set("render.chair-hitbox-offset.vertical", 0.02);
@@ -3016,13 +3014,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 && Math.abs(yamlConfig().getDouble("render.card-hitbox-offset.vertical", Double.NaN) - LEGACY_CARD_HITBOX_VERTICAL_OFFSET) < 0.0001
         ) {
             yamlConfig().set("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
-            changed = true;
-        }
-        if (
-            yamlConfig().contains("render.button-roll-degrees")
-                && Math.abs(yamlConfig().getDouble("render.button-roll-degrees", Double.NaN) - LEGACY_BUTTON_ROLL_DEGREES) < 0.0001
-        ) {
-            yamlConfig().set("render.button-roll-degrees", DEFAULT_BUTTON_ROLL_DEGREES);
             changed = true;
         }
         if (yamlConfig().contains("bot.action-delay-ticks")) {
@@ -4327,7 +4318,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         CARD_LABEL_HEIGHT("render.card-label-height", "牌面标签高度", 0.34, 0.0, 3.0, 0.02, false, false, false),
         CARD_LABEL_LATERAL("render.card-label-offset.lateral", "牌面标签左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         CARD_LABEL_DEPTH("render.card-label-offset.depth", "牌面标签前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
-        BUTTON_SCALE("render.button-scale", "按钮大小", 0.42, 0.05, 3.0, 0.02, false, false, false),
         PLAYER_HEAD_SCALE("render.player-head-scale", "玩家头像大小", 1.00, 0.50, 4.0, 0.10, false, false, false),
         PLAYER_HEAD_SHOW_ID("render.player-head-show-id", "头像/名字显示模式", 1.0, 0.0, 2.0, 1.0, false, true, false),
         STATUS_AVATAR_SCALE("render.status-avatar.scale", "顶栏头像大小", 1.00, 0.40, 4.0, 0.05, false, false, false),
@@ -4362,7 +4352,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         SELECTED_GLOW_RED("render.selected-glow.color.red", "预选发光红", 255.0, 0.0, 255.0, 1.0, false, true, false),
         SELECTED_GLOW_GREEN("render.selected-glow.color.green", "预选发光绿", 226.0, 0.0, 255.0, 1.0, false, true, false),
         SELECTED_GLOW_BLUE("render.selected-glow.color.blue", "预选发光蓝", 92.0, 0.0, 255.0, 1.0, false, true, false),
-        BUTTON_ROLL_DEGREES("render.button-roll-degrees", "按钮旋转", DEFAULT_BUTTON_ROLL_DEGREES, -180.0, 180.0, 5.0, false, false, false),
         BUTTON_DISTANCE("render.button-offset.distance", "按钮离桌距离", 2.10, 0.20, 4.0, 0.05, false, false, false),
         BUTTON_HEIGHT("render.button-offset.height", "按钮高度", 1.02, 0.20, 4.0, 0.05, false, false, false),
         CHAIR_ROTATION_DEGREES("render.chair-rotation-degrees", "椅子旋转角度", 0.0, -360.0, 360.0, 5.0, false, false, false),
@@ -4371,19 +4360,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
         CHAIR_VISUAL_VERTICAL("render.chair-visual-offset.vertical", "椅子上下偏移", -0.04, -2.0, 2.0, 0.02, false, false, false),
         CHAIR_HITBOX_LATERAL("render.chair-hitbox-offset.lateral", "加入按钮交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         CHAIR_HITBOX_VERTICAL("render.chair-hitbox-offset.vertical", "加入按钮交互箱上下偏移", 0.02, -2.0, 2.0, 0.02, false, false, false),
-        CHAIR_HITBOX_WIDTH("render.chair-hitbox.width", "加入按钮交互箱宽度", 0.34, 0.10, 3.0, 0.05, false, false, false),
-        CHAIR_HITBOX_HEIGHT("render.chair-hitbox.height", "加入按钮交互箱高度", 0.48, 0.10, 3.0, 0.05, false, false, false),
         BUTTON_HITBOX_LATERAL("render.button-hitbox-offset.lateral", "按钮交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_HITBOX_DEPTH("render.button-hitbox-offset.depth", "按钮交互箱前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_HITBOX_VERTICAL("render.button-hitbox-offset.vertical", "按钮交互箱上下偏移", 0.02, -2.0, 2.0, 0.02, false, false, false),
-        BUTTON_HITBOX_WIDTH("render.button-hitbox.width", "按钮交互箱宽度", 0.22, 0.05, 3.0, 0.05, false, false, false),
-        BUTTON_HITBOX_HEIGHT("render.button-hitbox.height", "按钮交互箱高度", 0.34, 0.05, 3.0, 0.05, false, false, false),
         CARD_HITBOX_LATERAL("render.card-hitbox-offset.lateral", "扑克牌交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         CARD_HITBOX_DEPTH("render.card-hitbox-offset.depth", "扑克牌交互箱前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         CARD_HITBOX_VERTICAL("render.card-hitbox-offset.vertical", "扑克牌交互箱上下偏移", -0.45, -2.0, 2.0, 0.02, false, false, false),
-        CARD_HITBOX_LENGTH("render.card-hitbox.length", "扑克牌交互箱长度", 0.30, 0.05, 3.0, 0.05, false, false, false),
-        CARD_HITBOX_WIDTH("render.card-hitbox.width", "扑克牌交互箱宽度", 0.18, 0.05, 3.0, 0.05, false, false, false),
-        CARD_HITBOX_HEIGHT("render.card-hitbox.height", "扑克牌交互箱高度", 0.62, 0.05, 3.0, 0.05, false, false, false),
+        CARD_HITBOX_LENGTH("render.card-hitbox.length", "扑克牌交互箱长度", 0.28, 0.05, 3.0, 0.05, false, false, false),
+        CARD_HITBOX_WIDTH("render.card-hitbox.width", "扑克牌交互箱宽度", 0.16, 0.05, 3.0, 0.05, false, false, false),
+        CARD_HITBOX_HEIGHT("render.card-hitbox.height", "扑克牌交互箱高度", 0.56, 0.05, 3.0, 0.05, false, false, false),
         CARD_DEPTH_OFFSET("render.card-depth-offset", "手牌压层深度", 0.01, 0.01, 1.0, 0.01, false, false, false),
         STATUS_HEIGHT("render.status-height", "状态文字高度", 3.10, 0.0, 10.0, 0.05, false, false, false),
         PLAY_DETAIL_HEIGHT("render.play-detail-height", "上一手文字高度", 2.35, 0.0, 10.0, 0.05, false, false, false),
