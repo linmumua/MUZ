@@ -209,15 +209,16 @@ render:
     # 椅子上下偏移
     vertical: -0.04
   chair-hitbox-offset:
-    # 椅子交互箱左右偏移
+    # 空位"加入座位"交互箱左右偏移
     lateral: 0.00
-    # 椅子交互箱上下偏移
-    vertical: -0.18
+    # 空位"加入座位"交互箱上下偏移
+    vertical: 0.02
+  # 空位"加入座位"按钮的可点范围；坐下椅子由 CraftEngine 椅子自带 hitbox 负责，别在这里放大
   chair-hitbox:
-    # 椅子交互箱宽度
-    width: 0.22
-    # 椅子交互箱高度
-    height: 0.30
+    # 交互箱宽度
+    width: 0.34
+    # 交互箱高度
+    height: 0.48
   button-hitbox-offset:
     # 按钮点击范围左右偏移
     lateral: 0.00

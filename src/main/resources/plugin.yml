@@ -1,5 +1,5 @@
 name: MUZ
-main: dev.mumu.doudizhu.DoudizhuPlugin
+main: linmumua.doudizhu.DoudizhuPlugin
 version: ${version}
 api-version: "${apiVersion}"
 folia-supported: true
@@ -19,7 +19,15 @@ softdepend:
   - CMILib
   - EzEconomy
   - XConomy
+commands:
+  muz:
+    aliases: [MUZ]
+    description: 管理 MUZ 牌桌与对局。
+    usage: /muz help
+    permission: muz.command
 permissions:
+  muz.command:
+    default: true
   muz.admin:
     default: op
 

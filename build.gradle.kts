@@ -8,7 +8,7 @@ plugins {
     id("io.izzel.taboolib") version "2.0.38"
 }
 
-group = "dev.mumu"
+group = "linmumua"
 version = "1.10.0"
 
 data class MuzTarget(
@@ -379,7 +379,7 @@ tasks.named<Jar>("jar") {
 }
 
 taboolib {
-    relocate("org.yaml.snakeyaml", "dev.mumu.doudizhu.libs.snakeyaml")
+    relocate("org.yaml.snakeyaml", "linmumua.doudizhu.libs.snakeyaml")
     version {
         taboolib = "6.3.0-75b18a2"
         coroutines = "1.7.3"
@@ -392,14 +392,10 @@ taboolib {
     env {
         // 只把 TabooLib 的 loader 引导层打进 JAR，
         // 平台实现与功能模块在首次启动时由 loader 从仓库下载到 libraries 目录。
-        install(
-            "common",
-            "common-platform-api",
-            "platform-bukkit",
-            "platform-bukkit-impl",
-            "basic-configuration",
-            "basic-submit-chain"
-        )
+        // 只装引导层。platform-bukkit 与 common-platform-api 都假定
+        // taboolib.platform.BukkitPlugin 是插件入口，而 MUZ 用自己的 JavaPlugin，
+        // 装上会让 EventBus 与 PlatformFactory 拿不到实例并刷一屏堆栈。
+        install("common")
     }
 }
 
@@ -411,7 +407,7 @@ val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
     doLast {
         val jarFile = pluginJar.get().asFile
         JarFile(jarFile).use { jar ->
-            val relocatedLoaderOptions = "dev/mumu/doudizhu/libs/snakeyaml/LoaderOptions.class"
+            val relocatedLoaderOptions = "linmumua/doudizhu/libs/snakeyaml/LoaderOptions.class"
             val originalLoaderOptions = "org/yaml/snakeyaml/LoaderOptions.class"
             check(jar.getEntry(relocatedLoaderOptions) != null) {
                 "Missing relocated SnakeYAML LoaderOptions in ${jarFile.name}"
@@ -420,11 +416,11 @@ val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
                 "Unrelocated SnakeYAML LoaderOptions remains in ${jarFile.name}"
             }
 
-            val configEntry = checkNotNull(jar.getJarEntry("dev/mumu/doudizhu/config/MuzYamlConfig.class")) {
+            val configEntry = checkNotNull(jar.getJarEntry("linmumua/doudizhu/config/MuzYamlConfig.class")) {
                 "Missing MuzYamlConfig.class in ${jarFile.name}"
             }
             val configBytecode = jar.getInputStream(configEntry).use { it.readBytes() }.toString(Charsets.ISO_8859_1)
-            check(configBytecode.contains("dev/mumu/doudizhu/libs/snakeyaml/LoaderOptions")) {
+            check(configBytecode.contains("linmumua/doudizhu/libs/snakeyaml/LoaderOptions")) {
                 "MuzYamlConfig does not reference relocated SnakeYAML"
             }
             check(!configBytecode.contains("org/yaml/snakeyaml/LoaderOptions")) {
