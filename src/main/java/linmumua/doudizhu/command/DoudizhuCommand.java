@@ -480,6 +480,11 @@ public final class DoudizhuCommand implements TabExecutor {
             sender.sendMessage(message("玩家站位射线先命中谁：", NamedTextColor.GOLD));
             rays.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
+        List<String> decisions = plugin.getPhysicalTableManager().describeChairSeatDecisions(args[2]);
+        if (!decisions.isEmpty()) {
+            sender.sendMessage(message("右键椅子会走哪条分支：", NamedTextColor.GOLD));
+            decisions.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
+        }
     }
 
     private void handleDebugBot(CommandSender sender, String[] args) {

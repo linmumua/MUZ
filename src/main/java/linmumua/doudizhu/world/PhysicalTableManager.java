@@ -1088,9 +1088,50 @@ public final class PhysicalTableManager {
      * @return 认出是椅子就返回 true，无论是否真的入座
      */
     private boolean handleChairSeatInteraction(Player player, Entity entity) {
-        UUID entityId = entity.getUniqueId();
-        if (!isChairFurnitureEntity(entityId)) {
+        ChairSeatTarget target = resolveChairSeatTarget(entity);
+        if (target == null) {
             return false;
+        }
+        if (target.decision() != ChairSeatDecision.JOIN) {
+            return true;
+        }
+        try {
+            joinSeat(target.table(), target.placed(), player, target.seatIndex());
+            refresh(target.table());
+        } catch (RuntimeException exception) {
+            hint(player, exception.getMessage(), NamedTextColor.RED);
+        }
+        return true;
+    }
+
+    /** 右键椅子后该走哪条分支。 */
+    enum ChairSeatDecision {
+        /** 不是椅子家具，插件不插手。 */
+        NOT_CHAIR,
+        /** 是椅子但找不到对应牌桌或座位，只让 CraftEngine 坐下。 */
+        NO_SEAT,
+        /** 座位已经有人，安静坐下不改绑定。 */
+        OCCUPIED,
+        /** 空位，入座。 */
+        JOIN
+    }
+
+    private record ChairSeatTarget(
+        ChairSeatDecision decision,
+        PlacedTable placed,
+        GameTable table,
+        int seatIndex
+    ) { }
+
+    /**
+     * 解析右键椅子后该做什么
+     * 不碰玩家状态，可以在没有玩家的情况下单独跑，方便排查。
+     * @param entity 被右键的实体
+     * @return 不是椅子返回 null，否则给出分支判定
+     */
+    private ChairSeatTarget resolveChairSeatTarget(Entity entity) {
+        if (!isChairFurnitureEntity(entity.getUniqueId())) {
+            return null;
         }
         for (PlacedTable placed : placedTables.values()) {
             int seatIndex = nearestChairSeatIndex(entity, placed);
@@ -1099,30 +1140,66 @@ public final class PhysicalTableManager {
             }
             GameTable table = plugin.getTableManager().getTable(placed.tableName());
             if (table == null) {
-                return true;
+                return new ChairSeatTarget(ChairSeatDecision.NO_SEAT, placed, null, seatIndex);
             }
             // 座位已经有人就什么都不做，安静让 CraftEngine 把人放到椅子上坐着。
             if (placed.seatAssignments().containsKey(seatIndex)) {
-                return true;
+                return new ChairSeatTarget(ChairSeatDecision.OCCUPIED, placed, table, seatIndex);
             }
-            try {
-                joinSeat(table, placed, player, seatIndex);
-                refresh(table);
-            } catch (RuntimeException exception) {
-                hint(player, exception.getMessage(), NamedTextColor.RED);
-            }
-            return true;
+            return new ChairSeatTarget(ChairSeatDecision.JOIN, placed, table, seatIndex);
         }
-        return true;
+        return new ChairSeatTarget(ChairSeatDecision.NO_SEAT, null, null, -1);
     }
 
     /**
-     * 判断这把椅子是不是这张牌桌自己生成的
-     * 沿载具链往上找，CE 家具的子实体也算归属。
-     * @param placed 已放置的牌桌
-     * @param entity 待判定的实体
-     * @return 属于这张桌返回 true
+     * 报告每把椅子被右键时会走哪条分支
+     * @param tableName 牌桌名
+     * @return 每把椅子一行描述
      */
+    public List<String> describeChairSeatDecisions(String tableName) {
+        PlacedTable placed = placedTable(tableName);
+        if (placed == null) {
+            return List.of();
+        }
+        List<String> lines = new ArrayList<>();
+        for (int index = 0; index < 3; index++) {
+            Vector chairAdjustment = chairVisualAdjustment(index);
+            Location chairLocation = rotate(
+                placed.anchor(),
+                placed.yaw(),
+                chairOffsets(index)[0] + chairAdjustment.x(),
+                plugin.getChairBaseHeight() + chairAdjustment.y(),
+                chairOffsets(index)[1] + chairAdjustment.z()
+            );
+            if (!chairLocation.getWorld().isChunkLoaded(
+                chairLocation.getBlockX() >> 4,
+                chairLocation.getBlockZ() >> 4
+            )) {
+                lines.add("椅子" + (index + 1) + " 右键分支: 区块未加载，测不了");
+                continue;
+            }
+            List<String> perEntity = new ArrayList<>();
+            for (Entity nearby : chairLocation.getWorld().getNearbyEntities(chairLocation, 0.9, 1.7, 0.9)) {
+                if (!isLikelyFurnitureEntity(nearby)) {
+                    continue;
+                }
+                ChairSeatTarget target = resolveChairSeatTarget(nearby);
+                if (target == null) {
+                    continue;
+                }
+                perEntity.add(String.format(
+                    "%s=%s(座位%s)",
+                    nearby.getType(),
+                    target.decision(),
+                    target.seatIndex() < 0 ? "-" : String.valueOf(target.seatIndex() + 1)
+                ));
+            }
+            lines.add("椅子" + (index + 1) + " 右键分支: "
+                + (perEntity.isEmpty() ? "没有椅子家具实体" : String.join(" ", perEntity)));
+        }
+        return lines;
+    }
+
     /**
      * 报告这把椅子登记在哪张牌桌名下，用于排查相邻牌桌串座
      * @param entity 椅子实体
