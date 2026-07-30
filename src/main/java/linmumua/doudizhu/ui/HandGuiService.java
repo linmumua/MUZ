@@ -54,7 +54,7 @@ public final class HandGuiService {
         inventory.setItem(12, toggleItem(Material.SPYGLASS, "出牌对比", plugin.isOpponentPreviewEnabledFor(player.getUniqueId()), "选牌时顺带看上一手。"));
         inventory.setItem(14, item(Material.NOTE_BLOCK, "选牌音效 · " + selectionSoundDisplayLabel(plugin.getSelectionSoundProfile(plugin.getPlayerSelectionSoundProfileIndex(player.getUniqueId()))), List.of("点开切换方案。")));
         inventory.setItem(16, item(Material.COMMAND_BLOCK, "出牌动作", List.of("按牌型切换动作。")));
-        inventory.setItem(19, colorSettingItem(Material.OAK_SIGN, "预览色", playerPreviewColorDisplayLabel(player.getUniqueId()), plugin.previewGlowColorFor(player.getUniqueId()), List.of("鼠标指向牌或按钮时使用。")));
+        inventory.setItem(19, colorSettingItem(Material.OAK_SIGN, "预览色", playerPreviewColorDisplayLabel(player.getUniqueId()), plugin.previewGlowColorFor(player.getUniqueId()), List.of("鼠标指向牌时使用。")));
         inventory.setItem(21, colorSettingItem(Material.OAK_SIGN, "选中色", playerSelectionColorDisplayLabel(player.getUniqueId()), plugin.selectionGlowColorFor(player.getUniqueId()), List.of("已经预选的牌会使用这个颜色。")));
         inventory.setItem(23, noteItem(Material.BOOK, "恢复默认", List.of("清空个人偏好。")));
         inventory.setItem(25, closeItem());
@@ -236,7 +236,7 @@ public final class HandGuiService {
             }
             case DDZ_HOME -> {
                 inventory.setItem(19, item(Material.CARTOGRAPHY_TABLE, "桌椅摆位", List.of("桌子、椅子、整桌落点。")));
-                inventory.setItem(20, item(Material.STONE_BUTTON, "按钮布局", List.of("距离、弧度、悬停。")));
+                inventory.setItem(20, item(Material.STONE_BUTTON, "按钮布局", List.of("距离、高度、弧度。")));
                 inventory.setItem(21, item(Material.PAPER, "卡牌表现", List.of("手牌、预览牌、排布。")));
                 inventory.setItem(22, item(Material.OAK_SIGN, "桌面文字", List.of("状态栏、上一手、加入/操作按钮文字。")));
                 inventory.setItem(23, item(Material.NAME_TAG, "牌面标签", List.of("点数标签与重复牌显示。")));
@@ -248,7 +248,7 @@ public final class HandGuiService {
                 inventory.setItem(33, item(Material.ENDER_EYE, "AI 配置", List.of("DeepSeek、全局人设词、调试入口。")));
             }
             case GLOBAL_HOME -> {
-                inventory.setItem(20, item(Material.COMPARATOR, "动画节奏", List.of("牌和按钮的动画。")));
+                inventory.setItem(20, item(Material.COMPARATOR, "动画节奏", List.of("牌的预览动画。")));
                 inventory.setItem(22, item(Material.SPECTRAL_ARROW, "高亮颜色", List.of("预览色、选中色。")));
                 inventory.setItem(24, item(Material.PLAYER_HEAD, "头像组件", List.of("顶栏头像、座位头像。")));
             }
@@ -298,8 +298,6 @@ public final class HandGuiService {
             case DDZ_BUTTONS -> {
                 inventory.setItem(10, adminSettingItem(Material.STONE_BUTTON, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE));
                 inventory.setItem(11, adminSettingItem(Material.LIGHT_WEIGHTED_PRESSURE_PLATE, DoudizhuPlugin.AdminSetting.BUTTON_HEIGHT));
-                inventory.setItem(14, adminSettingItem(Material.STONE_BUTTON, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_SCALE));
-                inventory.setItem(15, adminSettingItem(Material.RABBIT_FOOT, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_LIFT));
                 inventory.setItem(19, adminSettingItem(Material.IRON_NUGGET, DoudizhuPlugin.AdminSetting.BUTTON_FRONT_BASE_DISTANCE));
                 inventory.setItem(20, adminSettingItem(Material.IRON_INGOT, DoudizhuPlugin.AdminSetting.BUTTON_SIDE_BASE_DISTANCE));
                 inventory.setItem(21, adminSettingItem(Material.REPEATER, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE_FACTOR));
@@ -332,8 +330,6 @@ public final class HandGuiService {
             case GLOBAL_ANIMATION -> {
                 inventory.setItem(11, adminSettingItem(Material.COMPARATOR, DoudizhuPlugin.AdminSetting.HOVER_CARD_INTERPOLATION_TICKS));
                 inventory.setItem(13, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.HOVER_CARD_ANIMATION_TYPE));
-                inventory.setItem(15, adminSettingItem(Material.COMPARATOR, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_INTERPOLATION_TICKS));
-                inventory.setItem(17, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_ANIMATION_TYPE));
                 inventory.setItem(22, noteItem(Material.BOOK, "调节提示", List.of(
                     "可切换线性、缓出、缓入缓出、回弹。",
                     "时长越大越柔和。"
@@ -1459,7 +1455,7 @@ public final class HandGuiService {
                 "外观替换与摆位微调。"
             );
             case DDZ_BUTTONS -> List.of(
-                "按钮距离、高度与悬停。"
+                "按钮距离、高度与弧线排布。"
             );
             case DDZ_CARDS -> List.of(
                 "卡牌尺寸、间距与整体排布。"
@@ -1614,10 +1610,6 @@ public final class HandGuiService {
             case HOVER_CARD_LIFT -> "看向手牌时上浮多少。";
             case HOVER_CARD_INTERPOLATION_TICKS -> "手牌预览动画的过渡时长。";
             case HOVER_CARD_ANIMATION_TYPE -> "手牌预览动画使用哪种速度曲线。";
-            case HOVER_BUTTON_SCALE -> "看向按钮时的放大倍数。";
-            case HOVER_BUTTON_LIFT -> "看向按钮时上浮多少。";
-            case HOVER_BUTTON_INTERPOLATION_TICKS -> "按钮预览动画的过渡时长。";
-            case HOVER_BUTTON_ANIMATION_TYPE -> "按钮预览动画使用哪种速度曲线。";
             case HAND_SPACING -> "一排手牌之间的左右间距。";
             case PUBLIC_TRICK_SPACING -> "桌中间预览牌之间的间距。";
             case PUBLIC_PREVIEW_ROW_DEPTH_SPACING -> "预览牌多排时前后错开的程度。";
@@ -1629,7 +1621,7 @@ public final class HandGuiService {
             case GLOBAL_HAND_LATERAL -> "三家的手牌一起左右平移。";
             case GLOBAL_HAND_VERTICAL -> "三家的手牌一起上下平移。";
             case GLOBAL_HAND_DEPTH -> "三家的手牌一起朝桌心或远离桌心。";
-            case HOVER_GLOW_ENABLED -> "鼠标指向牌或按钮时是否发光。";
+            case HOVER_GLOW_ENABLED -> "鼠标指向牌时是否发光。";
             case HOVER_GLOW_RED -> "预览发光颜色的红色通道。";
             case HOVER_GLOW_GREEN -> "预览发光颜色的绿色通道。";
             case HOVER_GLOW_BLUE -> "预览发光颜色的蓝色通道。";

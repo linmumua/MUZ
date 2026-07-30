@@ -26,6 +26,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Location;
@@ -55,19 +56,12 @@ public final class PhysicalTableManager {
     private static final String PROTECTED_ENTITY_TAG = "muz_table_protected";
     private static final MiniMessage MINI = MiniMessage.miniMessage();
     private static final float DEFAULT_PRIVATE_CARD_RENDER_SCALE = 0.50f;
-    // 按钮判定框按文字缩放推算。图标删掉后玩家点的就是文字，
-    // 判定框得贴合文字，不再单独配宽高。
-    private static final float LABEL_HITBOX_WIDTH_FACTOR = 1.15f;
-    private static final float LABEL_HITBOX_HEIGHT_FACTOR = 0.85f;
-    private static final float MIN_LABEL_HITBOX_WIDTH = 0.12f;
-    private static final float MIN_LABEL_HITBOX_HEIGHT = 0.16f;
-    // 上限是实测边界：判定框接近 1 格就会盖住 CraftEngine 椅子的坐下 hitbox。
-    private static final float MAX_LABEL_HITBOX_WIDTH = 0.55f;
-    private static final float MAX_LABEL_HITBOX_HEIGHT = 0.75f;
     private static final float DEFAULT_PUBLIC_CARD_RENDER_SCALE = 0.58f;
     private static final int CARD_HOVER_GRACE_TICKS = 2;
     private static final int CARD_HOVER_SWITCH_TICKS = 1;
-    private static final int ACTION_HOVER_GRACE_TICKS = 2;
+    private static final float TEXT_DISPLAY_PIXELS_PER_BLOCK = 40.0f;
+    private static final int DEFAULT_FONT_LINE_HEIGHT_PIXELS = 9;
+    private static final double MAX_ACTION_INTERACTION_DISTANCE = 3.0;
     private long playDetailLastRefreshBucket = Long.MIN_VALUE;
     private final DoudizhuPlugin plugin;
     private final Map<String, PlacedTable> placedTables = new LinkedHashMap<>();
@@ -80,14 +74,6 @@ public final class PhysicalTableManager {
     private final Map<UUID, Integer> hoverGraceTicksByViewer = new LinkedHashMap<>();
     private final Map<UUID, Map<Integer, Float>> hoverProgressByPlayer = new LinkedHashMap<>();
     private final Map<UUID, Map<Integer, Float>> selectedProgressByPlayer = new LinkedHashMap<>();
-    private final Map<UUID, UUID> hoveredActionDisplayByViewer = new LinkedHashMap<>();
-    private final Map<UUID, Integer> actionHoverGraceTicksByViewer = new LinkedHashMap<>();
-    private final Map<UUID, Float> actionHoverProgressByDisplay = new LinkedHashMap<>();
-    private final Map<UUID, UUID> actionDisplayByBinding = new LinkedHashMap<>();
-    private final Set<UUID> actionDisplayIds = new LinkedHashSet<>();
-    // 记下已经登记过 hover 的椅子实体，按桌分组。
-    // 不能靠按坐标扫描来撤映射：区块一卸载就扫不到，映射会永久残留。
-    private final Map<String, Set<UUID>> chairHoverIdsByTable = new LinkedHashMap<>();
     private final Map<String, String> actionSignatureByTable = new LinkedHashMap<>();
     private final Map<String, String> publicSignatureByTable = new LinkedHashMap<>();
     private final Map<String, Map<UUID, String>> privateHandSignatureByTable = new LinkedHashMap<>();
@@ -385,29 +371,22 @@ public final class PhysicalTableManager {
             return "玩家交互状态: 牌桌不存在";
         }
         int seatIndex = placedSeatIndex(placed, player.getUniqueId());
-        Entity target = actionHoverTarget(player);
+        Entity target = actionTarget(player);
         ActionBinding targetBinding = target == null ? null : actionBindings.get(target.getUniqueId());
-        UUID hoverDisplayId = hoveredActionDisplayByViewer.get(player.getUniqueId());
-        float hoverProgress = hoverDisplayId == null
-            ? 0.0f
-            : actionHoverProgressByDisplay.getOrDefault(hoverDisplayId, 0.0f);
-        double lift = 0.0;
-        Entity hoverEntity = hoverDisplayId == null ? null : Bukkit.getEntity(hoverDisplayId);
-        if (hoverEntity instanceof Display display) {
-            lift = display.getTransformation().getTranslation().y() - baseTranslationOf(display).y();
-        }
+        double targetDistance = target == null
+            ? Double.NaN
+            : Math.sqrt(distanceSquaredToBoundingBox(player.getEyeLocation(), target.getBoundingBox()));
         String targetText = target == null
             ? "无"
             : target.getType() + (targetBinding == null ? "" : "/" + targetBinding.action());
         return String.format(
-            "玩家交互状态: 入桌=%s 座位=%s 坐下=%s 目标=%s hover=%s 进度=%.2f 抬升=%.3f 准备=%s",
+            "玩家交互状态: 入桌=%s 座位=%s 坐下=%s 目标=%s 距离=%s 可点击=%s 准备=%s",
             table.getSeats().contains(player.getUniqueId()),
             seatIndex < 0 ? "-" : String.valueOf(seatIndex + 1),
             player.getVehicle() != null,
             targetText,
-            hoverDisplayId == null ? "否" : "是",
-            hoverProgress,
-            lift,
+            Double.isNaN(targetDistance) ? "-" : String.format("%.2f", targetDistance),
+            target != null && targetDistance <= MAX_ACTION_INTERACTION_DISTANCE,
             table.isReady(player.getUniqueId())
         );
     }
@@ -876,7 +855,6 @@ public final class PhysicalTableManager {
             }
         }
         clearHover(viewer.getUniqueId());
-        clearActionHover(viewer.getUniqueId());
         actionSignatureByTable.clear();
         publicSignatureByTable.clear();
         privateHandSignatureByTable.clear();
@@ -956,7 +934,10 @@ public final class PhysicalTableManager {
 
         ActionBinding binding = actionBindings.get(entity.getUniqueId());
         if (binding != null) {
-            clearActionHoverNow(player.getUniqueId());
+            if (!isWithinActionInteractionRange(player, entity)) {
+                hint(player, "靠近一点再点击。", NamedTextColor.YELLOW);
+                return true;
+            }
             GameTable table = plugin.getTableManager().getTable(binding.tableName());
             if (table == null) {
                 return true;
@@ -1075,12 +1056,6 @@ public final class PhysicalTableManager {
             hoverGraceTicksByViewer.clear();
             hoverProgressByPlayer.clear();
             selectedProgressByPlayer.clear();
-            hoveredActionDisplayByViewer.clear();
-            actionHoverGraceTicksByViewer.clear();
-            actionHoverProgressByDisplay.clear();
-            actionDisplayByBinding.clear();
-            actionDisplayIds.clear();
-            chairHoverIdsByTable.clear();
             actionSignatureByTable.clear();
             publicSignatureByTable.clear();
             privateHandSignatureByTable.clear();
@@ -1095,12 +1070,6 @@ public final class PhysicalTableManager {
         cardBindings.clear();
         // reload 走的是这条分支。漏掉这几张表会让 hover 映射越reload越多，
         // 并且残留条目指向已删除的实体。
-        actionDisplayByBinding.clear();
-        actionDisplayIds.clear();
-        chairHoverIdsByTable.clear();
-        hoveredActionDisplayByViewer.clear();
-        actionHoverGraceTicksByViewer.clear();
-        actionHoverProgressByDisplay.clear();
     }
 
     private void ensureWorldVisualsReady(String action) {
@@ -1131,13 +1100,10 @@ public final class PhysicalTableManager {
         for (Player viewer : Bukkit.getOnlinePlayers()) {
             GameTable table = plugin.getTableManager().getTableOf(viewer);
             if (table == null) {
-                // 没坐下的玩家也要有按钮悬停效果，否则空位的椅子点不出反馈。
                 clearHover(viewer.getUniqueId());
-                updateActionHoverState(viewer);
                 continue;
             }
             updateHoverState(table, viewer);
-            updateActionHoverState(viewer);
             PlacedTable placed = placedTable(table.getName());
             if (placed != null) {
                 updatePrivateSelection(table, placed, viewer.getUniqueId());
@@ -1145,7 +1111,6 @@ public final class PhysicalTableManager {
                 updateViewerPreviewEntities(table, placed, viewer.getUniqueId());
             }
         }
-        updateActionHoverAnimations();
         long bucket = System.currentTimeMillis() / 2000L;
         if (bucket != playDetailLastRefreshBucket) {
             playDetailLastRefreshBucket = bucket;
@@ -1172,6 +1137,10 @@ public final class PhysicalTableManager {
             return false;
         }
         if (target.decision() != ChairSeatDecision.JOIN) {
+            return true;
+        }
+        if (!isWithinActionInteractionRange(player, entity)) {
+            hint(player, "靠近一点再点击。", NamedTextColor.YELLOW);
             return true;
         }
         try {
@@ -1219,6 +1188,9 @@ public final class PhysicalTableManager {
         if (!isChairFurnitureEntity(entity.getUniqueId())) {
             return null;
         }
+        List<ChairSeatTarget> candidates = new ArrayList<>();
+        List<Double> distancesSquared = new ArrayList<>();
+        Set<Integer> ownedCandidates = new LinkedHashSet<>();
         for (PlacedTable placed : placedTables.values()) {
             int seatIndex = nearestChairSeatIndex(entity, placed);
             if (seatIndex < 0) {
@@ -1230,9 +1202,40 @@ public final class PhysicalTableManager {
                 table != null,
                 placed.seatAssignments().keySet()
             );
-            return new ChairSeatTarget(decision, placed, table, seatIndex);
+            int candidateIndex = candidates.size();
+            candidates.add(new ChairSeatTarget(decision, placed, table, seatIndex));
+            distancesSquared.add(entity.getLocation().distanceSquared(chairLocation(placed, seatIndex)));
+            if (ownsChairEntity(placed, entity)) {
+                ownedCandidates.add(candidateIndex);
+            }
         }
-        return new ChairSeatTarget(ChairSeatDecision.NO_SEAT, null, null, -1);
+        int candidateIndex = closestChairCandidateIndex(distancesSquared, ownedCandidates);
+        return candidateIndex < 0
+            ? new ChairSeatTarget(ChairSeatDecision.NO_SEAT, null, null, -1)
+            : candidates.get(candidateIndex);
+    }
+
+    /**
+     * 真实家具实体优先按登记归属路由；独立的虚拟 hitbox 没有归属时，选择最近的椅子。
+     */
+    static int closestChairCandidateIndex(List<Double> distancesSquared, Set<Integer> ownedCandidates) {
+        if (distancesSquared == null || distancesSquared.isEmpty()) {
+            return -1;
+        }
+        boolean requireOwned = ownedCandidates != null && !ownedCandidates.isEmpty();
+        int closestIndex = -1;
+        double closestDistance = Double.POSITIVE_INFINITY;
+        for (int index = 0; index < distancesSquared.size(); index++) {
+            if (requireOwned && !ownedCandidates.contains(index)) {
+                continue;
+            }
+            Double distance = distancesSquared.get(index);
+            if (distance != null && Double.isFinite(distance) && distance < closestDistance) {
+                closestIndex = index;
+                closestDistance = distance;
+            }
+        }
+        return closestIndex;
     }
 
     /**
@@ -1294,14 +1297,13 @@ public final class PhysicalTableManager {
                     continue;
                 }
                 perEntity.add(String.format(
-                    "%s=%s(座位%s 判给%s hover=%s)",
+                    "%s=%s(座位%s 判给%s)",
                     nearby.getType(),
                     target.decision(),
                     target.seatIndex() < 0 ? "-" : String.valueOf(target.seatIndex() + 1),
                     target.placed() == null
                         ? "-"
-                        : (target.placed() == placed ? "本桌" : target.placed().tableName()),
-                    describeHoverMapping(nearby.getUniqueId(), placed)
+                        : (target.placed() == placed ? "本桌" : target.placed().tableName())
                 ));
             }
             lines.add("椅子" + (index + 1) + " 右键分支: "
@@ -1310,11 +1312,6 @@ public final class PhysicalTableManager {
         return lines;
     }
 
-    /**
-     * 报告这个实体的 hover 映射指向哪张桌的哪个座位
-     * 只说"已登记"不够：邻桌 hitbox 落进扫描范围时，它在邻桌名下本就合法，
-     * 必须看它指向谁才能判断有没有串座。
-     */
     /**
      * 报告判定框上下范围是否真的罩住了文字
      * 判定框从底边往上长，文字挂在配置高度上。两者错开的话玩家就点不到文字。
@@ -1333,30 +1330,13 @@ public final class PhysicalTableManager {
         return String.format("是(余量 %.3f)", margin);
     }
 
-    private String describeHoverMapping(UUID entityId, PlacedTable expected) {
-        UUID iconId = actionDisplayByBinding.get(entityId);
-        if (iconId == null) {
-            return "无";
-        }
-        for (PlacedTable placed : placedTables.values()) {
-            int slot = placed.actionEntities().indexOf(iconId);
-            if (slot < 0) {
-                continue;
-            }
-            String where = placed == expected ? "本桌" : placed.tableName();
-            return where + "槽" + (slot / 2 + 1);
-        }
-        return "指向已删除图标";
-    }
-
     /**
-     * 用无过滤射线模拟 updateActionHoverState 里的 getTargetEntity
-     * 之前的射线诊断都带 isLikelyFurnitureEntity 过滤，测不出真实 hover：
-     * 真实 hover 用的是无过滤射线，任何实体都可能抢先挡住。
+     * 用无过滤射线检查玩家视线最先命中的实体。
+     * 任何实体都可能挡在文字按钮前面，这项诊断会标出命中的是按钮还是遮挡物。
      * @param tableName 牌桌名
-     * @return 每个座位每个站位的首个命中实体及其 hover 映射状态
+     * @return 每个座位每个站位的首个命中实体及按钮绑定
      */
-    public List<String> describeUnfilteredHoverRays(String tableName) {
+    public List<String> describeUnfilteredActionRays(String tableName) {
         PlacedTable placed = placedTable(tableName);
         if (placed == null) {
             return List.of();
@@ -1405,7 +1385,7 @@ public final class PhysicalTableManager {
                 );
                 stances.add(distance + "格=" + describeUnfilteredHit(hit, placed));
             }
-            lines.add("座位" + (index + 1) + " 无过滤射线: " + String.join(" ", stances));
+            lines.add("座位" + (index + 1) + " 按钮射线: " + String.join(" ", stances));
         }
         return lines;
     }
@@ -1415,10 +1395,12 @@ public final class PhysicalTableManager {
             return "没命中";
         }
         Entity entity = hit.getHitEntity();
-        UUID iconId = actionDisplayByBinding.get(entity.getUniqueId());
-        return entity.getType() + (iconId == null
-            ? "[抬不起来]"
-            : "[会抬" + describeHoverMapping(entity.getUniqueId(), placed) + "]");
+        ActionBinding binding = actionBindings.get(entity.getUniqueId());
+        if (binding == null) {
+            return entity.getType() + "[遮挡物]";
+        }
+        String where = binding.tableName().equalsIgnoreCase(placed.tableName()) ? "本桌" : binding.tableName();
+        return entity.getType() + "[" + where + "/" + binding.action() + "]";
     }
 
     /**
@@ -1491,13 +1473,6 @@ public final class PhysicalTableManager {
     }
 
     /**
-     * 报告 hover 映射条数，用于排查拆桌后椅子映射是否泄漏
-     * @return 当前登记的 hover 映射数量
-     */
-    public int hoverMappingCount() {        return actionDisplayByBinding.size();
-    }
-
-    /**
      * 报告这把椅子登记在哪张牌桌名下，用于排查相邻牌桌串座
      * @param entity 椅子实体
      * @param expectedTable 当前正在查看的牌桌名
@@ -1534,34 +1509,22 @@ public final class PhysicalTableManager {
     private int nearestChairSeatIndex(Entity entity, PlacedTable placed) {
         Location location = entity.getLocation();
         for (int index = 0; index < 3; index++) {
-            Vector chairAdjustment = chairVisualAdjustment(index);
-            Location chairLocation = rotate(
-                placed.anchor(),
-                placed.yaw(),
-                chairOffsets(index)[0] + chairAdjustment.x(),
-                plugin.getChairBaseHeight() + chairAdjustment.y(),
-                chairOffsets(index)[1] + chairAdjustment.z()
-            );
-            if (nearExpectedLocation(location, chairLocation, 0.85, 1.60)) {
+            if (nearExpectedLocation(location, chairLocation(placed, index), 0.85, 1.60)) {
                 return index;
             }
         }
         return -1;
     }
 
-    /**
-     * 判断某个座位的椅子该不该跟着 JOIN 图标一起 hover
-     * 椅子把按钮完全挡住了，射线永远先命中椅子。只有空位才需要这份映射：
-     * 座位有人时 JOIN 图标根本不存在，抬升无从谈起。
-     * @param seatIndex 椅子对应的座位下标，负数表示没解析出座位
-     * @param joinIconBySeat 空位座位号到 JOIN 图标实体的映射
-     * @return 该抬升的 JOIN 图标 id；这把椅子不该触发 hover 时返回 null
-     */
-    static UUID resolveChairHoverDisplay(int seatIndex, Map<Integer, UUID> joinIconBySeat) {
-        if (seatIndex < 0) {
-            return null;
-        }
-        return joinIconBySeat.get(seatIndex);
+    private Location chairLocation(PlacedTable placed, int seatIndex) {
+        Vector chairAdjustment = chairVisualAdjustment(seatIndex);
+        return rotate(
+            placed.anchor(),
+            placed.yaw(),
+            chairOffsets(seatIndex)[0] + chairAdjustment.x(),
+            plugin.getChairBaseHeight() + chairAdjustment.y(),
+            chairOffsets(seatIndex)[1] + chairAdjustment.z()
+        );
     }
 
     private void reconcileSeatAssignments(GameTable table, PlacedTable placed) {
@@ -2010,13 +1973,15 @@ public final class PhysicalTableManager {
         for (int index = 0; index < specs.size(); index++) {
             int base = index * 2;
             ActionWidgetSpec spec = specs.get(index);
+            float labelScale = spec.joinVisibility() ? joinLabelTextScale() : actionLabelTextScale();
             TextDisplay label = null;
             Interaction interaction = null;
             if (placed.actionEntities().size() >= base + 2) {
                 Entity labelEntity = Bukkit.getEntity(placed.actionEntities().get(base));
                 Entity interactionEntity = Bukkit.getEntity(placed.actionEntities().get(base + 1));
                 if (labelEntity instanceof TextDisplay existingLabel
-                    && interactionEntity instanceof Interaction existingInteraction) {
+                    && interactionEntity instanceof Interaction existingInteraction
+                    && buttonLabelScaleMatches(existingLabel, labelScale)) {
                     label = existingLabel;
                     interaction = existingInteraction;
                 }
@@ -2027,7 +1992,6 @@ public final class PhysicalTableManager {
                     clearActionMappings(List.of(removedId));
                     clearEntities(new ArrayList<>(List.of(removedId)), false);
                 }
-                float labelScale = spec.joinVisibility() ? joinLabelTextScale() : actionLabelTextScale();
                 label = spawnText(
                     spec.labelLocation(),
                     spec.labelText(),
@@ -2035,33 +1999,28 @@ public final class PhysicalTableManager {
                     false,
                     labelScale
                 );
-                float boxHeight = actionHitboxHeight(spec.binding(), labelScale);
+                float boxHeight = actionHitboxHeight(spec.labelText(), labelScale);
                 Location boxLocation = spec.interactionLocation().clone();
                 boxLocation.setY(hitboxBottomForLabel(boxLocation.getY(), boxHeight));
                 interaction = spawnInteraction(
                     boxLocation,
-                    actionHitboxWidth(spec.binding(), labelScale),
+                    actionHitboxWidth(spec.labelText(), labelScale),
                     boxHeight
                 );
                 placed.actionEntities().add(label.getUniqueId());
                 placed.actionEntities().add(interaction.getUniqueId());
             } else {
-                float labelScale = spec.joinVisibility() ? joinLabelTextScale() : actionLabelTextScale();
                 teleportIfMoved(label, spec.labelLocation());
                 updateTextEntity(label, spec.labelText());
-                float boxHeight = actionHitboxHeight(spec.binding(), labelScale);
+                float boxHeight = actionHitboxHeight(spec.labelText(), labelScale);
                 Location boxLocation = spec.interactionLocation().clone();
                 boxLocation.setY(hitboxBottomForLabel(boxLocation.getY(), boxHeight));
                 teleportIfMoved(interaction, boxLocation);
-                interaction.setInteractionWidth(actionHitboxWidth(spec.binding(), labelScale));
+                interaction.setInteractionWidth(actionHitboxWidth(spec.labelText(), labelScale));
                 interaction.setInteractionHeight(boxHeight);
             }
             actionBindings.put(label.getUniqueId(), spec.binding());
             actionBindings.put(interaction.getUniqueId(), spec.binding());
-            // 文字自己就是抬升目标。图标删掉后，hover 抬的是这个 TextDisplay。
-            rememberActionVisual(label.getUniqueId(), label.getUniqueId());
-            // 判定框也必须登记。玩家射线几乎总是先命中它，漏掉这行 hover 就永远不触发。
-            rememberActionVisual(interaction.getUniqueId(), label.getUniqueId());
             if (spec.joinVisibility()) {
                 applyJoinVisibility(table, label);
                 applyJoinVisibility(table, interaction);
@@ -2082,7 +2041,7 @@ public final class PhysicalTableManager {
             // 沿用既有策略：隐藏而不删除，阶段切回来时能直接复用这些实体。
             deactivateEntities(stale);
         }
-        registerChairHoverTargets(placed, specs);
+        syncOccupiedChairHitboxVisibility(placed);
     }
 
     /**
@@ -2096,116 +2055,6 @@ public final class PhysicalTableManager {
      */
     static int staleActionEntityCount(int stored, int required) {
         return Math.max(0, stored - required);
-    }
-
-    /**
-     * 把空位椅子登记到对应的 JOIN 图标上
-     * 椅子离桌 3.1 格、按钮 2.01 格，椅子把按钮完全挡住，玩家射线永远先命中椅子。
-     * 不登记椅子，hover 抬升就永远没机会触发。
-     */
-    private void registerChairHoverTargets(PlacedTable placed, List<ActionWidgetSpec> specs) {
-        // 先撤掉这张桌子上所有椅子的旧映射：座位一旦有人，JOIN 图标就没了，
-        // 留着映射会让 hover 指向已删除的实体。
-        clearChairHoverTargets(placed);
-        Map<Integer, UUID> joinIconBySeat = new LinkedHashMap<>();
-        for (int index = 0; index < specs.size(); index++) {
-            ActionWidgetSpec spec = specs.get(index);
-            if (spec.binding().action() != ButtonAction.JOIN) {
-                continue;
-            }
-            int base = index * 2;
-            if (placed.actionEntities().size() < base + 1) {
-                continue;
-            }
-            joinIconBySeat.put(spec.binding().seatIndex(), placed.actionEntities().get(base));
-        }
-        syncOccupiedChairHitboxVisibility(placed);
-        if (joinIconBySeat.isEmpty()) {
-            return;
-        }
-        for (UUID visualId : placed.craftEngineVisualEntities()) {
-            Entity chair = Bukkit.getEntity(visualId);
-            if (chair == null) {
-                continue;
-            }
-            UUID iconId = resolveChairHoverDisplay(
-                nearestChairSeatIndex(chair, placed),
-                joinIconBySeat
-            );
-            if (iconId != null) {
-                rememberChairHover(placed, visualId, iconId);
-            }
-        }
-        registerChairHitboxHoverTargets(placed, joinIconBySeat);
-    }
-
-    /**
-     * 登记一个椅子实体的 hover 映射，同时记下 id 以便日后按 id 撤销
-     */
-    private void rememberChairHover(PlacedTable placed, UUID chairId, UUID iconId) {
-        actionDisplayByBinding.put(chairId, iconId);
-        chairHoverIdsByTable
-            .computeIfAbsent(normalize(placed.tableName()), key -> new LinkedHashSet<>())
-            .add(chairId);
-    }
-
-    /**
-     * 撤掉这张桌子所有椅子的 hover 映射
-     * 按记录的 id 撤，不按坐标扫。区块卸载时坐标扫不到实体，映射会永久残留。
-     */
-    private void clearChairHoverTargets(PlacedTable placed) {
-        Set<UUID> tracked = chairHoverIdsByTable.remove(normalize(placed.tableName()));
-        if (tracked == null) {
-            return;
-        }
-        for (UUID chairId : tracked) {
-            actionDisplayByBinding.remove(chairId);
-        }
-    }
-
-    /**
-     * 把 CraftEngine 椅子的 interaction hitbox 也登记到 JOIN 图标上
-     * CE 的 hitbox 是独立实体，不挂在家具载具链上，所以不在 craftEngineVisualEntities 里。
-     * 而 getTargetEntity 命中的恰恰是它，漏掉这步 hover 依然不触发。
-     */
-    private void registerChairHitboxHoverTargets(PlacedTable placed, Map<Integer, UUID> joinIconBySeat) {
-        for (int index = 0; index < 3; index++) {
-            UUID iconId = joinIconBySeat.get(index);
-            if (iconId == null) {
-                continue;
-            }
-            Vector chairAdjustment = chairVisualAdjustment(index);
-            Location chairLocation = rotate(
-                placed.anchor(),
-                placed.yaw(),
-                chairOffsets(index)[0] + chairAdjustment.x(),
-                plugin.getChairBaseHeight() + chairAdjustment.y(),
-                chairOffsets(index)[1] + chairAdjustment.z()
-            );
-            if (!chairLocation.getWorld().isChunkLoaded(
-                chairLocation.getBlockX() >> 4,
-                chairLocation.getBlockZ() >> 4
-            )) {
-                continue;
-            }
-            for (Entity nearby : chairLocation.getWorld().getNearbyEntities(chairLocation, 0.9, 1.7, 0.9)) {
-                // 只认椅子自己的 hitbox。按钮的 interaction 已经单独登记过，
-                // 而且它带 actionBindings，重复登记会盖掉正确映射。
-                if (!(nearby instanceof Interaction) || actionBindings.containsKey(nearby.getUniqueId())) {
-                    continue;
-                }
-                if (nearestChairSeatIndex(nearby, placed) != index) {
-                    continue;
-                }
-                // 牌桌挨得近时，邻桌椅子的 hitbox 也会落进扫描范围。
-                // 实测两桌相距 3.2 格就会串座：本桌椅子2 会抬起邻桌座位3 的图标。
-                // 所以还要确认这个 hitbox 离本桌这把椅子最近。
-                if (!closestChairIsThisTable(nearby, placed, chairLocation)) {
-                    continue;
-                }
-                rememberChairHover(placed, nearby.getUniqueId(), iconId);
-            }
-        }
     }
 
     /**
@@ -2237,6 +2086,9 @@ public final class PhysicalTableManager {
                     continue;
                 }
                 if (nearestChairSeatIndex(nearby, placed) != index) {
+                    continue;
+                }
+                if (!closestChairIsThisTable(nearby, placed, chairLocation)) {
                     continue;
                 }
                 for (Player viewer : chairLocation.getWorld().getPlayers()) {
@@ -2975,7 +2827,6 @@ public final class PhysicalTableManager {
     private void clearEntities(List<UUID> entityIds, boolean publicCards) {
         for (UUID entityId : entityIds) {
             actionBindings.remove(entityId);
-            actionDisplayByBinding.remove(entityId);
             cardBindings.remove(entityId);
             Entity entity = Bukkit.getEntity(entityId);
             if (entity != null) {
@@ -2988,9 +2839,6 @@ public final class PhysicalTableManager {
     }
 
     private void cleanupPlacedTable(PlacedTable placed) {
-        // 必须在 clearCraftEngineEntities 之前撤映射：它会清空 craftEngineVisualEntities，
-        // 之后就再也找不到这些椅子，hover 映射会永久残留。
-        clearChairHoverTargets(placed);
         clearCraftEngineEntities(placed.craftEngineVisualEntities());
         String tableKey = normalize(placed.tableName());
         actionSignatureByTable.remove(tableKey);
@@ -3083,17 +2931,14 @@ public final class PhysicalTableManager {
     /**
      * 判断某个实体是否仍是某张牌桌在用的按钮部件
      * 清场按坐标扫，扫到的可能是邻桌的按钮。凡是还登记在 actionBindings
-     * 或 hover 映射里的，都说明有牌桌正在用它，不能删。
+     * 或 cardBindings 里的，都说明有牌桌正在用它，不能删。
      * @param entityId 实体 id
      * @return 仍被追踪时返回 true
      */
     private boolean isTrackedActionEntity(UUID entityId) {
         // 手牌也得算进来。手牌离桌 1.62 格、按钮 2.01 格，只差 0.39 格，
         // 面对面摆放且桌间距 2.7~4.6 格时，A 的按钮热点会扫到 B 的手牌。
-        if (actionBindings.containsKey(entityId)
-            || actionDisplayByBinding.containsKey(entityId)
-            || actionDisplayIds.contains(entityId)
-            || cardBindings.containsKey(entityId)) {
+        if (actionBindings.containsKey(entityId) || cardBindings.containsKey(entityId)) {
             return true;
         }
         // bot 没有在线 Player，只生成给旁观者看的背面牌，不会进入 cardBindings。
@@ -3498,18 +3343,6 @@ public final class PhysicalTableManager {
         display.setInterpolationDuration(Math.max(2, Math.min(4, plugin.getCardHoverInterpolationTicks() / 2)));
         // IMPORTANT REGRESSION GUARD:
         // Card teleports must not interpolate, otherwise click/hover refreshes can look like a rotate-and-rebound bug.
-        try {
-            display.setTeleportDuration(0);
-        } catch (NoSuchMethodError e) {
-            // 1.20.1 不支持 setTeleportDuration，忽略
-        }
-    }
-
-    private void configureButtonAnimation(Display display) {
-        display.setInterpolationDelay(0);
-        display.setInterpolationDuration(Math.max(2, Math.min(4, plugin.getButtonHoverInterpolationTicks() / 2)));
-        // IMPORTANT REGRESSION GUARD:
-        // Buttons share the same client interpolation pitfall as cards; keep teleport interpolation disabled.
         try {
             display.setTeleportDuration(0);
         } catch (NoSuchMethodError e) {
@@ -4658,124 +4491,158 @@ public final class PhysicalTableManager {
         hoverProgressByPlayer.remove(playerId);
     }
 
-    private Entity actionHoverTarget(Player viewer) {
-        Entity target = viewer.getTargetEntity(6);
-        if (target != null && viewer.canSee(target)) {
-            return target;
-        }
+    private Entity actionTarget(Player viewer) {
         org.bukkit.util.RayTraceResult hit = viewer.getWorld().rayTraceEntities(
             viewer.getEyeLocation(),
             viewer.getEyeLocation().getDirection(),
-            6.0,
+            MAX_ACTION_INTERACTION_DISTANCE,
             0.0,
-            entity -> viewer.canSee(entity) && actionDisplayByBinding.containsKey(entity.getUniqueId())
+            entity -> viewer.canSee(entity) && actionBindings.containsKey(entity.getUniqueId())
         );
         return hit == null ? null : hit.getHitEntity();
     }
 
-    private void updateActionHoverState(Player viewer) {
-        Entity target = actionHoverTarget(viewer);
-        UUID displayId = resolveHoverDisplay(
-            actionDisplayByBinding,
-            target == null ? null : target.getUniqueId()
+    private boolean isWithinActionInteractionRange(Player player, Entity entity) {
+        if (player == null || entity == null || !player.getWorld().equals(entity.getWorld())) {
+            return false;
+        }
+        double distanceSquared = distanceSquaredToBoundingBox(player.getEyeLocation(), entity.getBoundingBox());
+        return isWithinActionInteractionRange(distanceSquared);
+    }
+
+    static boolean isWithinActionInteractionRange(double distanceSquared) {
+        return distanceSquared <= MAX_ACTION_INTERACTION_DISTANCE * MAX_ACTION_INTERACTION_DISTANCE;
+    }
+
+    private static double distanceSquaredToBoundingBox(Location point, org.bukkit.util.BoundingBox box) {
+        return distanceSquaredToBox(
+            point.getX(),
+            point.getY(),
+            point.getZ(),
+            box.getMinX(),
+            box.getMinY(),
+            box.getMinZ(),
+            box.getMaxX(),
+            box.getMaxY(),
+            box.getMaxZ()
         );
-        UUID previous = hoveredActionDisplayByViewer.get(viewer.getUniqueId());
-        if (Objects.equals(previous, displayId)) {
-            if (displayId != null) {
-                actionHoverGraceTicksByViewer.remove(viewer.getUniqueId());
+    }
+
+    static double distanceSquaredToBox(
+        double x,
+        double y,
+        double z,
+        double minX,
+        double minY,
+        double minZ,
+        double maxX,
+        double maxY,
+        double maxZ
+    ) {
+        double dx = x < minX ? minX - x : Math.max(0.0, x - maxX);
+        double dy = y < minY ? minY - y : Math.max(0.0, y - maxY);
+        double dz = z < minZ ? minZ - z : Math.max(0.0, z - maxZ);
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static boolean buttonLabelScaleMatches(TextDisplay label, float expectedScale) {
+        Vector3f scale = label.getTransformation().getScale();
+        return buttonLabelScaleMatches(scale.x(), scale.y(), scale.z(), expectedScale);
+    }
+
+    static boolean buttonLabelScaleMatches(float scaleX, float scaleY, float scaleZ, float expectedScale) {
+        return Math.abs(scaleX - expectedScale) <= 1.0E-4f
+            && Math.abs(scaleY - expectedScale) <= 1.0E-4f
+            && Math.abs(scaleZ - expectedScale) <= 1.0E-4f;
+    }
+
+    private float actionHitboxWidth(Component label, float labelScale) {
+        return resolveHitboxWidth(label, labelScale);
+    }
+
+    /**
+     * 按实际文字像素宽度和 TextDisplay 缩放计算判定框宽度。
+     * Minecraft 的 TextDisplay 以 40 像素对应 1 格；不额外加边距、倍率或最小尺寸。
+     */
+    static float resolveHitboxWidth(Component label, float labelScale) {
+        String text = PlainTextComponentSerializer.plainText().serialize(label == null ? Component.empty() : label);
+        boolean bold = label != null && label.decoration(TextDecoration.BOLD) == TextDecoration.State.TRUE;
+        return resolveHitboxWidth(text, labelScale, bold);
+    }
+
+    static float resolveHitboxWidth(String text, float labelScale, boolean bold) {
+        int pixels = Math.max(1, textPixelWidth(text, bold));
+        return pixels * Math.max(0.0f, labelScale) / TEXT_DISPLAY_PIXELS_PER_BLOCK;
+    }
+
+    private float actionHitboxHeight(Component label, float labelScale) {
+        return resolveHitboxHeight(label, labelScale);
+    }
+
+    /**
+     * 按实际文本行数和默认字体 9 像素行高计算判定框高度。
+     */
+    static float resolveHitboxHeight(Component label, float labelScale) {
+        String text = PlainTextComponentSerializer.plainText().serialize(label == null ? Component.empty() : label);
+        return resolveHitboxHeight(text, labelScale);
+    }
+
+    static float resolveHitboxHeight(String text, float labelScale) {
+        int lineCount = 1;
+        if (text != null) {
+            for (int index = 0; index < text.length(); index++) {
+                if (text.charAt(index) == '\n') {
+                    lineCount++;
+                }
             }
-            return;
         }
-        if (displayId == null) {
-            // IMPORTANT REGRESSION GUARD:
-            // Button hover should also clear immediately, otherwise lift/glow lingers after the cursor leaves.
-            actionHoverGraceTicksByViewer.remove(viewer.getUniqueId());
-            hoveredActionDisplayByViewer.remove(viewer.getUniqueId());
-            return;
+        return lineCount * DEFAULT_FONT_LINE_HEIGHT_PIXELS * Math.max(0.0f, labelScale)
+            / TEXT_DISPLAY_PIXELS_PER_BLOCK;
+    }
+
+    static int textPixelWidth(String text, boolean bold) {
+        if (text == null || text.isEmpty()) {
+            return 0;
         }
-        actionHoverGraceTicksByViewer.remove(viewer.getUniqueId());
-        hoveredActionDisplayByViewer.put(viewer.getUniqueId(), displayId);
-    }
-
-    private void clearActionHover(UUID viewerId) {
-        hoveredActionDisplayByViewer.remove(viewerId);
-        actionHoverGraceTicksByViewer.remove(viewerId);
-    }
-
-    private void clearActionHoverNow(UUID viewerId) {
-        UUID displayId = hoveredActionDisplayByViewer.remove(viewerId);
-        actionHoverGraceTicksByViewer.remove(viewerId);
-        if (displayId == null) {
-            return;
+        int widest = 0;
+        int current = 0;
+        for (int index = 0; index < text.length();) {
+            int codePoint = text.codePointAt(index);
+            index += Character.charCount(codePoint);
+            if (codePoint == '\n') {
+                widest = Math.max(widest, current);
+                current = 0;
+                continue;
+            }
+            int advance = glyphAdvancePixels(codePoint);
+            if (bold && codePoint != ' ') {
+                advance++;
+            }
+            current += advance;
         }
-        actionHoverProgressByDisplay.remove(displayId);
-        Entity entity = Bukkit.getEntity(displayId);
-        if (entity instanceof Display display) {
-            configureButtonAnimation(display);
-            display.setTransformation(buttonTransformation(display, actionBaseScale(display), 0.0f));
-            display.setGlowing(false);
-            display.setGlowColorOverride(null);
+        return Math.max(widest, current);
+    }
+
+    private static int glyphAdvancePixels(int codePoint) {
+        if (codePoint == ' ') {
+            return 4;
         }
-    }
-
-    /**
-     * 取出按钮文字平时该用的缩放
-     * 抬升动画要在这个基准上放大，不能写死一个常量：加入座位和普通动作按钮
-     * 的文字缩放是两个不同的配置项。
-     * @param display 按钮文字实体
-     * @return 该实体的基准缩放
-     */
-    private float actionBaseScale(Display display) {
-        UUID id = display.getUniqueId();
-        ActionBinding binding = actionBindings.get(id);
-        if (binding != null && binding.action() == ButtonAction.JOIN) {
-            return joinLabelTextScale();
+        if (codePoint > 0x7F) {
+            return 9;
         }
-        return actionLabelTextScale();
-    }
-
-    private float actionHitboxWidth(ActionBinding binding, float labelScale) {
-        return resolveHitboxWidth(binding == null ? null : binding.action(), labelScale);
-    }
-
-    /**
-     * 按文字缩放推算判定框宽度
-     * 图标删掉后玩家点的就是文字，判定框必须贴合文字而不是另设尺寸。
-     * 上限沿用实测过的边界：判定框一旦接近 1 格就会盖住 CraftEngine 椅子自带的
-     * 坐下 hitbox，玩家就再也坐不上椅子。
-     * @param action 按钮动作，null 表示无绑定
-     * @param labelScale 文字缩放
-     * @return 实际宽度
-     */
-    static float resolveHitboxWidth(ButtonAction action, float labelScale) {
-        // 文字是横排的，宽度按缩放放大一截才盖得住整串字。
-        float base = labelScale * LABEL_HITBOX_WIDTH_FACTOR;
-        if (action != null && isDoublingAction(action)) {
-            base *= 1.45f;
+        if ("!.,:;|'i".indexOf(codePoint) >= 0) {
+            return 2;
         }
-        return clamp(base, MIN_LABEL_HITBOX_WIDTH, MAX_LABEL_HITBOX_WIDTH);
-    }
-
-    private float actionHitboxHeight(ActionBinding binding, float labelScale) {
-        return resolveHitboxHeight(binding == null ? null : binding.action(), labelScale);
-    }
-
-    /**
-     * 按文字缩放推算判定框高度
-     * @param action 按钮动作，null 表示无绑定
-     * @param labelScale 文字缩放
-     * @return 实际高度
-     */
-    static float resolveHitboxHeight(ButtonAction action, float labelScale) {
-        float base = labelScale * LABEL_HITBOX_HEIGHT_FACTOR;
-        if (action != null && isDoublingAction(action)) {
-            base *= 1.55f;
+        if ("`l".indexOf(codePoint) >= 0) {
+            return 3;
         }
-        return clamp(base, MIN_LABEL_HITBOX_HEIGHT, MAX_LABEL_HITBOX_HEIGHT);
-    }
-
-    private static float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
+        if ("I[]t".indexOf(codePoint) >= 0) {
+            return 4;
+        }
+        if ("(){}<>fkr".indexOf(codePoint) >= 0) {
+            return 5;
+        }
+        return 6;
     }
 
     /**
@@ -4790,170 +4657,8 @@ public final class PhysicalTableManager {
         return labelY - boxHeight / 2.0;
     }
 
-    private static boolean isDoublingAction(ButtonAction action) {
-        return action == ButtonAction.DOUBLE_NO
-            || action == ButtonAction.DOUBLE_YES;
-    }
-
-    /**
-     * 把射线命中的实体换算成该抬升的图标实体
-     * 一个按钮由图标、文字、判定框三个实体组成，玩家射线通常命中的是判定框，
-     * 但要抬升的是图标。三者都必须映射到同一个图标，否则 hover 不触发。
-     * @param displayByBinding 绑定实体到图标实体的映射
-     * @param targetId 射线命中的实体 id，没命中传 null
-     * @return 该抬升的图标实体 id；命中的东西与按钮无关时返回 null
-     */
-    static UUID resolveHoverDisplay(Map<UUID, UUID> displayByBinding, UUID targetId) {
-        if (targetId == null) {
-            return null;
-        }
-        return displayByBinding.get(targetId);
-    }
-
-    private void rememberActionVisual(UUID bindingId, UUID displayId) {
-        actionDisplayByBinding.put(bindingId, displayId);
-        actionDisplayIds.add(displayId);
-    }
-
-    /**
-     * 算出按钮 hover 每 tick 的抬升步长
-     * @param interpolationTicks 配置的动画时长（tick）
-     * @return 每 tick 前进的进度量
-     */
-    /**
-     * 按 hover 进度算出按钮当前缩放
-     * @param baseScale 按钮平时的缩放
-     * @param hoverScale hover 到顶时的缩放倍率
-     * @param eased 已过缓动曲线的进度
-     * @return 当前该用的缩放
-     */
-    static float hoverButtonScale(float baseScale, float hoverScale, float eased) {
-        return baseScale * (1.0f + (hoverScale - 1.0f) * eased);
-    }
-
-    static float hoverRiseStep(int interpolationTicks) {
-        return 1.0f / Math.max(1, interpolationTicks);
-    }
-
-    /**
-     * 算出按钮 hover 的回落步长
-     * 回落比抬升快一些，鼠标移开时不拖尾。
-     * @param riseStep 抬升步长
-     * @return 每 tick 回落的进度量
-     */
-    static float hoverFallStep(float riseStep) {
-        return Math.min(1.0f, riseStep * 1.8f);
-    }
-
-    /**
-     * 推进单个按钮的 hover 进度
-     * @param current 当前进度
-     * @param hovered 本 tick 是否被指向
-     * @param riseStep 抬升步长
-     * @param fallStep 回落步长
-     * @return 推进后的进度，夹在 0 到 1 之间
-     */
-    static float stepHoverProgress(float current, boolean hovered, float riseStep, float fallStep) {
-        return hovered
-            ? Math.min(1.0f, current + riseStep)
-            : Math.max(0.0f, current - fallStep);
-    }
-
-    private void updateActionHoverAnimations() {
-        float riseStep = hoverRiseStep(plugin.getButtonHoverInterpolationTicks());
-        float fallStep = hoverFallStep(riseStep);
-        Set<UUID> activeDisplays = new LinkedHashSet<>(hoveredActionDisplayByViewer.values());
-        for (UUID displayId : new ArrayList<>(actionDisplayIds)) {
-            Entity entity = Bukkit.getEntity(displayId);
-            if (!(entity instanceof Display display)) {
-                actionHoverProgressByDisplay.remove(displayId);
-                continue;
-            }
-            float current = actionHoverProgressByDisplay.getOrDefault(displayId, 0.0f);
-            float next = stepHoverProgress(current, activeDisplays.contains(displayId), riseStep, fallStep);
-            if (Math.abs(next - current) < 0.0001f) {
-                if (next <= 0.0001f) {
-                    actionHoverProgressByDisplay.remove(displayId);
-                }
-                continue;
-            }
-            if (next <= 0.0001f) {
-                actionHoverProgressByDisplay.remove(displayId);
-            } else {
-                actionHoverProgressByDisplay.put(displayId, next);
-            }
-            float eased = applyCurve(next, plugin.buttonHoverAnimationCurve());
-            float scale = hoverButtonScale(actionBaseScale(display), plugin.getHoverButtonScale(), eased);
-            float lift = (float) (plugin.getHoverButtonLift() * eased);
-            configureButtonAnimation(display);
-            display.setTransformation(buttonTransformation(display, scale, lift));
-            UUID hoverViewer = hoveredActionDisplayByViewer.entrySet().stream()
-                .filter(entry -> displayId.equals(entry.getValue()))
-                .map(Map.Entry::getKey)
-                .findFirst()
-                .orElse(null);
-            if (hoverViewer != null && plugin.isHoverGlowEnabled()) {
-                display.setGlowing(true);
-                display.setGlowColorOverride(plugin.previewGlowColorFor(hoverViewer));
-            } else {
-                display.setGlowing(false);
-                display.setGlowColorOverride(null);
-            }
-        }
-    }
-
-    private Transformation buttonTransformation(Display display, float scale, float lift) {
-        // Buttons must stay stable during hover.
-        // 图标删掉后按钮只有文字，翻转角度没有意义，这里不再施加任何旋转。
-        // 抬升必须叠在文字的基准位移上：直接写 (0, lift, 0) 会抹掉
-        // TypewriterTextStyle 设的那 0.03，hover 一触发文字就先往下一跳。
-        return new Transformation(
-            buttonLiftTranslation(baseTranslationOf(display), lift),
-            new AxisAngle4f(),
-            new Vector3f(scale, scale, scale),
-            new AxisAngle4f()
-        );
-    }
-
-    /**
-     * 把 hover 抬升叠加到文字基准位移上
-     * 直接返回 (0, lift, 0) 会抹掉 TypewriterTextStyle 设的基准抬高，
-     * hover 触发瞬间文字会先往下跳一下，回落时再跳一次。
-     * @param base 文字基准位移
-     * @param lift 本帧的抬升量
-     * @return 实际该用的位移
-     */
-    /**
-     * 按实体自身的朝向和背景板状态取基准位移
-     * 别写死 CENTER/false：spawnText 的调用参数一改，硬编码就会静默错位，
-     * 文字会在 hover 时偏移到错误高度。
-     * @param display 按钮文字实体
-     * @return 该实体对应的基准位移
-     */
-    private static Vector3f baseTranslationOf(Display display) {
-        boolean panel = display instanceof TextDisplay text && text.isDefaultBackground();
-        return TypewriterTextStyle.baseTranslationFor(display.getBillboard(), panel);
-    }
-
-    static Vector3f buttonLiftTranslation(Vector3f base, float lift) {
-        return new Vector3f(base.x(), base.y() + lift, base.z());
-    }
-
     private void clearActionMappings(List<UUID> ids) {
-        for (UUID id : ids) {
-            actionBindings.remove(id);
-            UUID displayId = actionDisplayByBinding.remove(id);
-            if (displayId != null) {
-                actionDisplayIds.remove(displayId);
-                actionHoverProgressByDisplay.remove(displayId);
-                hoveredActionDisplayByViewer.entrySet().removeIf(entry -> displayId.equals(entry.getValue()));
-                actionHoverGraceTicksByViewer.keySet().removeIf(viewerId -> !hoveredActionDisplayByViewer.containsKey(viewerId));
-            }
-            actionDisplayIds.remove(id);
-            actionHoverProgressByDisplay.remove(id);
-            hoveredActionDisplayByViewer.entrySet().removeIf(entry -> id.equals(entry.getValue()));
-            actionHoverGraceTicksByViewer.keySet().removeIf(viewerId -> !hoveredActionDisplayByViewer.containsKey(viewerId));
-        }
+        ids.forEach(actionBindings::remove);
     }
 
     private static float chairYawOffset(int index) {

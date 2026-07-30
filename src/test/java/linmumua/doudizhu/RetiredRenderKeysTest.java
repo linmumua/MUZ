@@ -88,4 +88,11 @@ class RetiredRenderKeysTest {
             assertTrue(retired.contains(gone), gone + " 应当退役");
         }
     }
+
+    @Test
+    void buttonHoverConfigIsRetired() {
+        Set<String> retired = new HashSet<>(Arrays.asList(DoudizhuPlugin.RETIRED_RENDER_KEYS));
+
+        assertTrue(retired.contains("render.button-hover"), "文字按钮不再有 hover，旧配置必须清掉");
+    }
 }

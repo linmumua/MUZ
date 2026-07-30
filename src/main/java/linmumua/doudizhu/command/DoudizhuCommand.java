@@ -507,9 +507,9 @@ public final class DoudizhuCommand implements TabExecutor {
             sender.sendMessage(message("右键椅子会走哪条分支：", NamedTextColor.GOLD));
             decisions.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
-        List<String> unfiltered = plugin.getPhysicalTableManager().describeUnfilteredHoverRays(args[2]);
+        List<String> unfiltered = plugin.getPhysicalTableManager().describeUnfilteredActionRays(args[2]);
         if (!unfiltered.isEmpty()) {
-            sender.sendMessage(message("无过滤射线（等价 hover 的 getTargetEntity）：", NamedTextColor.GOLD));
+            sender.sendMessage(message("按钮射线遮挡检查：", NamedTextColor.GOLD));
             unfiltered.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
         List<String> overlaps = plugin.getPhysicalTableManager().describeHitboxOverlaps(args[2]);
@@ -525,11 +525,6 @@ public final class DoudizhuCommand implements TabExecutor {
                 NamedTextColor.GRAY
             ));
         }
-        // 这行不依赖牌桌是否存在，拆桌后仍会输出，用来确认椅子映射没泄漏。
-        sender.sendMessage(message(
-            "hover 映射总数: " + plugin.getPhysicalTableManager().hoverMappingCount(),
-            NamedTextColor.GRAY
-        ));
     }
     private void handleDebugBot(CommandSender sender, String[] args) {
         if (args.length < 3 || (!args[2].equalsIgnoreCase("info") && !args[2].equalsIgnoreCase("信息"))) {

@@ -133,7 +133,7 @@ render:
     # 已选中的牌会额外上移多少
     lift: 0.18
   hover-glow:
-    # 鼠标指向牌或按钮时是否发光
+    # 鼠标指向牌时是否发光
     enabled: true
     color:
       red: 96
@@ -146,15 +146,6 @@ render:
       red: 255
       green: 226
       blue: 92
-  button-hover:
-    # 鼠标对准按钮时的放大倍数
-    scale: 1.06
-    # 鼠标对准按钮时的上移高度
-    lift: 0.03
-    # 按钮 hover 动画时长（tick）；更大更丝滑，但会稍微更拖尾
-    interpolation-ticks: 8
-    # 按钮预览动画类型: 0=线性 1=缓出 2=缓入缓出 3=回弹
-    animation-type: 3
   # 牌面数字标签离牌面的高度
   card-label-height: 0.34
   card-label-offset:

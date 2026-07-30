@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.1"
+version = "1.10.2"
 
 data class MuzTarget(
     val id: String,

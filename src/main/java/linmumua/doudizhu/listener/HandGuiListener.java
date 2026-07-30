@@ -628,8 +628,6 @@ public final class HandGuiListener implements Listener {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE, increase, multiplier, page);
             case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HEIGHT, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_SCALE, increase, multiplier, page);
-            case 15 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_LIFT, increase, multiplier, page);
             case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_FRONT_BASE_DISTANCE, increase, multiplier, page);
             case 20 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_SIDE_BASE_DISTANCE, increase, multiplier, page);
             case 21 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_DISTANCE_FACTOR, increase, multiplier, page);
@@ -696,8 +694,6 @@ public final class HandGuiListener implements Listener {
         switch (rawSlot) {
             case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_CARD_INTERPOLATION_TICKS, increase, multiplier, page);
             case 13 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_CARD_ANIMATION_TYPE, increase, multiplier, page);
-            case 15 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_INTERPOLATION_TICKS, increase, multiplier, page);
-            case 17 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_BUTTON_ANIMATION_TYPE, increase, multiplier, page);
             default -> {
             }
         }

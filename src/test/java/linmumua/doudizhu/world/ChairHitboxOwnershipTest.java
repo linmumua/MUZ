@@ -7,7 +7,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * 邻桌串座防护：hitbox 只能登记给离它最近的那把椅子。
+ * 邻桌串座防护：hitbox 只能按离它最近的那把椅子同步显隐。
  *
  * CE 的 interaction hitbox 不挂在家具载具链上，ownsChairEntity 对它恒为 false，
  * 没法靠归属判断，只能比距离。实测两桌锚点相距 6 格时椅子判定框会重叠，
@@ -27,7 +27,7 @@ class ChairHitboxOwnershipTest {
     void neighbourChairWinsWhenItIsNearer() {
         assertFalse(
             PhysicalTableManager.ownChairIsClosest(9.0, List.of(0.25)),
-            "邻桌椅子更近时不能登记，否则玩家会抬起邻桌的图标"
+            "邻桌椅子更近时不能处理，否则会错误隐藏邻桌判定框"
         );
     }
 
@@ -50,7 +50,7 @@ class ChairHitboxOwnershipTest {
 
     @Test
     void tieGoesToOwnTable() {
-        // 两桌椅子完全重合属于摆放错误，此时判归本桌，别让 hover 直接失灵。
+        // 两桌椅子完全重合属于摆放错误，此时沿用本桌扫描结果。
         assertTrue(
             PhysicalTableManager.ownChairIsClosest(4.0, List.of(4.0)),
             "同距时应当判归本桌"

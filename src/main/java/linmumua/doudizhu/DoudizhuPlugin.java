@@ -156,10 +156,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double hoverCardLift;
     private int cardHoverInterpolationTicks;
     private int cardHoverAnimationTypeIndex;
-    private float hoverButtonScale;
-    private double hoverButtonLift;
-    private int buttonHoverInterpolationTicks;
-    private int buttonHoverAnimationTypeIndex;
     private float tableScale;
     private float chairScale;
     private float smallTextScale;
@@ -1868,22 +1864,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return AnimationCurve.fromIndex(cardHoverAnimationTypeIndex);
     }
 
-    public float getHoverButtonScale() {
-        return hoverButtonScale;
-    }
-
-    public double getHoverButtonLift() {
-        return hoverButtonLift;
-    }
-
-    public int getButtonHoverInterpolationTicks() {
-        return buttonHoverInterpolationTicks;
-    }
-
-    public AnimationCurve buttonHoverAnimationCurve() {
-        return AnimationCurve.fromIndex(buttonHoverAnimationTypeIndex);
-    }
-
     public float getCardDepthOffset() {
         return cardDepthOffset;
     }
@@ -2595,9 +2575,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.HOVER_CARD_ANIMATION_TYPE) {
             return cardHoverAnimationCurve().label();
         }
-        if (setting == AdminSetting.HOVER_BUTTON_ANIMATION_TYPE) {
-            return buttonHoverAnimationCurve().label();
-        }
         if (setting == AdminSetting.PLAYER_HEAD_SHOW_ID) {
             return playerHeadDisplayModeLabel();
         }
@@ -2681,10 +2658,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hoverCardLift = yamlConfig().getDouble("render.card-hover.lift", 0.06);
         cardHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.card-hover.interpolation-ticks", 6));
         cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.card-hover.animation-type", 1)));
-        hoverButtonScale = (float) yamlConfig().getDouble("render.button-hover.scale", 1.06);
-        hoverButtonLift = yamlConfig().getDouble("render.button-hover.lift", 0.03);
-        buttonHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.button-hover.interpolation-ticks", 8));
-        buttonHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.button-hover.animation-type", 3)));
         tableScale = (float) yamlConfig().getDouble("render.furniture-scale.table", 2.25);
         chairScale = (float) yamlConfig().getDouble("render.furniture-scale.chair", 1.35);
         smallTextScale = (float) yamlConfig().getDouble("render.text-scale.small", 0.46);
@@ -2881,7 +2854,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         "render.button-hitbox.width",
         "render.button-hitbox.height",
         "render.button-scale",
-        "render.button-roll-degrees"
+        "render.button-roll-degrees",
+        "render.button-hover"
     };
 
     /**
@@ -3740,9 +3714,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             || setting == AdminSetting.HAND_SPACING
             || setting == AdminSetting.CARD_DEPTH_OFFSET
             || setting == AdminSetting.HOVER_CARD_SCALE
-            || setting == AdminSetting.HOVER_CARD_LIFT
-            || setting == AdminSetting.HOVER_BUTTON_SCALE
-            || setting == AdminSetting.HOVER_BUTTON_LIFT;
+            || setting == AdminSetting.HOVER_CARD_LIFT;
     }
 
     private double roundToSingleDecimal(double value) {
@@ -4308,10 +4280,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         HOVER_CARD_LIFT("render.card-hover.lift", "悬停上移高度", 0.06, 0.0, 1.0, 0.01, false, false, false),
         HOVER_CARD_INTERPOLATION_TICKS("render.card-hover.interpolation-ticks", "牌预览动画时长", 6.0, 1.0, 20.0, 1.0, false, true, false),
         HOVER_CARD_ANIMATION_TYPE("render.card-hover.animation-type", "牌预览动画类型", 1.0, 0.0, 3.0, 1.0, false, true, false),
-        HOVER_BUTTON_SCALE("render.button-hover.scale", "按钮悬停放大", 1.08, 1.0, 2.0, 0.01, false, false, false),
-        HOVER_BUTTON_LIFT("render.button-hover.lift", "按钮悬停上移", 0.04, 0.0, 1.0, 0.01, false, false, false),
-        HOVER_BUTTON_INTERPOLATION_TICKS("render.button-hover.interpolation-ticks", "按钮预览动画时长", 8.0, 1.0, 20.0, 1.0, false, true, false),
-        HOVER_BUTTON_ANIMATION_TYPE("render.button-hover.animation-type", "按钮预览动画类型", 3.0, 0.0, 3.0, 1.0, false, true, false),
         HAND_SPACING("render.hand-spacing", "默认手牌间距", 0.21, 0.02, 2.0, 0.01, false, false, false),
         PUBLIC_TRICK_SPACING("render.public-trick-spacing", "出牌预览间距", 0.22, 0.02, 2.0, 0.01, false, false, false),
         PUBLIC_PREVIEW_ROW_DEPTH_SPACING("render.public-trick.row-depth-spacing", "预览前后错开", 0.22, 0.0, 3.0, 0.01, false, false, false),

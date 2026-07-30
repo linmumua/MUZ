@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -60,5 +61,25 @@ class ChairJoinRoutingTest {
         assertEquals(ALICE, seats.get(0), "原有座位主人不能被挤走");
         assertEquals(carol, seats.get(1), "新玩家应当落在他点的那把椅子上");
         assertEquals(BOB, seats.get(2), "原有座位主人不能被挤走");
+    }
+
+    @Test
+    void registeredFurnitureOwnerWinsOverCloserNeighbourGeometry() {
+        int selected = PhysicalTableManager.closestChairCandidateIndex(
+            List.of(0.04, 0.25),
+            Set.of(1)
+        );
+
+        assertEquals(1, selected, "真实椅子已有归属时不能串到几何上更近的邻桌");
+    }
+
+    @Test
+    void virtualChairHitboxUsesNearestTableWhenNoOwnerIsRegistered() {
+        int selected = PhysicalTableManager.closestChairCandidateIndex(
+            List.of(0.64, 0.09, 0.36),
+            Set.of()
+        );
+
+        assertEquals(1, selected, "独立 hitbox 没有载具归属时应路由到最近椅子");
     }
 }
