@@ -3,6 +3,7 @@
 一个面向 `Paper 1.21.11+` 与 `Purpur 1.21.11+` 的斗地主插件原型。
 
 ## 已实现
+<img width="1402" height="832" alt="image" src="https://github.com/user-attachments/assets/de1d13e7-207d-46a1-bc87-61a9faaf4039" />
 
 - 3 人建桌、加入、准备、开局
 - 随机叫分，最高叫分者成为地主
