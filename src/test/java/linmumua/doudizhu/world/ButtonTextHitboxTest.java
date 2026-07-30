@@ -14,28 +14,42 @@ import org.junit.jupiter.api.Test;
  */
 class ButtonTextHitboxTest {
     @Test
-    void chineseGlyphsUseDefaultFontAdvance() {
-        assertEquals(18, PhysicalTableManager.textPixelWidth("准备", false));
-        assertEquals(20, PhysicalTableManager.textPixelWidth("准备", true));
+    void chineseGlyphsDropTheTrailingSpacingPixel() {
+        // 全角字 advance 9 像素里含 1 像素字间距。两个字累加 advance 是 18，
+        // 但最后那 1 像素是空白，墨迹只有 17；加粗每字再多 1 像素，得 19。
+        assertEquals(17, PhysicalTableManager.textPixelWidth("准备", false));
+        assertEquals(19, PhysicalTableManager.textPixelWidth("准备", true));
     }
 
     @Test
     void digitsAndNarrowAsciiUseTheirOwnAdvance() {
-        assertEquals(27, PhysicalTableManager.textPixelWidth("叫1分", true));
-        assertEquals(5, PhysicalTableManager.textPixelWidth("il", false));
-        assertEquals(7, PhysicalTableManager.textPixelWidth("il", true));
+        assertEquals(26, PhysicalTableManager.textPixelWidth("叫1分", true));
+        assertEquals(4, PhysicalTableManager.textPixelWidth("il", false));
+        assertEquals(6, PhysicalTableManager.textPixelWidth("il", true));
+    }
+
+    @Test
+    void singleGlyphKeepsItsInkWidth() {
+        // 单字不能因为扣间距就退化成 0，否则判定框会塌成一条线。
+        assertEquals(8, PhysicalTableManager.textPixelWidth("准", false));
+        assertEquals(1, PhysicalTableManager.textPixelWidth(".", false));
     }
 
     @Test
     void multilineWidthUsesTheWidestLine() {
-        assertEquals(20, PhysicalTableManager.textPixelWidth("准备\ni", true));
+        assertEquals(19, PhysicalTableManager.textPixelWidth("准备\ni", true));
+    }
+
+    @Test
+    void emptyTextHasNoInk() {
+        assertEquals(0, PhysicalTableManager.textPixelWidth("", true));
     }
 
     @Test
     void componentWidthIncludesBoldAndDisplayScale() {
         Component label = Component.text("准备").decoration(TextDecoration.BOLD, true);
 
-        assertEquals(0.10f, PhysicalTableManager.resolveHitboxWidth(label, 0.20f), 1.0E-6f);
+        assertEquals(19 * 0.20f / 40.0f, PhysicalTableManager.resolveHitboxWidth(label, 0.20f), 1.0E-6f);
     }
 
     @Test
@@ -60,7 +74,9 @@ class ButtonTextHitboxTest {
     void runtimeFocusLabelKeepsBoldWidth() {
         Component label = TypewriterTextStyle.focus("加入座位1");
 
-        assertEquals(0.5405f, PhysicalTableManager.resolveHitboxWidth(label, 0.46f), 1.0E-6f);
+        // 加入座位1 = 4 个全角字（加粗后各 10）+ 1 个数字（加粗后 7），advance 47，
+        // 扣掉行尾那 1 像素字间距得墨迹 46。
+        assertEquals(46 * 0.46f / 40.0f, PhysicalTableManager.resolveHitboxWidth(label, 0.46f), 1.0E-6f);
     }
 
     @Test

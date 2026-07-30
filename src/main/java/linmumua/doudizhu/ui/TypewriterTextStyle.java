@@ -37,6 +37,19 @@ public final class TypewriterTextStyle {
         display.setViewRange(Math.max(display.getViewRange(), 32.0f));
     }
 
+    /**
+     * 取出 apply 给文字设的基准位移，供判定框对齐使用
+     * apply 会把文字整体抬高一点，而 Interaction 判定框是按传入坐标摆的。
+     * 判定框不补偿这段位移的话，框会整体低于文字：action-label-scale 默认 0.20 时
+     * 框高只有 0.045，而位移是 0.03，等于框有三分之二落在文字下方，文字上半部分点不到。
+     * @param billboard 朝向模式
+     * @param panel 是否带背景板
+     * @return 基准位移
+     */
+    public static Vector3f baseTranslationFor(Display.Billboard billboard, boolean panel) {
+        return baseTranslation(billboard, panel);
+    }
+
     private static Vector3f baseTranslation(Display.Billboard billboard, boolean panel) {
         return billboard == Display.Billboard.CENTER
             ? new Vector3f(0.0f, panel ? 0.05f : 0.03f, 0.0f)

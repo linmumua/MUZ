@@ -61,6 +61,9 @@ public final class PhysicalTableManager {
     private static final int CARD_HOVER_SWITCH_TICKS = 1;
     private static final float TEXT_DISPLAY_PIXELS_PER_BLOCK = 40.0f;
     private static final int DEFAULT_FONT_LINE_HEIGHT_PIXELS = 9;
+    // 字形之间的 1 像素间隙不是墨迹。advance 里带着它，末字之后那一格必须扣掉，
+    // 否则判定框会比文字宽出一小截。
+    private static final int GLYPH_SPACING_PIXELS = 1;
     private static final double MAX_ACTION_INTERACTION_DISTANCE = 3.0;
     private long playDetailLastRefreshBucket = Long.MIN_VALUE;
     private final DoudizhuPlugin plugin;
@@ -329,11 +332,13 @@ public final class PhysicalTableManager {
                 ? -1.0
                 : interaction.getLocation().distance(seatBase);
             // 判定框是从底边往上长的。文字要能点到，就必须落在 [底, 底+高] 之间。
+            // 文字实体的渲染中心比实体坐标高出一段基准位移，比较时要加上这段补偿。
             double boxBottom = interaction.getLocation().getY();
             double boxTop = boxBottom + interaction.getInteractionHeight();
             boolean isJoin = binding.action() == ButtonAction.JOIN;
-            double labelY = actionBase(placed.anchor(), placed.yaw(), seatIndex).getY()
+            double labelEntityY = actionBase(placed.anchor(), placed.yaw(), seatIndex).getY()
                 + (isJoin ? plugin.getJoinLabelHeight() : plugin.getActionLabelHeight());
+            double labelY = labelEntityY + buttonLabelBaseLift();
             lines.add(String.format(
                 "座位%d %s 判定框 %.2fx%.2f 距椅子 %.3f 格 响应=%s 罩住文字=%s",
                 seatIndex + 1,
@@ -4600,18 +4605,29 @@ public final class PhysicalTableManager {
             / TEXT_DISPLAY_PIXELS_PER_BLOCK;
     }
 
+    /**
+     * 算出文字实际占用的墨迹宽度（像素）
+     * 字体的 advance 里含 1 像素字间距，那段是空白不是墨迹。整行累加 advance
+     * 会把行尾那段空白也算进判定框，框就比文字宽出来一截。所以每行末尾要把
+     * 这 1 像素间距减掉，只留真正画出像素的宽度。
+     * @param text 纯文本，可含换行
+     * @param bold 是否加粗
+     * @return 最宽那一行的墨迹宽度
+     */
     static int textPixelWidth(String text, boolean bold) {
         if (text == null || text.isEmpty()) {
             return 0;
         }
         int widest = 0;
         int current = 0;
+        boolean lineHasGlyph = false;
         for (int index = 0; index < text.length();) {
             int codePoint = text.codePointAt(index);
             index += Character.charCount(codePoint);
             if (codePoint == '\n') {
-                widest = Math.max(widest, current);
+                widest = Math.max(widest, inkWidth(current, lineHasGlyph));
                 current = 0;
+                lineHasGlyph = false;
                 continue;
             }
             int advance = glyphAdvancePixels(codePoint);
@@ -4619,8 +4635,14 @@ public final class PhysicalTableManager {
                 advance++;
             }
             current += advance;
+            lineHasGlyph = true;
         }
-        return Math.max(widest, current);
+        return Math.max(widest, inkWidth(current, lineHasGlyph));
+    }
+
+    /** 去掉行尾那 1 像素字间距，它是空白不是墨迹。 */
+    private static int inkWidth(int advanceTotal, boolean hasGlyph) {
+        return hasGlyph ? Math.max(1, advanceTotal - GLYPH_SPACING_PIXELS) : 0;
     }
 
     private static int glyphAdvancePixels(int codePoint) {
@@ -4647,14 +4669,31 @@ public final class PhysicalTableManager {
 
     /**
      * 算出判定框底边该放在哪，使文字正好落在框的竖直中点
-     * Interaction 实体是从底边往上长的。如果直接把底边放在按钮基座，
-     * 框顶可能刚好压在文字上（普通按钮实测只剩 0.01 余量），文字就点不到。
-     * @param labelY 文字所在高度
+     * Interaction 实体是从底边往上长的，所以要先减半个框高。但只减半个框高还不够：
+     * TypewriterTextStyle.apply 会把文字整体抬高一小段（CENTER 且无背景板时 0.03），
+     * 而判定框是按传入坐标摆的，不补这段位移，框就整体低于文字。
+     * action-label-scale 默认 0.20 时框高只有 0.045，位移 0.03 占了三分之二，
+     * 表现就是"框比文字矮"、文字上半部分点不到。
+     * @param labelY 文字实体所在高度
      * @param boxHeight 判定框高度
      * @return 判定框底边该放的高度
      */
     static double hitboxBottomForLabel(double labelY, double boxHeight) {
-        return labelY - boxHeight / 2.0;
+        return hitboxBottomForLabel(labelY, boxHeight, buttonLabelBaseLift());
+    }
+
+    static double hitboxBottomForLabel(double labelY, double boxHeight, double labelBaseLift) {
+        return labelY + labelBaseLift - boxHeight / 2.0;
+    }
+
+    /**
+     * 取出按钮文字被 apply 抬高的那段位移
+     * 按钮统一用 CENTER 朝向且不带背景板，这里必须跟 spawnText 的调用保持一致：
+     * 写死数值的话，apply 那边一改基准位移，判定框就会静默错位。
+     * @return 竖直方向的基准位移
+     */
+    private static double buttonLabelBaseLift() {
+        return TypewriterTextStyle.baseTranslationFor(Display.Billboard.CENTER, false).y();
     }
 
     private void clearActionMappings(List<UUID> ids) {

@@ -18,8 +18,9 @@ class ChairHitboxTest {
         float width = PhysicalTableManager.resolveHitboxWidth("加入座位1", JOIN_LABEL_SCALE, true);
         float height = PhysicalTableManager.resolveHitboxHeight("加入座位1", JOIN_LABEL_SCALE);
 
-        assertEquals(0.5405f, width, 1.0E-6f);
-        assertEquals(0.1035f, height, 1.0E-6f);
+        // 墨迹 46 像素（advance 47 扣掉行尾 1 像素间距），行高 9 像素。
+        assertEquals(46 * JOIN_LABEL_SCALE / 40.0f, width, 1.0E-6f);
+        assertEquals(9 * JOIN_LABEL_SCALE / 40.0f, height, 1.0E-6f);
     }
 
     @Test
@@ -36,8 +37,8 @@ class ChairHitboxTest {
         float width = PhysicalTableManager.resolveHitboxWidth("加入座位1", 5.0f, true);
         float height = PhysicalTableManager.resolveHitboxHeight("加入座位1", 5.0f);
 
-        assertEquals(5.875f, width, 1.0E-6f);
-        assertEquals(1.125f, height, 1.0E-6f);
+        assertEquals(46 * 5.0f / 40.0f, width, 1.0E-6f);
+        assertEquals(9 * 5.0f / 40.0f, height, 1.0E-6f);
     }
 
     @Test
