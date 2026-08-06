@@ -1020,6 +1020,38 @@ public final class GameTable {
         bidOrder = seedBidOrder();
         tieBreakOrder = List.of();
         currentTurn = bidOrder.get(0);
+        // 【在叫分阶段就把皮肤请求出去】：出牌 HUD 要到 PLAYING 才显示，而皮肤是异步下载的。
+        // 放在这里，叫分那几秒正好够下载完，进入出牌阶段时缓存已经热了，
+        // 不会再闪一下那个尺寸风格都不一致的兜底图标。
+        prewarmTrickHudAvatars();
+    }
+
+    /**
+     * 让 HUD 提前把这一桌三个人的皮肤下载好。
+     *
+     * <p>用 {@code seats} 而不是 {@link #trickHudSeats()}：后者取的是「上一位/当前/下一位」，
+     * 在叫分阶段还没定出牌顺序；而预热要覆盖的是全桌三个人，跟顺序无关。
+     */
+    private void prewarmTrickHudAvatars() {
+        List<TrickHudService.Seat> all = new ArrayList<>(seats.size());
+        for (UUID playerId : seats) {
+            all.add(trickHudSeat(playerId));
+        }
+        trickHud.prewarmAvatars(all);
+    }
+
+    /**
+     * 地主定了之后，把他【戴王冠】那版头像预热出来。
+     *
+     * <p>同 {@link #prewarmTrickHudAvatars} 一样用 {@code seats}：戴冠版是一条独立缓存，
+     * 发牌时热的都是不戴冠那版，不补这一趟王冠会晚几十毫秒才出现。
+     */
+    private void prewarmLandlordCrown() {
+        List<TrickHudService.Seat> all = new ArrayList<>(seats.size());
+        for (UUID playerId : seats) {
+            all.add(trickHudSeat(playerId));
+        }
+        trickHud.prewarmLandlordCrown(all, landlord);
     }
 
     private void confirmLandlord(UUID playerId, int bid) {
@@ -1090,6 +1122,8 @@ public final class GameTable {
         landlord = playerId;
         highestBid = Math.max(1, bid);
         assignLandlordRoles();
+        // 必须在 assignLandlordRoles 之后：那之前座位角色还是农民，热出来的是没有王冠的那版。
+        prewarmLandlordCrown();
         appendBottomCardsToLandlord(playerId);
         currentTurn = playerId;
         currentPattern = null;

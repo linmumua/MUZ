@@ -210,6 +210,66 @@ public final class PlayerHeadRenderer {
     }
 
     /**
+     * 王冠图案，「山」字形：三个冠尖立在一条冠带上。
+     *
+     * <p>每个字符对应一个像素：{@code #} 画成王冠色，空格透明。宽度必须是 8 列，
+     * 与 {@link PackAssets#AVATAR_HEAD_PIXELS} 一致 —— 王冠要盖在 8 列宽的脸上方，
+     * 窄了看着偏，宽了会超出矩阵被截掉。
+     *
+     * <p>只有 2 行：王冠占的就是描边那两行的位置（见 {@link #withCrown}），
+     * 加行数就得重新生成整套字形并改盒高公式，代价完全不成比例。
+     */
+    private static final String[] CROWN_SHAPE = {
+        "#  #  # ",
+        "########",
+    };
+
+    /** 王冠色，与既有地主金边同色（{@code build.gradle.kts} 里那个 0xFFFFD24A）。 */
+    private static final int CROWN_ARGB = 0xFFFFD24A;
+
+    /**
+     * 给头像戴一顶王冠，返回边长 +2 的新矩阵（8x8 -> 10x10）。
+     *
+     * <p>【为什么王冠占的是描边那两行】：像素头像的字形是构建期按 10 行预生成的
+     * （{@link PackAssets#AVATAR_OUTLINED_PIXELS}），而 {@code avatarPixelChar} 只接受
+     * {@code row < 10}。想给王冠单独加两行就要重新生成整套字形，还要改那个到处在用的
+     * {@code 10 * avatar-scale} 盒高公式 —— 不重叠下限、槽宽、{@code avatarRowDownOffset}
+     * 全依赖它，连带服主已配好的 avatar-offset-down 都要重算。
+     * 用描边那两行是零几何改动，代价只是【王冠与描边互斥】。
+     *
+     * <p>所以调用方必须二选一，不能同时套 {@link #withOutline} 和这个方法：
+     * 那会得到 12x12 的矩阵，第 11、12 行没有对应字形，渲染出来是豆腐块。
+     *
+     * <p>矩阵保持方阵是硬要求：{@link #renderMiniMessage} 用 {@code head.length}
+     * 同时当行数和列数（见那边的 {@code col < rows}），非方阵会让右侧列被截掉。
+     *
+     * @param head 8x8 的头部像素；传进来更大的矩阵也能工作，王冠照旧画在最上两行
+     */
+    public static int[][] withCrown(int[][] head) {
+        int size = head.length;
+        int padded = size + 2;
+        int[][] out = new int[padded][padded];
+        // 脸整体下移 2 行、水平居中：王冠占最上两行，脸下方那一行留空补齐方阵。
+        int faceOffset = (padded - size) / 2;
+        for (int row = 0; row < size; row++) {
+            for (int col = 0; col < size; col++) {
+                out[row + 2][col + faceOffset] = head[row][col];
+            }
+        }
+        // 王冠画在最上两行，按 8 列图案水平居中到当前矩阵宽度上。
+        int crownOffset = (padded - CROWN_SHAPE[0].length()) / 2;
+        for (int row = 0; row < CROWN_SHAPE.length; row++) {
+            String pattern = CROWN_SHAPE[row];
+            for (int col = 0; col < pattern.length(); col++) {
+                if (pattern.charAt(col) != ' ') {
+                    out[row][col + crownOffset] = CROWN_ARGB;
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
      * 渲染完一个头像后光标往右走了多少像素。
      *
      * <p>{@link #renderMiniMessage} 每列的【列距】正好是 {@code scale}：字形自带
@@ -260,10 +320,11 @@ public final class PlayerHeadRenderer {
      *
      * @param scale           放大倍数，需在资源包预生成的范围内（见 {@link PackAssets#AVATAR_PIXEL_MIN_SCALE}）
      * @param downOffsetTier  向下偏移档，必须和同一行的牌用同一档，否则头像与牌上下错开
+     * @param crowned         是否戴王冠（地主）。与描边互斥，见 {@link #withCrown}
      * @return 头像的 MiniMessage 文本；皮肤还没就绪或不可用时返回 {@code null}
      */
-    public String miniMessageFor(Player player, int scale, int downOffsetTier) {
-        return miniMessageFor(skinUrlOf(player), scale, downOffsetTier);
+    public String miniMessageFor(Player player, int scale, int downOffsetTier, boolean crowned) {
+        return miniMessageFor(skinUrlOf(player), scale, downOffsetTier, crowned);
     }
 
     /**
@@ -279,12 +340,12 @@ public final class PlayerHeadRenderer {
      * @return 头像的 MiniMessage 文本；皮肤还没就绪、下载失败或 botId 不在名单里时返回 {@code null}
      */
     public String miniMessageForBot(
-        Collection<UUID> tableBotIds, UUID botId, int scale, int downOffsetTier) {
+        Collection<UUID> tableBotIds, UUID botId, int scale, int downOffsetTier, boolean crowned) {
         int variant = botSkinVariant(tableBotIds, botId);
         if (variant < 0) {
             return null;
         }
-        return miniMessageFor(BOT_SKIN_URLS.get(variant), scale, downOffsetTier);
+        return miniMessageFor(BOT_SKIN_URLS.get(variant), scale, downOffsetTier, crowned);
     }
 
     /**
@@ -293,7 +354,7 @@ public final class PlayerHeadRenderer {
      * <p>缓存 key 是 {@code scale|tier|outline|url}，所以机器人那几个固定 URL 天然命中缓存 ——
      * 同一张皮肤在同一组配置下只渲染一次。
      */
-    private String miniMessageFor(URL skinUrl, int scale, int downOffsetTier) {
+    private String miniMessageFor(URL skinUrl, int scale, int downOffsetTier, boolean crowned) {
         if (!offsetService.isAvailable()) {
             // 没有负空格就没法换行，画出来会是横向拉长的一条，不如不画。
             return null;
@@ -302,9 +363,11 @@ public final class PlayerHeadRenderer {
             // 没有自定义皮肤（离线模式或默认皮肤），交给调用方兜底。
             return null;
         }
-        // 偏移档与描边色都进 key：它们变了字形串就不同，共用一条缓存会画错。
+        // 偏移档、描边色、王冠都进 key：它们变了字形串就不同，共用一条缓存会画错。
+        // 【crowned 必须进 key】：地主和农民常常用同一张皮肤（同一个 URL），
+        // 少了这一维，先渲染的那个会把另一个也带上或带掉王冠。
         int outlineArgb = plugin.getTrickHudAvatarOutlineArgb();
-        String key = scale + "|" + downOffsetTier + "|" + outlineArgb + "|" + skinUrl;
+        String key = scale + "|" + downOffsetTier + "|" + outlineArgb + "|" + crowned + "|" + skinUrl;
         String cached = cache.get(key);
         if (cached != null) {
             return cached;
@@ -315,7 +378,12 @@ public final class PlayerHeadRenderer {
                     BufferedImage skin = downloadSkin(skinUrl);
                     if (skin != null) {
                         int[][] head = extractHead(skin);
-                        if (outlineArgb != 0) {
+                        // 【王冠与描边互斥，不能都套】：两者各把矩阵撑大 2 行，都套就是 12x12，
+                        // 而字形只预生成到 10 行，第 11、12 行会渲染成豆腐块。
+                        // 王冠优先：它是地主身份标识，比装饰性的描边重要。
+                        if (crowned) {
+                            head = withCrown(head);
+                        } else if (outlineArgb != 0) {
                             head = withOutline(head, outlineArgb);
                         }
                         cache.put(key, renderMiniMessage(head, scale, offsetService::offset, downOffsetTier));

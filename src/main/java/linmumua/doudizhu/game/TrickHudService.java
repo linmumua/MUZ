@@ -297,6 +297,94 @@ final class TrickHudService {
     }
 
     /**
+     * 提前把这一桌三个人的皮肤请求出去，避免 HUD 第一帧闪一下兜底图标。
+     *
+     * <p>【要解决的现象】：皮肤是异步下载的，{@link PlayerHeadRenderer#miniMessageFor} 第一次
+     * 调用必然返回 null（见那边的注释），于是 {@link #avatarSlotOf} 会走位图图标兜底。
+     * 那张图标是构建期固定 10/11 像素的，不随 avatar-scale 缩放，所以它闪出来时比真人头像
+     * 小一圈、风格也不一致 —— 表现就是「出牌那一瞬间有个小图标跳一下」。
+     *
+     * <p>【为什么必须用与渲染完全相同的参数】：缓存 key 是 {@code scale|tier|outline|url}，
+     * 预热时若用了别的 scale 或档位，渲染那一刻照样 miss，等于白热一趟。所以这里读的是
+     * 同一份快照，三个槽的 scale 也和 {@link #render} 里一一对应（两侧小、中间大）。
+     *
+     * <p>返回值忽略是有意的：这一趟就是要它 miss 一次好触发下载，拿到 null 才是正常路径。
+     *
+     * @param seats 这一桌的三个座位，顺序无关紧要 —— 每个位置都可能轮到当中间那个大头像，
+     *              所以每人都要按大小两种 scale 各热一次
+     */
+    void prewarmAvatars(List<Seat> seats) {
+        Snapshot current0 = snapshot;
+        if (!current0.settings().enabled() || !offsetService.isAvailable()) {
+            return;
+        }
+        List<UUID> tableBotIds = botIdsOf(seats.toArray(new Seat[0]));
+        int tier = current0.avatarRowDownTier();
+        int bigScale = current0.settings().avatarScale();
+        for (Seat seat : seats) {
+            if (seat == null || seat.playerId() == null) {
+                continue;
+            }
+            // 每人热两种 scale：这一桌轮一圈后，每个人都会当过一次中间的大头像。
+            // 只热当前那个 scale 的话，轮到他坐中间时照样闪一下。
+            for (int scale : new int[] {SIDE_AVATAR_SCALE, bigScale}) {
+                // 【只热不戴冠那版】：这里是发牌时机，地主还没叫出来。
+                // 地主定下来后由 prewarmLandlordCrown 单独补他那一版。
+                if (seat.isBot()) {
+                    headRenderer.miniMessageForBot(tableBotIds, seat.playerId(), scale, tier, false);
+                } else {
+                    Player player = Bukkit.getPlayer(seat.playerId());
+                    if (player != null) {
+                        headRenderer.miniMessageFor(player, scale, tier, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 地主一确定就把他【戴王冠】那版头像预热出来。
+     *
+     * <p>【为什么不能在 {@link #prewarmAvatars} 里一起热】：斗地主是先发牌、后叫地主，
+     * 发牌那一刻还不知道谁是地主。而王冠进了缓存 key（见
+     * {@link PlayerHeadRenderer#miniMessageFor}），戴冠版是一条独立缓存 —— 发牌时热的
+     * 全是不戴冠那版，地主一定下来照样 miss，王冠会晚几十毫秒才出现。
+     *
+     * <p>【为什么不干脆两种冠态都热】：每个 miss 的 key 都是一次完整的皮肤 HTTP 下载
+     * （下载层没有图片级缓存），全热就是每局 6 次变 12 次。地主只有一个，
+     * 定下来之后只补他一个人、两种 scale，代价是 2 次。
+     *
+     * @param seats    这一桌的三个座位，用来算机器人皮肤变体（同桌不重脸）
+     * @param landlord 刚确定的地主；{@code null} 时直接返回
+     */
+    void prewarmLandlordCrown(List<Seat> seats, UUID landlord) {
+        Snapshot current0 = snapshot;
+        if (landlord == null || !current0.settings().enabled() || !offsetService.isAvailable()) {
+            return;
+        }
+        Seat seat = seats.stream()
+            .filter(candidate -> candidate != null && landlord.equals(candidate.playerId()))
+            .findFirst()
+            .orElse(null);
+        if (seat == null) {
+            return;
+        }
+        List<UUID> tableBotIds = botIdsOf(seats.toArray(new Seat[0]));
+        int tier = current0.avatarRowDownTier();
+        // 两种 scale 都要：地主也会轮到坐中间那个大头像的位置。
+        for (int scale : new int[] {SIDE_AVATAR_SCALE, current0.settings().avatarScale()}) {
+            if (seat.isBot()) {
+                headRenderer.miniMessageForBot(tableBotIds, seat.playerId(), scale, tier, true);
+            } else {
+                Player player = Bukkit.getPlayer(seat.playerId());
+                if (player != null) {
+                    headRenderer.miniMessageFor(player, scale, tier, true);
+                }
+            }
+        }
+    }
+
+    /**
      * HUD 上三个头像槽各是谁。
      *
      * @param playerId 该槽位的玩家；null 表示这个槽位没人（人数不足、空座），槽宽仍保留
@@ -446,13 +534,24 @@ final class TrickHudService {
             return TrickHudView.Avatar.EMPTY;
         }
         String rendered;
+        // 【offline 与「皮肤还没下载好」必须分开】：两者都让 rendered 变成 null，但含义相反。
+        // 掉线是持续状态，那一槽会一直没有头像，必须画图标占住，否则 HUD 上留一个长期的洞；
+        // 皮肤没下载好只是几十毫秒的暂态，下一帧就被真头像替掉，画图标反而闪一下。
+        boolean offline = false;
+        // 地主戴王冠。角色来自座位本身，所以叫完地主刷新一次 HUD 王冠就会出现。
+        boolean crowned = seat.role() == PlayerRole.LANDLORD;
         if (seat.isBot()) {
-            rendered = headRenderer.miniMessageForBot(tableBotIds, seat.playerId(), scale, avatarRowDownTier);
+            // 机器人不会掉线：它的皮肤来自内置常量池，null 只可能是下载中或下载失败。
+            rendered = headRenderer.miniMessageForBot(
+                tableBotIds, seat.playerId(), scale, avatarRowDownTier, crowned);
         } else {
             Player player = Bukkit.getPlayer(seat.playerId());
-            rendered = player == null ? null : headRenderer.miniMessageFor(player, scale, avatarRowDownTier);
+            offline = player == null;
+            rendered = offline
+                ? null
+                : headRenderer.miniMessageFor(player, scale, avatarRowDownTier, crowned);
         }
-        return avatarSlotOf(seat, scale, isOutlined(), rendered, avatarRowDownTier);
+        return avatarSlotOf(seat, scale, isOutlined(), rendered, avatarRowDownTier, offline, crowned);
     }
 
     /**
@@ -463,28 +562,47 @@ final class TrickHudService {
      * 拆开后这部分是纯函数，同 {@link #readSettings} 与 {@link #warnIfRowsOverlap} 的做法。
      *
      * @param rendered 像素头像文本；{@code null} 表示这次没取到 —— 皮肤还在异步下载
-     *                 （刚开局那一帧）、皮肤站连不通或返回错误、玩家没有自定义皮肤。
-     *                 这几种都必须兜住，否则那个槽位会空着。
+     *                 （{@link #prewarmAvatars} 没赶上）、皮肤站连不通或返回错误，或玩家掉线。
      * @param outlined 描边是否开着，决定像素头像宽度按 10 行还是 8 行算
+     * @param offline  该座位的真人玩家当前不在线。这是【持续状态】，与「皮肤还没下载好」
+     *                 这种暂态区别对待：见方法内注释
+     * @param crowned  该座位戴着王冠（地主）。王冠和描边一样把矩阵撑到 10 行，
+     *                 所以它也影响宽度 —— 见下面 {@code tenRows} 那行
      */
     static TrickHudView.Avatar avatarSlotOf(
-        Seat seat, int scale, boolean outlined, String rendered, int avatarRowDownTier) {
+        Seat seat, int scale, boolean outlined, String rendered, int avatarRowDownTier,
+        boolean offline, boolean crowned) {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }
+        // 【王冠也要算进宽度】：withCrown 和 withOutline 一样把 8x8 撑成 10x10，
+        // 少算这一项会让戴冠的地主那一槽按 8 行报宽，槽内居中往左偏一个 scale。
+        // 两者互斥（见 withCrown），所以是「或」而不是相加。
+        boolean tenRows = outlined || crowned;
         if (rendered != null) {
             // 【宽度必须和渲染那边同源】：advanceWidth 就是 renderMiniMessage 的净前进量，
             // 两者脱钩会让槽内居中整体偏，而且真人和机器人一起偏，看不出是哪边错。
-            return new TrickHudView.Avatar(rendered, PlayerHeadRenderer.advanceWidth(scale, outlined));
+            return new TrickHudView.Avatar(rendered, PlayerHeadRenderer.advanceWidth(scale, tenRows));
         }
-        // 图标挂在 PackAssets.BOT_AVATAR_FONT 上，不套 <font:...> 会是豆腐块。
-        // 这张图标是构建期固定尺寸的（10/11 像素），不随 avatar-scale 缩放，
-        // 所以兜底时那一槽会明显比真人头像小 —— 兜底本来就是「宁可小也别空着」。
-        return new TrickHudView.Avatar(
-            "<white><font:" + PackAssets.BOT_AVATAR_FONT + ">"
-                + PackAssets.botAvatarChar(seat.role(), avatarRowDownTier)
-                + "</font></white>",
-            PackAssets.botAvatarAdvanceWidth(seat.role())
-        );
+        if (offline) {
+            // 掉线是【持续状态】：这一槽在玩家回来之前一直没有头像，必须画图标占住，
+            // 否则 HUD 上会留一个长期的洞，看着像 HUD 坏了。
+            // 图标挂在 PackAssets.BOT_AVATAR_FONT 上，不套 <font:...> 会是豆腐块。
+            return new TrickHudView.Avatar(
+                "<white><font:" + PackAssets.BOT_AVATAR_FONT + ">"
+                    + PackAssets.botAvatarChar(seat.role(), avatarRowDownTier)
+                    + "</font></white>",
+                PackAssets.botAvatarAdvanceWidth(seat.role())
+            );
+        }
+        // 【皮肤还没下载好：留空，不画那张位图图标】
+        //
+        // 那张图标是构建期固定 10/11 像素的，不随 avatar-scale 缩放，闪出来时比真人头像小
+        // 一圈、风格也不一致，表现是「出牌瞬间有个小图标跳一下」—— 这就是服主报的现象。
+        // 而这个分支全是暂态（下载中、皮肤站抽风），下一帧就会被真头像替掉，
+        // 为几十毫秒画一个风格不一致的东西比那一槽空着更显眼。
+        //
+        // 宽度仍按真头像算：槽宽恒定，皮肤到位时不会整行左右跳动。
+        return new TrickHudView.Avatar("", PlayerHeadRenderer.advanceWidth(scale, tenRows));
     }
 }

@@ -34,45 +34,85 @@ class TrickHudBotAvatarTest {
     }
 
     /**
-     * 皮肤没就绪时必须回退到位图图标，那一槽不许空。
+     * 皮肤【还在下载】时留空，不许退回那张位图图标。
      *
-     * <p><b>守的是哪个 bug。</b>{@code miniMessageForBot} 和真人那条路一样是【异步下载 + 缓存】，
-     * 第一次调用几乎总是返回 null（刚开局那一帧）；皮肤站连不通、返回 404 或超时也是 null。
-     * 换成真实皮肤之后如果顺手把兜底删了，这些情况下机器人那一槽会整块空着。
+     * <p><b>守的是哪个 bug。</b>服主报「以前那个机器人图标有时候还会显示出来」：皮肤是异步
+     * 下载的，第一次调用几乎总是返回 null，于是这里退回位图图标。那张图标是构建期固定
+     * 10/11 像素的、不随 avatar-scale 缩放，闪出来时比真人头像小一圈且风格不一致，
+     * 表现就是「出牌瞬间有个小图标跳一下」。
      *
-     * <p>断言到「图标字体 + 该角色的字形」这个粒度：只断言「非空串」的话，
-     * 回退成一个没套 {@code <font:>} 的裸字符照样能过，而那在客户端上是豆腐块。
+     * <p>这个分支全是暂态，下一帧就被真头像替掉，所以正确做法是留空。若有人为了「槽位不许空」
+     * 把图标兜底加回来，这条就必须红 —— 那个闪现会原样复活。
+     *
+     * <p>【宽度仍要是真头像的宽度】：槽宽恒定才能保证皮肤到位时不整行左右跳动。
+     * 报成图标宽度（10/11）会让那一槽先窄后宽，比闪图标更明显。
      */
     @Test
-    void 皮肤没就绪时回退到位图图标且槽位不空() {
+    void 皮肤还在下载时留空而不是闪那张位图图标() {
         for (PlayerRole role : new PlayerRole[]{null, PlayerRole.LANDLORD, PlayerRole.FARMER}) {
             TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-                bot(role), SCALE, true, null, DOWN_TIER);
+                bot(role), SCALE, true, null, DOWN_TIER, false, false);
 
-            assertFalse(slot.isEmpty(),
-                "角色 " + role + "：皮肤没就绪时槽位空了，HUD 上会出现一个黑洞");
-            assertTrue(slot.text().contains("<font:" + PackAssets.BOT_AVATAR_FONT + ">"),
-                "角色 " + role + "：兜底图标没套自己的字体标签，客户端会显示成豆腐块");
-            assertTrue(slot.text().contains(PackAssets.botAvatarChar(role, DOWN_TIER)),
-                "角色 " + role + "：兜底用错了角色字形或偏移档，图标会和真人头像上下错开");
-            assertEquals(PackAssets.botAvatarAdvanceWidth(role), slot.advancePixels(),
-                "角色 " + role + "：兜底图标报出的宽度不是图标自己的宽度，槽内居中会偏");
+            assertTrue(slot.isEmpty(),
+                "角色 " + role + "：皮肤下载期间画了兜底图标，出牌瞬间会闪一个尺寸风格都不一致的小图标");
+            assertFalse(slot.text().contains(PackAssets.BOT_AVATAR_FONT),
+                "角色 " + role + "：仍在引用位图图标字体，说明兜底没真的去掉");
+            assertEquals(PlayerHeadRenderer.advanceWidth(SCALE, true), slot.advancePixels(),
+                "角色 " + role + "：留空时报的宽度必须仍是真头像宽度，否则皮肤到位时整行会左右跳");
         }
     }
 
     /**
-     * 真人玩家不在线（{@code Bukkit.getPlayer} 返回 null）时同样要兜底。
+     * 戴王冠的地主，那一槽的宽度必须按 10 行算 —— 即使描边是关着的。
      *
-     * <p><b>守的是哪个 bug。</b>改动前这条分支是「非 bot 才尝试皮肤，失败了落到 bot 图标」；
-     * 重构成「统一先取 rendered，再统一兜底」时很容易把真人这条漏掉，
-     * 表现是玩家掉线那一瞬间 HUD 少一个头像。
+     * <p><b>守的是哪个 bug。</b>王冠和描边一样把矩阵从 8x8 撑成 10x10，但它们是【互斥】的两条路
+     * （见 {@code withCrown}）。服主现在把描边关了、只留王冠，此时 {@code outlined=false} 而矩阵
+     * 仍是 10 行。如果宽度只看 {@code outlined}，地主那一槽就会按 8 行报宽，比实际窄一个 scale，
+     * 槽内居中把它往左推 —— 表现是「地主的头像跟另外两个没对齐」，而且只有地主歪，很难定位。
      */
     @Test
-    void 真人取不到皮肤时也要兜底而不是留空槽() {
+    void 关了描边的地主戴冠时宽度仍按10行算() {
+        String rendered = "<font:muz_avatar>x</font>";
+        int tenRows = PlayerHeadRenderer.advanceWidth(SCALE, true);
+
+        // 描边关着 + 戴冠：矩阵是 10 行，宽度必须按 10 行报。
+        TrickHudView.Avatar landlord = TrickHudService.avatarSlotOf(
+            human(PlayerRole.LANDLORD), SCALE, false, rendered, DOWN_TIER, false, true);
+        assertEquals(tenRows, landlord.advancePixels(),
+            "戴冠地主按 8 行报宽：那一槽会比实际窄一个 scale，居中把地主头像往左推，只有他歪");
+
+        // 描边关着 + 不戴冠（农民）：矩阵是 8 行，按 8 行报才对。
+        TrickHudView.Avatar farmer = TrickHudService.avatarSlotOf(
+            human(PlayerRole.FARMER), SCALE, false, rendered, DOWN_TIER, false, false);
+        assertEquals(PlayerHeadRenderer.advanceWidth(SCALE, false), farmer.advancePixels(),
+            "没戴冠也没描边的农民却按 10 行报宽：那一槽会比实际宽，居中把农民头像往右推");
+
+        assertNotEquals(landlord.advancePixels(), farmer.advancePixels(),
+            "地主与农民报出同样的宽度：说明 crowned 没被算进宽度，两者矩阵行数其实不同");
+    }
+
+    /**
+     * 真人玩家【掉线】时必须画图标占位，不能留空。
+     *
+     * <p><b>守的是哪个 bug。</b>掉线与「皮肤还没下载好」都让 rendered 变成 null，但含义相反：
+     * 掉线是持续状态，玩家回来之前那一槽一直没有头像，留空就会在 HUD 上留一个长期的洞，
+     * 看着像 HUD 坏了。所以这两种 null 必须分开处理，不能因为「都拿不到皮肤」就一刀切。
+     *
+     * <p>这条和上面那条是一对：把 offline 这个入参去掉、两种情况又合并成一种时，
+     * 必然有一条会红。
+     */
+    @Test
+    void 真人掉线时画图标占位而不是留空槽() {
         TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-            human(PlayerRole.FARMER), SCALE, true, null, DOWN_TIER);
-        assertFalse(slot.isEmpty(), "真人取不到皮肤时槽位空了：玩家掉线那一瞬间 HUD 会缺一个头像");
-        assertEquals(PackAssets.botAvatarAdvanceWidth(PlayerRole.FARMER), slot.advancePixels());
+            human(PlayerRole.FARMER), SCALE, true, null, DOWN_TIER, true, false);
+
+        assertFalse(slot.isEmpty(), "掉线期间槽位空了：那是持续状态，HUD 上会留一个长期的洞");
+        assertTrue(slot.text().contains("<font:" + PackAssets.BOT_AVATAR_FONT + ">"),
+            "占位图标没套自己的字体标签，客户端会显示成豆腐块");
+        assertTrue(slot.text().contains(PackAssets.botAvatarChar(PlayerRole.FARMER, DOWN_TIER)),
+            "占位用错了角色字形或偏移档，图标会和真人头像上下错开");
+        assertEquals(PackAssets.botAvatarAdvanceWidth(PlayerRole.FARMER), slot.advancePixels(),
+            "占位图标报出的宽度不是图标自己的宽度，槽内居中会偏");
     }
 
     /**
@@ -91,7 +131,7 @@ class TrickHudBotAvatarTest {
              scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
             for (boolean outlined : new boolean[]{true, false}) {
                 TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-                    bot(PlayerRole.LANDLORD), scale, outlined, rendered, DOWN_TIER);
+                    bot(PlayerRole.LANDLORD), scale, outlined, rendered, DOWN_TIER, false, false);
 
                 assertEquals(rendered, slot.text(), "取到皮肤时不该改动头像文本");
                 assertEquals(PlayerHeadRenderer.advanceWidth(scale, outlined), slot.advancePixels(),
@@ -108,11 +148,19 @@ class TrickHudBotAvatarTest {
     /** 空座位（人数不足）该真的留空 —— 给不存在的人画头像反而误导。 */
     @Test
     void 空座位仍然留空而不是画一个机器人图标() {
-        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER).isEmpty(),
+        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, false, false).isEmpty(),
             "null 座位应当留空");
         assertTrue(TrickHudService.avatarSlotOf(
-                TrickHudService.Seat.EMPTY, SCALE, true, "<font:x>y</font>", DOWN_TIER).isEmpty(),
+                TrickHudService.Seat.EMPTY, SCALE, true, "<font:x>y</font>", DOWN_TIER, false, false).isEmpty(),
             "没人的座位即使传进来头像文本也该留空：给不存在的人画头像是误导");
+        // 空座位 + crowned=true：没人的座位不该画出一顶悬空的王冠。
+        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, false, null, DOWN_TIER, false, true).isEmpty(),
+            "null 座位即使标成 crowned 也该留空：那个位置压根没人，画王冠是误导");
+
+        // 空座位 + offline=true：没人的座位不该因为「offline」而画出占位图标。
+        // offline 只对【真的有人但掉线了】的座位有意义。
+        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, true, false).isEmpty(),
+            "null 座位即使标成 offline 也该留空：那个位置压根没人，画图标是误导");
     }
 
     /**
