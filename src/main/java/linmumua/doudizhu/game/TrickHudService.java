@@ -229,13 +229,30 @@ final class TrickHudService {
     private final DoudizhuPlugin plugin;
     private final CraftEngineOffsetService offsetService;
     private final PlayerHeadRenderer headRenderer;
-    private final Settings settings;
 
-    /** 头像行的向下偏移档，直接来自 config 的 avatar-offset-down（不再由牌行推导）。 */
-    private final int avatarRowDownTier;
+    /**
+     * 当前生效的配置快照。
+     *
+     * <p>【必须整份替换，不许逐字段改】：{@code settings}、{@code avatarRowDownTier}、
+     * {@code avatarSlotWidth} 三者是互相推导出来的（槽宽依赖 avatar-scale 与描边开关，
+     * 头像行档位来自 settings），逐个赋值会出现「新 scale 配旧槽宽」的中间态，
+     * 渲染线程刚好读到就会画出错位的一帧。装进 record 整份换是原子的。
+     *
+     * <p>{@code volatile}：{@link #reloadSettings()} 在主线程写，Folia 下渲染可能在
+     * 区域线程读，没有 volatile 不保证可见性。
+     */
+    private volatile Snapshot snapshot;
 
-    /** 三个头像槽的统一宽度：取最宽的那个（大头像），三槽等宽是「中间必然居中」的前提。 */
-    private final int avatarSlotWidth;
+    /**
+     * 一份自洽的配置快照。
+     *
+     * @param settings          config 里 trick-hud 段的解析结果
+     * @param avatarRowDownTier 头像行的向下偏移档，直接来自 avatar-offset-down（不由牌行推导）
+     * @param avatarSlotWidth   三个头像槽的统一宽度：取最宽的那个（大头像），
+     *                          三槽等宽是「中间必然居中」的前提
+     */
+    private record Snapshot(Settings settings, int avatarRowDownTier, int avatarSlotWidth) {
+    }
 
     private final Map<UUID, BossBar> bars = new HashMap<>();
 
@@ -250,9 +267,33 @@ final class TrickHudService {
         this.plugin = plugin;
         this.offsetService = offsetService;
         this.headRenderer = headRenderer;
-        this.settings = readSettings(plugin.yamlConfig(), message -> plugin.getLogger().warning(message));
-        this.avatarRowDownTier = settings.avatarDownOffsetTier();
-        this.avatarSlotWidth = PlayerHeadRenderer.advanceWidth(settings.avatarScale(), isOutlined());
+        this.snapshot = buildSnapshot();
+    }
+
+    /**
+     * 重新读 config 并整份换掉快照，让 {@code /muz reload} 能改动 trick-hud 的尺寸与偏移。
+     *
+     * <p>【为什么需要这个方法】：这些值原本在构造期固化成 final，而 {@link TrickHudService}
+     * 由 {@link GameTable} 在自己的构造期 new 出来、同样存成 final，两层固化叠加的结果是
+     * reload 完全碰不到 HUD —— 服主改完 avatar-offset-down 执行 reload 看不到任何变化，
+     * 只能重启，而且没有任何提示说明为什么。
+     *
+     * <p>不清 {@code bars}：BossBar 本身与配置无关，换了快照后下一次 render 会用新尺寸重画。
+     * 但必须清 {@code lastLines}，否则内容比对会认为「这一行没变」而跳过重发，
+     * 新尺寸要等到玩家下一次出牌才生效。
+     */
+    void reloadSettings() {
+        this.snapshot = buildSnapshot();
+        lastLines.clear();
+    }
+
+    private Snapshot buildSnapshot() {
+        Settings loaded = readSettings(plugin.yamlConfig(), message -> plugin.getLogger().warning(message));
+        return new Snapshot(
+            loaded,
+            loaded.avatarDownOffsetTier(),
+            PlayerHeadRenderer.advanceWidth(loaded.avatarScale(), isOutlined())
+        );
     }
 
     /**
@@ -275,6 +316,10 @@ final class TrickHudService {
      * @param cards    桌上最后打出的那手牌；空表示这一轮还没人出牌，上排留空但头像照旧显示
      */
     void render(Player viewer, Seat previous, Seat current, Seat next, List<DoudizhuCard> cards) {
+        // 【整帧只读一次快照】：reload 可能在渲染中途换掉它，读两次就可能前半帧用旧 scale、
+        // 后半帧用新槽宽，画出错位的一帧。存成局部变量后这一帧一定是自洽的。
+        Snapshot current0 = snapshot;
+        Settings settings = current0.settings();
         if (!settings.enabled() || !offsetService.isAvailable()) {
             // 没有负空格就没法叠牌也没法拼头像，整条 HUD 不显示，避免画出一条横到屏幕外的牌。
             hide(viewer);
@@ -283,11 +328,12 @@ final class TrickHudService {
         // 名单要在三个槽【之前】算好并整份传下去：皮肤分配必须看到同桌全部 bot 才能保证不重脸，
         // 逐槽各算一次只能看到自己，两个 bot 就可能撞到同一张皮肤。
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
+        int avatarRowDownTier = current0.avatarRowDownTier();
         String line = TrickHudView.buildMiniMessage(
-            avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds),
-            avatarSlot(current, settings.avatarScale(), tableBotIds),
-            avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds),
-            avatarSlotWidth,
+            avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier),
+            avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier),
+            avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier),
+            current0.avatarSlotWidth(),
             settings.avatarGap(),
             cards,
             settings.cardStep(),
@@ -394,7 +440,8 @@ final class TrickHudService {
      * <p>槽位宽度由调用方统一给（三槽等宽），这里只需要报出这段实际占多宽，
      * 让排版把它在槽里居中。
      */
-    private TrickHudView.Avatar avatarSlot(Seat seat, int scale, List<UUID> tableBotIds) {
+    private TrickHudView.Avatar avatarSlot(
+        Seat seat, int scale, List<UUID> tableBotIds, int avatarRowDownTier) {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }

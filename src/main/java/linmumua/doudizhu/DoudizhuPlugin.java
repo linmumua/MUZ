@@ -3090,6 +3090,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         ensureConfigIntegrity();
         loadRenderSettings();
         loadAiSettings();
+        reloadTrickHudSettings();
         feedback.update(stageProgress(1, totalStages), "刷新界面资源", "PlaceholderAPI / 渲染缓存");
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
@@ -3116,6 +3117,22 @@ public final class DoudizhuPlugin extends JavaPlugin {
         ReloadSummary summary = new ReloadSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook), doudizhuTables);
         feedback.complete(summary);
         return summary;
+    }
+
+    /**
+     * 把 trick-hud 的新配置推给每张桌的 HUD 服务。
+     *
+     * <p>【为什么不能靠重建牌桌顺带解决】：{@code rebuildAllTables()} 重建的是牌桌实体
+     * （桌椅、按钮、显示体），不碰 {@link GameTable} 对象本身，HUD 服务是 GameTable 的
+     * final 字段，重建实体不会让它重读 config。
+     */
+    private void reloadTrickHudSettings() {
+        if (tableManager == null) {
+            return;
+        }
+        for (GameTable table : tableManager.getTables()) {
+            table.reloadTrickHudSettings();
+        }
     }
 
     private boolean migrateLegacyFurnitureConfig(FurnitureType type) {

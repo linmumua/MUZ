@@ -1604,6 +1604,17 @@ public final class GameTable {
     }
 
     /**
+     * 把 trick-hud 的配置重载转给这张桌的 HUD 服务。
+     *
+     * <p>【为什么要逐桌转发】：{@link TrickHudService} 是每张桌各持一个的 final 字段，
+     * 插件层拿不到它。reload 只重载 config 到内存，不重建 GameTable，
+     * 所以必须由这里把新配置推下去，否则改完 trick-hud 执行 reload 毫无变化。
+     */
+    public void reloadTrickHudSettings() {
+        trickHud.reloadSettings();
+    }
+
+    /**
      * 头像行那三个槽位取谁：{@code [上一位, 当前该出牌的人, 下一位]}，恒定三个元素。
      *
      * <p>【中间那个取 {@code currentTurn} 而不是 {@code leadPlayer}】：这条 HUD 回答的是
