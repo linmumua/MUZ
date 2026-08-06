@@ -51,7 +51,7 @@ class TrickHudBotAvatarTest {
     void 皮肤还在下载时留空而不是闪那张位图图标() {
         for (PlayerRole role : new PlayerRole[]{null, PlayerRole.LANDLORD, PlayerRole.FARMER}) {
             TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-                bot(role), SCALE, true, null, DOWN_TIER, false, false);
+                bot(role), SCALE, true, null, DOWN_TIER, false);
 
             assertTrue(slot.isEmpty(),
                 "角色 " + role + "：皮肤下载期间画了兜底图标，出牌瞬间会闪一个尺寸风格都不一致的小图标");
@@ -63,32 +63,30 @@ class TrickHudBotAvatarTest {
     }
 
     /**
-     * 戴王冠的地主，那一槽的宽度必须按 10 行算 —— 即使描边是关着的。
+     * 地主和农民那两槽的宽度必须【完全一样】。
      *
-     * <p><b>守的是哪个 bug。</b>王冠和描边一样把矩阵从 8x8 撑成 10x10，但它们是【互斥】的两条路
-     * （见 {@code withCrown}）。服主现在把描边关了、只留王冠，此时 {@code outlined=false} 而矩阵
-     * 仍是 10 行。如果宽度只看 {@code outlined}，地主那一槽就会按 8 行报宽，比实际窄一个 scale，
-     * 槽内居中把它往左推 —— 表现是「地主的头像跟另外两个没对齐」，而且只有地主歪，很难定位。
+     * <p><b>守的是哪个 bug。</b>第一版王冠是往矩阵上面加两行做的，于是戴冠的地主变成 10 行、
+     * 农民还是 8 行：地主的脸被挤低两像素、那一槽也宽一截，三个头像并排时一眼看出没对齐 ——
+     * 服主截图报的就是这个。
+     *
+     * <p>现在王冠是【盖】在头顶那两行上的，不改尺寸。这条钉住这个性质：谁要是再让王冠去动
+     * 行数，地主那一槽的宽度就会和农民分叉，这里立刻红。
      */
     @Test
-    void 关了描边的地主戴冠时宽度仍按10行算() {
+    void 地主与农民那两槽宽度必须一致() {
         String rendered = "<font:muz_avatar>x</font>";
-        int tenRows = PlayerHeadRenderer.advanceWidth(SCALE, true);
 
-        // 描边关着 + 戴冠：矩阵是 10 行，宽度必须按 10 行报。
-        TrickHudView.Avatar landlord = TrickHudService.avatarSlotOf(
-            human(PlayerRole.LANDLORD), SCALE, false, rendered, DOWN_TIER, false, true);
-        assertEquals(tenRows, landlord.advancePixels(),
-            "戴冠地主按 8 行报宽：那一槽会比实际窄一个 scale，居中把地主头像往左推，只有他歪");
+        for (boolean outlined : new boolean[] {false, true}) {
+            TrickHudView.Avatar landlord = TrickHudService.avatarSlotOf(
+                human(PlayerRole.LANDLORD), SCALE, outlined, rendered, DOWN_TIER, false);
+            TrickHudView.Avatar farmer = TrickHudService.avatarSlotOf(
+                human(PlayerRole.FARMER), SCALE, outlined, rendered, DOWN_TIER, false);
 
-        // 描边关着 + 不戴冠（农民）：矩阵是 8 行，按 8 行报才对。
-        TrickHudView.Avatar farmer = TrickHudService.avatarSlotOf(
-            human(PlayerRole.FARMER), SCALE, false, rendered, DOWN_TIER, false, false);
-        assertEquals(PlayerHeadRenderer.advanceWidth(SCALE, false), farmer.advancePixels(),
-            "没戴冠也没描边的农民却按 10 行报宽：那一槽会比实际宽，居中把农民头像往右推");
-
-        assertNotEquals(landlord.advancePixels(), farmer.advancePixels(),
-            "地主与农民报出同样的宽度：说明 crowned 没被算进宽度，两者矩阵行数其实不同");
+            assertEquals(farmer.advancePixels(), landlord.advancePixels(),
+                "描边=" + outlined + " 时地主与农民宽度不等：戴冠改了矩阵尺寸，地主那一槽会歪出来");
+            assertEquals(PlayerHeadRenderer.advanceWidth(SCALE, outlined), landlord.advancePixels(),
+                "描边=" + outlined + " 时地主宽度与 advanceWidth 脱钩：槽内居中会整体偏");
+        }
     }
 
     /**
@@ -104,7 +102,7 @@ class TrickHudBotAvatarTest {
     @Test
     void 真人掉线时画图标占位而不是留空槽() {
         TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-            human(PlayerRole.FARMER), SCALE, true, null, DOWN_TIER, true, false);
+            human(PlayerRole.FARMER), SCALE, true, null, DOWN_TIER, true);
 
         assertFalse(slot.isEmpty(), "掉线期间槽位空了：那是持续状态，HUD 上会留一个长期的洞");
         assertTrue(slot.text().contains("<font:" + PackAssets.BOT_AVATAR_FONT + ">"),
@@ -131,7 +129,7 @@ class TrickHudBotAvatarTest {
              scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
             for (boolean outlined : new boolean[]{true, false}) {
                 TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
-                    bot(PlayerRole.LANDLORD), scale, outlined, rendered, DOWN_TIER, false, false);
+                    bot(PlayerRole.LANDLORD), scale, outlined, rendered, DOWN_TIER, false);
 
                 assertEquals(rendered, slot.text(), "取到皮肤时不该改动头像文本");
                 assertEquals(PlayerHeadRenderer.advanceWidth(scale, outlined), slot.advancePixels(),
@@ -148,18 +146,14 @@ class TrickHudBotAvatarTest {
     /** 空座位（人数不足）该真的留空 —— 给不存在的人画头像反而误导。 */
     @Test
     void 空座位仍然留空而不是画一个机器人图标() {
-        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, false, false).isEmpty(),
+        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, false).isEmpty(),
             "null 座位应当留空");
         assertTrue(TrickHudService.avatarSlotOf(
-                TrickHudService.Seat.EMPTY, SCALE, true, "<font:x>y</font>", DOWN_TIER, false, false).isEmpty(),
+                TrickHudService.Seat.EMPTY, SCALE, true, "<font:x>y</font>", DOWN_TIER, false).isEmpty(),
             "没人的座位即使传进来头像文本也该留空：给不存在的人画头像是误导");
-        // 空座位 + crowned=true：没人的座位不该画出一顶悬空的王冠。
-        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, false, null, DOWN_TIER, false, true).isEmpty(),
-            "null 座位即使标成 crowned 也该留空：那个位置压根没人，画王冠是误导");
-
         // 空座位 + offline=true：没人的座位不该因为「offline」而画出占位图标。
         // offline 只对【真的有人但掉线了】的座位有意义。
-        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, true, false).isEmpty(),
+        assertTrue(TrickHudService.avatarSlotOf(null, SCALE, true, null, DOWN_TIER, true).isEmpty(),
             "null 座位即使标成 offline 也该留空：那个位置压根没人，画图标是误导");
     }
 

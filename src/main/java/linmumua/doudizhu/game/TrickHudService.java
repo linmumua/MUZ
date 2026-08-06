@@ -551,7 +551,7 @@ final class TrickHudService {
                 ? null
                 : headRenderer.miniMessageFor(player, scale, avatarRowDownTier, crowned);
         }
-        return avatarSlotOf(seat, scale, isOutlined(), rendered, avatarRowDownTier, offline, crowned);
+        return avatarSlotOf(seat, scale, isOutlined(), rendered, avatarRowDownTier, offline);
     }
 
     /**
@@ -566,23 +566,20 @@ final class TrickHudService {
      * @param outlined 描边是否开着，决定像素头像宽度按 10 行还是 8 行算
      * @param offline  该座位的真人玩家当前不在线。这是【持续状态】，与「皮肤还没下载好」
      *                 这种暂态区别对待：见方法内注释
-     * @param crowned  该座位戴着王冠（地主）。王冠和描边一样把矩阵撑到 10 行，
-     *                 所以它也影响宽度 —— 见下面 {@code tenRows} 那行
      */
     static TrickHudView.Avatar avatarSlotOf(
         Seat seat, int scale, boolean outlined, String rendered, int avatarRowDownTier,
-        boolean offline, boolean crowned) {
+        boolean offline) {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }
-        // 【王冠也要算进宽度】：withCrown 和 withOutline 一样把 8x8 撑成 10x10，
-        // 少算这一项会让戴冠的地主那一槽按 8 行报宽，槽内居中往左偏一个 scale。
-        // 两者互斥（见 withCrown），所以是「或」而不是相加。
-        boolean tenRows = outlined || crowned;
+        // 【戴不戴王冠不影响这里】：withCrown 是把王冠盖在头顶那两行上，不改矩阵尺寸，
+        // 所以地主和农民的宽高完全一致。之前那版王冠往上加两行，宽度就得跟着分叉，
+        // 还会把地主的脸压低两像素 —— 三个头像并排时一眼看出没对齐。
         if (rendered != null) {
             // 【宽度必须和渲染那边同源】：advanceWidth 就是 renderMiniMessage 的净前进量，
             // 两者脱钩会让槽内居中整体偏，而且真人和机器人一起偏，看不出是哪边错。
-            return new TrickHudView.Avatar(rendered, PlayerHeadRenderer.advanceWidth(scale, tenRows));
+            return new TrickHudView.Avatar(rendered, PlayerHeadRenderer.advanceWidth(scale, outlined));
         }
         if (offline) {
             // 掉线是【持续状态】：这一槽在玩家回来之前一直没有头像，必须画图标占住，
@@ -603,6 +600,6 @@ final class TrickHudService {
         // 为几十毫秒画一个风格不一致的东西比那一槽空着更显眼。
         //
         // 宽度仍按真头像算：槽宽恒定，皮肤到位时不会整行左右跳动。
-        return new TrickHudView.Avatar("", PlayerHeadRenderer.advanceWidth(scale, tenRows));
+        return new TrickHudView.Avatar("", PlayerHeadRenderer.advanceWidth(scale, outlined));
     }
 }

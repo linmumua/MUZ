@@ -216,11 +216,14 @@ public final class PlayerHeadRenderer {
      * 与 {@link PackAssets#AVATAR_HEAD_PIXELS} 一致 —— 王冠要盖在 8 列宽的脸上方，
      * 窄了看着偏，宽了会超出矩阵被截掉。
      *
-     * <p>只有 2 行：王冠占的就是描边那两行的位置（见 {@link #withCrown}），
-     * 加行数就得重新生成整套字形并改盒高公式，代价完全不成比例。
+     * <p>只有 2 行：王冠是【盖】在头顶那两行头发上的（见 {@link #withCrown}），
+     * 行数一多就会吃掉五官。
+     *
+     * <p>图案【必须左右对称】：不对称会让王冠看着偏向一边，而头像是并排摆的，一眼就看出来。
+     * 这里中间两列连在一起，读起来仍是三个尖 —— 山字形的中峰本来就该比两侧宽。
      */
     private static final String[] CROWN_SHAPE = {
-        "#  #  # ",
+        "#  ##  #",
         "########",
     };
 
@@ -228,41 +231,38 @@ public final class PlayerHeadRenderer {
     private static final int CROWN_ARGB = 0xFFFFD24A;
 
     /**
-     * 给头像戴一顶王冠，返回边长 +2 的新矩阵（8x8 -> 10x10）。
+     * 给头像戴一顶王冠：把王冠【盖在头顶那两行】上，矩阵尺寸不变。
      *
-     * <p>【为什么王冠占的是描边那两行】：像素头像的字形是构建期按 10 行预生成的
-     * （{@link PackAssets#AVATAR_OUTLINED_PIXELS}），而 {@code avatarPixelChar} 只接受
-     * {@code row < 10}。想给王冠单独加两行就要重新生成整套字形，还要改那个到处在用的
-     * {@code 10 * avatar-scale} 盒高公式 —— 不重叠下限、槽宽、{@code avatarRowDownOffset}
-     * 全依赖它，连带服主已配好的 avatar-offset-down 都要重算。
-     * 用描边那两行是零几何改动，代价只是【王冠与描边互斥】。
+     * <p>【为什么是盖上去，而不是往上加两行】：加两行会把脸整体挤下去两像素，戴冠的地主那一槽
+     * 就比另外两个人低一截 —— 三个头像并排时一眼看出没对齐（服主报的就是这个）。
+     * 而且行数一变，宽度、槽内居中、盒高全都要跟着分叉。
      *
-     * <p>所以调用方必须二选一，不能同时套 {@link #withOutline} 和这个方法：
-     * 那会得到 12x12 的矩阵，第 11、12 行没有对应字形，渲染出来是豆腐块。
+     * <p>盖在头顶是零几何改动：行数、宽度、脸的位置全部和不戴冠的头像一致，
+     * 代价只是头顶那两行头发被王冠遮住 —— 王冠本来就该压在头发上，这反而是对的。
      *
-     * <p>矩阵保持方阵是硬要求：{@link #renderMiniMessage} 用 {@code head.length}
-     * 同时当行数和列数（见那边的 {@code col < rows}），非方阵会让右侧列被截掉。
+     * <p>【与描边可以同时开】：这个方法不改尺寸，所以要先戴冠、再
+     * {@link #withOutline} —— 那样描边会连王冠一起勾出轮廓。反过来先描边也能工作，
+     * 只是王冠自己没有描边。两者不再像「加两行」那版一样互斥。
      *
-     * @param head 8x8 的头部像素；传进来更大的矩阵也能工作，王冠照旧画在最上两行
+     * <p>王冠只覆盖前 {@code CROWN_SHAPE.length} 行，下面 6 行是真正的五官，一个像素都不动 ——
+     * 盖住脸就等于用身份标识毁了头像。
+     *
+     * @param head 头部像素方阵，通常是 8x8；返回同样尺寸的新矩阵，不改动入参
      */
     public static int[][] withCrown(int[][] head) {
         int size = head.length;
-        int padded = size + 2;
-        int[][] out = new int[padded][padded];
-        // 脸整体下移 2 行、水平居中：王冠占最上两行，脸下方那一行留空补齐方阵。
-        int faceOffset = (padded - size) / 2;
+        int[][] out = new int[size][];
         for (int row = 0; row < size; row++) {
-            for (int col = 0; col < size; col++) {
-                out[row + 2][col + faceOffset] = head[row][col];
-            }
+            out[row] = head[row].clone();
         }
-        // 王冠画在最上两行，按 8 列图案水平居中到当前矩阵宽度上。
-        int crownOffset = (padded - CROWN_SHAPE[0].length()) / 2;
-        for (int row = 0; row < CROWN_SHAPE.length; row++) {
+        // 图案按当前矩阵宽度水平居中：8 列的脸上 offset 是 0，描边后的 10 列上是 1。
+        int crownOffset = (size - CROWN_SHAPE[0].length()) / 2;
+        for (int row = 0; row < CROWN_SHAPE.length && row < size; row++) {
             String pattern = CROWN_SHAPE[row];
             for (int col = 0; col < pattern.length(); col++) {
-                if (pattern.charAt(col) != ' ') {
-                    out[row][col + crownOffset] = CROWN_ARGB;
+                int target = col + crownOffset;
+                if (pattern.charAt(col) != ' ' && target >= 0 && target < size) {
+                    out[row][target] = CROWN_ARGB;
                 }
             }
         }
@@ -378,12 +378,13 @@ public final class PlayerHeadRenderer {
                     BufferedImage skin = downloadSkin(skinUrl);
                     if (skin != null) {
                         int[][] head = extractHead(skin);
-                        // 【王冠与描边互斥，不能都套】：两者各把矩阵撑大 2 行，都套就是 12x12，
-                        // 而字形只预生成到 10 行，第 11、12 行会渲染成豆腐块。
-                        // 王冠优先：它是地主身份标识，比装饰性的描边重要。
+                        // 【顺序要紧：先戴冠，再描边】。withCrown 不改尺寸（只盖头顶两行），
+                        // 所以两者可以同时开 —— 先戴冠能让描边把王冠一起勾出轮廓；
+                        // 反过来先描边，王冠自己就没有边。
                         if (crowned) {
                             head = withCrown(head);
-                        } else if (outlineArgb != 0) {
+                        }
+                        if (outlineArgb != 0) {
                             head = withOutline(head, outlineArgb);
                         }
                         cache.put(key, renderMiniMessage(head, scale, offsetService::offset, downOffsetTier));
