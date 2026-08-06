@@ -147,7 +147,8 @@ val cardGlyphDownOffsetTiers = listOf(0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 4
 // 牌行区间 0..52、头像行区间 40..150 几乎不重叠；共用一张表时每一档都要无差别
 // 生成三族字形，牌用不到深档、头像用不到浅档，约一半条目是废的。
 // 必须与 PackAssets.AVATAR_DOWN_OFFSET_TIERS 逐项一致，否则头像与 bot 码位整体平移。
-val avatarDownOffsetTiers = listOf(0, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150)
+val avatarDownOffsetTiers =
+    listOf(0, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200)
 
 
 
