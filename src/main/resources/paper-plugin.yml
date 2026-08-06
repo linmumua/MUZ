@@ -1,0 +1,50 @@
+name: MUZ
+main: linmumua.doudizhu.DoudizhuPlugin
+version: ${version}
+api-version: "${apiVersion}"
+folia-supported: true
+author: linmumua
+description: MUZ card table plugin for Paper and Purpur.
+# 不声明 libraries：MUZ 自己不需要 Paper 从 Maven 下载任何运行时，
+# SnakeYAML 已重定位打进 JAR，写个空的 libraries 键反而会让 Paper 解析报错。
+# paper-plugin.yml 不支持 commands 段，/muz 改在 onEnable 里通过 CommandMap 注册。
+# 命令的描述、用法、别名和权限都挪到了 DoudizhuPlugin.registerMuzCommand()。
+dependencies:
+  server:
+    # 这三个有直接的 Java import，必须 join-classpath。
+    # paper-plugin.yml 默认让每个插件用独立 ClassLoader，不打开就取不到对方的类，
+    # 启动时会抛 NoClassDefFoundError。
+    CraftEngine:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    PlaceholderAPI:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    Vault:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    # 下面几个只通过插件管理器检测是否存在，代码里没有 import，不需要共享 ClassLoader。
+    CMI:
+      load: BEFORE
+      required: false
+      join-classpath: false
+    CMILib:
+      load: BEFORE
+      required: false
+      join-classpath: false
+    EzEconomy:
+      load: BEFORE
+      required: false
+      join-classpath: false
+    XConomy:
+      load: BEFORE
+      required: false
+      join-classpath: false
+permissions:
+  muz.command:
+    default: true
+  muz.admin:
+    default: op

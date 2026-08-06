@@ -1,11 +1,16 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.gradle.api.tasks.bundling.Zip
+import java.awt.image.BufferedImage
 import java.io.File
 import java.util.jar.JarFile
+import javax.imageio.ImageIO
 
 plugins {
     java
-    kotlin("jvm") version "2.3.20"
-    id("io.izzel.taboolib") version "2.0.38"
+    id("org.jetbrains.kotlin.jvm") version "2.3.20"
+    // 用 shadow 而不是 TabooLib 打包：本项目源码已完全不 import taboolib，
+    // 只需要把 SnakeYAML 内嵌并重定位（见下面 shadowJar 的 relocate）。
+    id("com.gradleup.shadow") version "9.3.0"
 }
 
 group = "linmumua"
@@ -15,13 +20,26 @@ data class MuzTarget(
     val id: String,
     val paperApiDependency: String,
     val pluginApiVersion: String,
-    val javaVersion: Int
+    val javaVersion: Int,
+
+
+
+
+
+
+
+
+
+
+
+
+    val resourcePackFormat: Int
 )
 
 val supportedMuzTargets = listOf(
-    MuzTarget("paper-1.21.11", "1.21.11-R0.1-SNAPSHOT", "1.21.11", 21),
-    MuzTarget("paper-26.1.2", "26.1.2.build.74-stable", "26.1.2", 25),
-    MuzTarget("paper-26.2", "26.2.build.84-stable", "26.2", 25)
+    MuzTarget("paper-1.21.11", "1.21.11-R0.1-SNAPSHOT", "1.21.11", 21, 75),
+    MuzTarget("paper-26.1.2", "26.1.2.build.74-stable", "26.1.2", 25, 84),
+    MuzTarget("paper-26.2", "26.2.build.84-stable", "26.2", 25, 88)
 ).associateBy(MuzTarget::id)
 val muzTargetId = providers.gradleProperty("muzTarget").orElse("paper-26.2").get()
 val muzTarget = supportedMuzTargets[muzTargetId]
@@ -35,8 +53,124 @@ val generatedJarResourcesDir = layout.buildDirectory.dir("generated/resources/ma
 val generatedResourcePackDir = layout.buildDirectory.dir("generated/resourcepack")
 val resourcePackSourceDir = layout.projectDirectory.dir("resourcepack").asFile
 val cardTextureDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/textures/item/cards")
-val uiTextureDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/textures/item/ui")
 val soundSourceDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamespace/sounds")
+
+
+val tableFurnitureId = "table_large"
+val chairFurnitureId = "chair_large"
+
+
+
+
+
+
+val botAvatarCharEscape = "\\uf900"
+val botAvatarChar = "\uf900"
+
+
+
+val botAvatarLandlordCharEscape = "\\uf901"
+val botAvatarLandlordChar = "\uf901"
+val botAvatarFarmerCharEscape = "\\uf902"
+val botAvatarFarmerChar = "\uf902"
+
+
+
+
+
+
+val botAvatarDownCodepointStart = 0xF910
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+val cardGlyphFont = "minecraft:${resourceNamespace}_cards"
+val avatarPixelFont = "minecraft:${resourceNamespace}_avatar"
+val botAvatarFont = "minecraft:${resourceNamespace}_bot_avatar"
+
+
+
+
+
+
+
+
+
+
+
+val cardGlyphCodepointStart = 0xE100
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+val cardGlyphHeightTiers = listOf(53, 48, 42, 37, 32)
+
+
+
+
+
+
+
+
+val cardGlyphDownOffsetTiers = listOf(0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 50, 52)
+
+// 头像行（含跟着头像走的 bot 兜底图标）自己的向下偏移档，与上面牌那张表完全独立。
+// 拆两张表是因为头像行永远比牌行深一整个头像盒（10 * avatar-scale），
+// 牌行区间 0..52、头像行区间 40..150 几乎不重叠；共用一张表时每一档都要无差别
+// 生成三族字形，牌用不到深档、头像用不到浅档，约一半条目是废的。
+// 必须与 PackAssets.AVATAR_DOWN_OFFSET_TIERS 逐项一致，否则头像与 bot 码位整体平移。
+val avatarDownOffsetTiers = listOf(0, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+val avatarPixelCodepointStart = 0xE800
+val avatarPixelMinScale = 4
+val avatarPixelMaxScale = 10
+val avatarHeadPixels = 8
+
+
+
+val avatarOutlinedPixels = avatarHeadPixels + 2
 
 fun jsonString(value: String): String = buildString {
     append('"')
@@ -69,8 +203,139 @@ fun copyFileTree(sourceRoot: File, targetRoot: File) {
         }
 }
 
+
+
+
+
+
+
+
+
+
+
+fun writeOutlinedGlyph(source: File, target: File, argb: Int) {
+    val base = ImageIO.read(source)
+        ?: error("读不出机器人头像贴图：${source.absolutePath}")
+    val pad = 1
+    val width = base.width + pad * 2
+    val height = base.height + pad * 2
+    val out = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+
+    fun baseOpaqueAt(x: Int, y: Int): Boolean {
+        if (x < 0 || y < 0 || x >= base.width || y >= base.height) {
+            return false
+        }
+        return (base.getRGB(x, y) ushr 24) != 0
+    }
+
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            val bx = x - pad
+            val by = y - pad
+            if (baseOpaqueAt(bx, by)) {
+                out.setRGB(x, y, base.getRGB(bx, by))
+                continue
+            }
+            val touchesIcon = baseOpaqueAt(bx - 1, by)
+                || baseOpaqueAt(bx + 1, by)
+                || baseOpaqueAt(bx, by - 1)
+                || baseOpaqueAt(bx, by + 1)
+            if (touchesIcon) {
+                out.setRGB(x, y, argb)
+            }
+        }
+    }
+
+    target.parentFile.mkdirs()
+    ImageIO.write(out, "png", target)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fun writeCardFaceGlyph(source: File, target: File) {
+    val base = ImageIO.read(source)
+        ?: error("读不出牌面贴图：${source.absolutePath}")
+
+    check(base.width == 79 && base.height == 63) {
+        "牌贴图尺寸必须是 79x63（字形裁切坐标按此推导），实际 ${base.width}x${base.height}：${source.absolutePath}"
+    }
+    val faceWidth = 35
+    val faceHeight = 53
+    val faceTop = 10
+    val out = BufferedImage(faceWidth, faceHeight, BufferedImage.TYPE_INT_ARGB)
+    for (y in 0 until faceHeight) {
+        for (x in 0 until faceWidth) {
+            out.setRGB(x, y, base.getRGB(x, faceTop + y))
+        }
+    }
+    target.parentFile.mkdirs()
+    ImageIO.write(out, "png", target)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
+    val height = (headPixels - row) * scale
+    val out = BufferedImage(scale, height, BufferedImage.TYPE_INT_ARGB)
+    val white = 0xFFFFFFFF.toInt()
+    for (y in 0 until scale) {
+        for (x in 0 until scale) {
+            out.setRGB(x, y, white)
+        }
+    }
+    target.parentFile.mkdirs()
+    ImageIO.write(out, "png", target)
+}
+
 fun titleFromId(id: String): String = id.split('_').joinToString(" ") { part ->
     part.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+}
+
+
+
+
+
+fun cardDisplayName(id: String): String {
+    if (id == "big_joker") return "大王"
+    if (id == "small_joker") return "小王"
+    if (id == "card_back") return "牌背"
+    val suit = when {
+        id.startsWith("clubs_") -> "梅花"
+        id.startsWith("diamonds_") -> "方块"
+        id.startsWith("hearts_") -> "红桃"
+        id.startsWith("spades_") -> "黑桃"
+        else -> ""
+    }
+    if (suit.isEmpty()) return titleFromId(id)
+    val rank = when (val raw = id.substringAfter('_')) {
+        "jack" -> "J"
+        "queen" -> "Q"
+        "king" -> "K"
+        "ace" -> "A"
+        else -> raw
+    }
+    return suit + rank
 }
 
 fun soundEventId(relativePath: String): String {
@@ -142,199 +407,11 @@ fun writeCardModel(target: File, texturePath: String) {
     )
 }
 
-fun writeTableVisualModel(target: File) {
-    writeText(
-        target,
-        """
-        {
-          "textures": {
-            "wood": "minecraft:block/dark_oak_planks",
-            "felt": "minecraft:block/green_wool"
-          },
-          "elements": [
-            {
-              "from": [1, 10, 1],
-              "to": [15, 12, 15],
-              "faces": {
-                "up": {"texture": "#felt"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [2, 0, 2],
-              "to": [4, 10, 4],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [12, 0, 2],
-              "to": [14, 10, 4],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [2, 0, 12],
-              "to": [4, 10, 14],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [12, 0, 12],
-              "to": [14, 10, 14],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            }
-          ],
-          "display": {
-            "gui": {
-              "rotation": [25, 225, 0],
-              "translation": [0, 0, 0],
-              "scale": [0.78, 0.78, 0.78]
-            },
-            "fixed": {
-              "rotation": [0, 0, 0],
-              "translation": [0, 0, 0],
-              "scale": [1, 1, 1]
-            }
-          }
-        }
-        """.trimIndent() + "\n"
-    )
-}
-
-fun writeSeatChairModel(target: File) {
-    writeText(
-        target,
-        """
-        {
-          "textures": {
-            "wood": "minecraft:block/spruce_planks",
-            "cushion": "minecraft:block/red_wool"
-          },
-          "elements": [
-            {
-              "from": [3, 7, 3],
-              "to": [13, 9, 13],
-              "faces": {
-                "up": {"texture": "#cushion"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [3, 9, 11],
-              "to": [13, 16, 13],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#cushion"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [3, 0, 3],
-              "to": [5, 7, 5],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [11, 0, 3],
-              "to": [13, 7, 5],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [3, 0, 11],
-              "to": [5, 7, 13],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            },
-            {
-              "from": [11, 0, 11],
-              "to": [13, 7, 13],
-              "faces": {
-                "up": {"texture": "#wood"},
-                "down": {"texture": "#wood"},
-                "north": {"texture": "#wood"},
-                "south": {"texture": "#wood"},
-                "west": {"texture": "#wood"},
-                "east": {"texture": "#wood"}
-              }
-            }
-          ],
-          "display": {
-            "gui": {
-              "rotation": [22, 225, 0],
-              "translation": [0, 0, 0],
-              "scale": [0.95, 0.95, 0.95]
-            },
-            "fixed": {
-              "rotation": [0, 0, 0],
-              "translation": [0, 0, 0],
-              "scale": [1, 1, 1]
-            }
-          }
-        }
-        """.trimIndent() + "\n"
-    )
-}
 
 val embeddedLibraries by configurations.creating
 
 repositories {
     mavenCentral()
-    maven("https://repo.tabooproject.org/repository/releases/")
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.momirealms.net/releases/")
@@ -365,43 +442,24 @@ java {
     withSourcesJar()
 }
 
-tasks.withType<Jar>().configureEach {
-    extensions.extraProperties["archivePath"] = archiveFile.get().asFile
-}
+
 
 tasks.named<Jar>("jar") {
+    enabled = false
+}
+
+tasks.named<ShadowJar>("shadowJar") {
     archiveFileName.set("MUZ-${project.version}-${muzTarget.id}.jar")
-    from(embeddedLibraries.map { dependency ->
-        if (dependency.isDirectory) dependency else zipTree(dependency)
-    })
+
+
+    configurations.set(listOf(embeddedLibraries))
+    relocate("org.yaml.snakeyaml", "linmumua.doudizhu.libs.snakeyaml")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
 }
 
-taboolib {
-    relocate("org.yaml.snakeyaml", "linmumua.doudizhu.libs.snakeyaml")
-    version {
-        taboolib = "6.3.0-75b18a2"
-        coroutines = "1.7.3"
-        skipTabooLibRelocate = true
-
-        // MUZ 自己维护 plugin.yml（含 api-version、folia-supported、softdepend 与权限），
-        // 不能让 TabooLib 的 Bukkit 平台覆盖它，否则命令与权限会丢失。
-        skipPlatformFile = true
-    }
-    env {
-        // 只把 TabooLib 的 loader 引导层打进 JAR，
-        // 平台实现与功能模块在首次启动时由 loader 从仓库下载到 libraries 目录。
-        // 只装引导层。platform-bukkit 与 common-platform-api 都假定
-        // taboolib.platform.BukkitPlugin 是插件入口，而 MUZ 用自己的 JavaPlugin，
-        // 装上会让 EventBus 与 PlatformFactory 拿不到实例并刷一屏堆栈。
-        install("common")
-    }
-}
-
 val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
-    dependsOn("taboolibMainTask")
-    val pluginJar = tasks.named<Jar>("jar").flatMap { it.archiveFile }
+    val pluginJar = tasks.named<ShadowJar>("shadowJar").flatMap { it.archiveFile }
     inputs.file(pluginJar)
 
     doLast {
@@ -445,16 +503,18 @@ val generateResourcePack = tasks.register("generateResourcePack") {
             legacyAssetsRoot.deleteRecursively()
         }
 
+
+
+
+        val packFormat = muzTarget.resourcePackFormat
         writeText(
             outputRoot.resolve("pack.mcmeta"),
             """
             {
               "pack": {
-                "pack_format": 94,
-                "supported_formats": {
-                  "min_inclusive": 94,
-                  "max_inclusive": 94
-                },
+                "pack_format": $packFormat,
+                "min_format": [$packFormat, 0],
+                "max_format": [$packFormat, 0],
                 "description": "✦ MUMU ✦\n作者 linmumua · QQ 356013496\n加载正常成功"
               }
             }
@@ -477,21 +537,70 @@ val generateResourcePack = tasks.register("generateResourcePack") {
                 val texturePath = "$resourceNamespace:item/cards/$id"
                 writeItemDefinition(itemCardsDir.resolve("$id.json"), texturePath)
                 writeCardModel(modelCardsDir.resolve("$id.json"), texturePath)
+
+
+                writeCardFaceGlyph(texture, outputAssetsRoot.resolve("textures/font/cards/$id.png"))
             }
 
-        uiTextureDir.listFiles()
-            ?.filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
-            ?.sortedBy { it.nameWithoutExtension }
-            ?.forEach { texture ->
-                val id = texture.nameWithoutExtension
-                writeItemDefinition(itemUiDir.resolve("$id.json"), "$resourceNamespace:item/ui/$id")
-                writeFlatItemModel(modelUiDir.resolve("$id.json"), "$resourceNamespace:item/ui/$id")
-            }
 
-        writeItemDefinition(itemFurnitureDir.resolve("table_visual.json"), "$resourceNamespace:item/furniture/table_visual")
-        writeItemDefinition(itemFurnitureDir.resolve("seat_chair.json"), "$resourceNamespace:item/furniture/seat_chair")
-        writeTableVisualModel(modelFurnitureDir.resolve("table_visual.json"))
-        writeSeatChairModel(modelFurnitureDir.resolve("seat_chair.json"))
+
+        for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
+            for (row in 0 until avatarOutlinedPixels) {
+                writeAvatarPixelGlyph(
+                    outputAssetsRoot.resolve("textures/font/avatar/pixel_${scale}_$row.png"),
+                    scale,
+                    row,
+                    avatarOutlinedPixels
+                )
+            }
+        }
+
+
+
+
+        val uiTexturesRoot = outputAssetsRoot.resolve("textures/item/ui")
+        if (uiTexturesRoot.exists()) {
+            uiTexturesRoot.deleteRecursively()
+        }
+
+
+
+
+
+
+        writeItemDefinition(
+            itemFurnitureDir.resolve("$tableFurnitureId.json"),
+            "$resourceNamespace:item/furniture/$tableFurnitureId"
+        )
+        writeItemDefinition(
+            itemFurnitureDir.resolve("$chairFurnitureId.json"),
+            "$resourceNamespace:item/furniture/$chairFurnitureId"
+        )
+
+
+        check(modelFurnitureDir.resolve("$tableFurnitureId.json").isFile) {
+            "缺少桌子模型：resourcepack/assets/$sourceResourceNamespace/models/item/furniture/$tableFurnitureId.json"
+        }
+        check(modelFurnitureDir.resolve("$chairFurnitureId.json").isFile) {
+            "缺少椅子模型：resourcepack/assets/$sourceResourceNamespace/models/item/furniture/$chairFurnitureId.json"
+        }
+
+        modelFurnitureDir.resolve("table_visual.json").delete()
+        modelFurnitureDir.resolve("seat_chair.json").delete()
+
+
+
+
+
+
+        val botAvatarFontDir = outputAssetsRoot.resolve("textures/font")
+        val botAvatarBase = botAvatarFontDir.resolve("bot_avatar.png")
+        check(botAvatarBase.isFile) {
+            "缺少机器人头像贴图：${botAvatarBase.absolutePath}"
+        }
+        writeOutlinedGlyph(botAvatarBase, botAvatarFontDir.resolve("bot_avatar_landlord.png"), 0xFFFFD24A.toInt())
+        writeOutlinedGlyph(botAvatarBase, botAvatarFontDir.resolve("bot_avatar_farmer.png"), 0xFF141414.toInt())
+
 
         val soundFiles = soundSourceDir.walkTopDown()
             .filter { it.isFile && it.extension.equals("ogg", ignoreCase = true) }
@@ -545,65 +654,179 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
             ?.sorted()
             .orEmpty()
 
-        val uiIds = uiTextureDir.listFiles()
-            ?.filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
-            ?.map { it.nameWithoutExtension }
-            ?.sorted()
-            .orEmpty()
-
         val cardItemsConfig = buildString {
             appendLine("items:")
             cardIds.forEach { id ->
                 appendLine("  $resourceNamespace:$id:")
                 appendLine("    material: paper")
                 appendLine("    data:")
-                appendLine("      item-name: <!i><white>${titleFromId(id)}</white>")
+                appendLine("      item_name: <!i>${cardDisplayName(id)}")
                 appendLine("    model: $resourceNamespace:item/cards/$id")
             }
         }
         writeText(bundleRoot.resolve("configuration/items/doudizhu/cards.yml"), cardItemsConfig)
 
-        val uiItemsConfig = buildString {
-            appendLine("items:")
-            uiIds.forEach { id ->
-                appendLine("  $resourceNamespace:ui_$id:")
-                appendLine("    material: paper")
-                appendLine("    data:")
-                appendLine("      item-name: <!i><gold>${titleFromId(id)}</gold>")
-                appendLine("    model: $resourceNamespace:item/ui/$id")
-            }
-        }
-        writeText(bundleRoot.resolve("configuration/items/doudizhu/ui.yml"), uiItemsConfig)
+
+
+        bundleRoot.resolve("configuration/items/doudizhu/ui.yml").delete()
 
         val doudizhuCategoryConfig = buildString {
             appendLine("categories:")
             appendLine("  $resourceNamespace:doudizhu:")
-            appendLine("    name: <!i><gold>斗地主</gold>")
+            appendLine("    name: <!i>斗地主")
             appendLine("    icon: $resourceNamespace:big_joker")
             appendLine("    list:")
             cardIds.forEach { id ->
                 appendLine("      - $resourceNamespace:$id")
             }
-            uiIds.forEach { id ->
-                appendLine("      - $resourceNamespace:ui_$id")
-            }
-            appendLine("      - $resourceNamespace:table_visual")
-            appendLine("      - $resourceNamespace:seat_chair")
+            appendLine("      - $resourceNamespace:$tableFurnitureId")
+            appendLine("      - $resourceNamespace:$chairFurnitureId")
         }
         writeText(bundleRoot.resolve("configuration/categories.yml"), doudizhuCategoryConfig)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        val cardGlyphImages = buildString {
+            cardGlyphHeightTiers.forEachIndexed { heightTier, height ->
+                cardGlyphDownOffsetTiers.forEachIndexed { downTier, downOffset ->
+                    val tier = heightTier * cardGlyphDownOffsetTiers.size + downTier
+                    cardIds.forEachIndexed { index, id ->
+                        val codepoint = cardGlyphCodepointStart + tier * cardIds.size + index
+                        val charEscape = "\\u%04x".format(codepoint)
+                        appendLine("  $resourceNamespace:card_${id}_h${height}_d$downOffset:")
+                        appendLine("    height: $height")
+                        appendLine("    ascent: ${height - downOffset}")
+                        appendLine("    font: $cardGlyphFont")
+                        appendLine("    file: $resourceNamespace:font/cards/$id.png")
+                        appendLine("    char: $charEscape")
+                    }
+                }
+            }
+        }
+
+
+
+
+
+
+
+
+
+        // 头像族走 avatarDownOffsetTiers：牌那张表的浅档头像永远用不到，
+        // 生成出来只是白占 images.yml 条目与私有区码位。
+        val avatarPixelImages = buildString {
+            avatarDownOffsetTiers.forEachIndexed { downTier, downOffset ->
+                for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
+                    for (row in 0 until avatarOutlinedPixels) {
+                        val perTier = (avatarPixelMaxScale - avatarPixelMinScale + 1) * avatarOutlinedPixels
+                        val index = (scale - avatarPixelMinScale) * avatarOutlinedPixels + row
+                        val codepoint = avatarPixelCodepointStart + downTier * perTier + index
+                        val charEscape = "\\u%04x".format(codepoint)
+                        val size = (avatarOutlinedPixels - row) * scale
+                        appendLine("  $resourceNamespace:avatar_px_${scale}_${row}_d$downOffset:")
+                        appendLine("    height: $size")
+                        appendLine("    ascent: ${size - downOffset}")
+                        appendLine("    font: $avatarPixelFont")
+                        appendLine("    file: $resourceNamespace:font/avatar/pixel_${scale}_$row.png")
+                        appendLine("    char: $charEscape")
+                    }
+                }
+            }
+        }
+
+
+
+
+        val botAvatarGlyphs = listOf("bot_avatar" to 10, "bot_avatar_landlord" to 11, "bot_avatar_farmer" to 11)
+        // bot 兜底图标画在【头像行】（真人皮肤取不到时的替代），所以跟头像表，不跟牌表。
+        // 跟错表会让 bot 玩家的图标和真人头像上下错开一整行。
+        // 码位公式里的 (downTier - 1) 与「downTier == 0 跳过」是配套的：档 0 复用最上面
+        // 那三个原始码位（桌边座位牌用的就是它们，不能跟着 HUD 沉），所以这里生成的第一条
+        // 是 downTier == 1，它必须落在 botAvatarDownCodepointStart + 0 * 3 上。
+        val botAvatarDownImages = buildString {
+            avatarDownOffsetTiers.forEachIndexed { downTier, downOffset ->
+                if (downTier != 0) {
+                    botAvatarGlyphs.forEachIndexed { roleIndex, glyph ->
+                        val name = glyph.first
+                        val height = glyph.second
+                        val codepoint = botAvatarDownCodepointStart +
+                            (downTier - 1) * botAvatarGlyphs.size + roleIndex
+                        val charEscape = "\\u%04x".format(codepoint)
+                        appendLine("  $resourceNamespace:${name}_d$downOffset:")
+                        appendLine("    height: $height")
+                        appendLine("    ascent: ${8 - downOffset}")
+                        appendLine("    font: $botAvatarFont")
+                        appendLine("    file: $resourceNamespace:font/$name.png")
+                        appendLine("    char: $charEscape")
+                    }
+                }
+            }
+        }
+
+        writeText(
+            bundleRoot.resolve("configuration/images.yml"),
+            """
+            images:
+              $resourceNamespace:bot_avatar:
+                height: 10
+                ascent: 8
+                font: $botAvatarFont
+                file: $resourceNamespace:font/bot_avatar.png
+                char: $botAvatarCharEscape
+              $resourceNamespace:bot_avatar_landlord:
+                height: 11
+                ascent: 8
+                font: $botAvatarFont
+                file: $resourceNamespace:font/bot_avatar_landlord.png
+                char: $botAvatarLandlordCharEscape
+              $resourceNamespace:bot_avatar_farmer:
+                height: 11
+                ascent: 8
+                font: $botAvatarFont
+                file: $resourceNamespace:font/bot_avatar_farmer.png
+                char: $botAvatarFarmerCharEscape
+            """.trimIndent() + "\n" + botAvatarDownImages + cardGlyphImages + avatarPixelImages
+        )
+
         val furnitureConfig = buildString {
             appendLine("items:")
-            appendLine("  $resourceNamespace:table_visual_model:")
+            appendLine("  $resourceNamespace:${tableFurnitureId}_model:")
             appendLine("    material: paper")
             appendLine("    data:")
-            appendLine("      item-name: <!i><gold>Dou Dizhu Table</gold>")
-            appendLine("    model: $resourceNamespace:item/furniture/table_visual")
-            appendLine("  $resourceNamespace:table_visual:")
+            appendLine("      item_name: <!i>斗地主桌子模型")
+            appendLine("    model:")
+            appendLine("      type: minecraft:model")
+            appendLine("      path: $resourceNamespace:item/furniture/$tableFurnitureId")
+            appendLine("  $resourceNamespace:$tableFurnitureId:")
             appendLine("    material: paper")
             appendLine("    data:")
-            appendLine("      item-name: <!i><gold>Dou Dizhu Table Furniture</gold>")
-            appendLine("    model: $resourceNamespace:item/furniture/table_visual")
+            appendLine("      item_name: <!i>斗地主桌子")
+            appendLine("    model:")
+            appendLine("      type: minecraft:model")
+            appendLine("      path: $resourceNamespace:item/furniture/$tableFurnitureId")
             appendLine("    behavior:")
             appendLine("      type: furniture_item")
             appendLine("      rules:")
@@ -612,8 +835,18 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
             appendLine("          alignment: center")
             appendLine("      furniture:")
             appendLine("        settings:")
-            appendLine("          item: $resourceNamespace:table_visual")
-            appendLine("          hit-times: 2147483647")
+            appendLine("          item: $resourceNamespace:$tableFurnitureId")
+
+
+
+
+
+
+
+
+
+
+            appendLine("          hit_times: 2147483647")
             appendLine("          sounds:")
             appendLine("            break: minecraft:block.wood.break")
             appendLine("            place: minecraft:block.wood.place")
@@ -621,54 +854,144 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
             appendLine("        variants:")
             appendLine("          ground:")
             appendLine("            elements:")
-            appendLine("              - item: $resourceNamespace:table_visual_model")
-            appendLine("                display-transform: none")
+            appendLine("              - item: $resourceNamespace:${tableFurnitureId}_model")
+            appendLine("                display_transform: none")
             appendLine("                billboard: fixed")
-            appendLine("                position: 0,0,0")
+
+
+
+            appendLine("                position: 0,0.5,0")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             appendLine("                translation: 0,0,0")
-            appendLine("                shadow-radius: 0")
-            appendLine("                shadow-strength: 0")
-            appendLine("  $resourceNamespace:seat_chair_model:")
-            appendLine("    material: paper")
-            appendLine("    data:")
-            appendLine("      item-name: <!i><red>Dou Dizhu Chair</red>")
-            appendLine("    model: $resourceNamespace:item/furniture/seat_chair")
-            appendLine("  $resourceNamespace:seat_chair:")
-            appendLine("    material: paper")
-            appendLine("    data:")
-            appendLine("      item-name: <!i><red>Dou Dizhu Seat</red>")
-            appendLine("    model: $resourceNamespace:item/furniture/seat_chair")
-            appendLine("    behavior:")
-            appendLine("      type: furniture_item")
-            appendLine("      rules:")
-            appendLine("        ground:")
-            appendLine("          rotation: four")
-            appendLine("          alignment: center")
-            appendLine("      furniture:")
-            appendLine("        settings:")
-            appendLine("          item: $resourceNamespace:seat_chair")
-            appendLine("          hit-times: 2147483647")
-            appendLine("          sounds:")
-            appendLine("            break: minecraft:block.wood.break")
-            appendLine("            place: minecraft:block.wood.place")
-            appendLine("            hit: minecraft:block.wood.hit")
-            appendLine("        variants:")
-            appendLine("          ground:")
-            appendLine("            elements:")
-            appendLine("              - item: $resourceNamespace:seat_chair_model")
-            appendLine("                display-transform: none")
-            appendLine("                billboard: fixed")
-            appendLine("                position: 0,0,0")
-            appendLine("                translation: 0,0,0")
-            appendLine("                shadow-radius: 0")
-            appendLine("                shadow-strength: 0")
+
+
+            appendLine("                scale: 1,1,1")
+            appendLine("                shadow_radius: 0")
+            appendLine("                shadow_strength: 0")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             appendLine("            hitboxes:")
-            appendLine("              - type: interaction")
-            appendLine("                position: 0,0.2,0")
-            appendLine("                width: 0.8")
-            appendLine("                height: 1.2")
-            appendLine("                blocks-building: false")
+            for (offsetZ in listOf("-0.75", "0.75")) {
+                for (offsetX in listOf("-0.75", "0.75")) {
+                    appendLine("              - type: shulker")
+                    appendLine("                position: $offsetX,0,$offsetZ")
+                    appendLine("                direction: up")
+                        appendLine("                peek: 33")
+                        appendLine("                scale: 1")
+                    appendLine("                blocks_building: true")
+                    appendLine("                interactive: true")
+                    appendLine("                invisible: true")
+                }
+            }
+            appendLine("  $resourceNamespace:${chairFurnitureId}_model:")
+            appendLine("    material: paper")
+            appendLine("    data:")
+            appendLine("      item_name: <!i>斗地主椅子模型")
+            appendLine("    model:")
+            appendLine("      type: minecraft:model")
+            appendLine("      path: $resourceNamespace:item/furniture/$chairFurnitureId")
+            appendLine("  $resourceNamespace:$chairFurnitureId:")
+            appendLine("    material: paper")
+            appendLine("    data:")
+            appendLine("      item_name: <!i>斗地主椅子")
+            appendLine("    model:")
+            appendLine("      type: minecraft:model")
+            appendLine("      path: $resourceNamespace:item/furniture/$chairFurnitureId")
+            appendLine("    behavior:")
+            appendLine("      type: furniture_item")
+            appendLine("      rules:")
+            appendLine("        ground:")
+            appendLine("          rotation: four")
+            appendLine("          alignment: center")
+            appendLine("      furniture:")
+            appendLine("        settings:")
+            appendLine("          item: $resourceNamespace:$chairFurnitureId")
+            appendLine("          hit_times: 2147483647")
+            appendLine("          sounds:")
+            appendLine("            break: minecraft:block.wood.break")
+            appendLine("            place: minecraft:block.wood.place")
+            appendLine("            hit: minecraft:block.wood.hit")
+            appendLine("        variants:")
+            appendLine("          ground:")
+            appendLine("            elements:")
+            appendLine("              - item: $resourceNamespace:${chairFurnitureId}_model")
+            appendLine("                display_transform: none")
+            appendLine("                billboard: fixed")
+
+            appendLine("                position: 0,0.5,0")
+
+
+            appendLine("                translation: 0,0,0")
+            appendLine("                scale: 1,1,1")
+            appendLine("                shadow_radius: 0")
+            appendLine("                shadow_strength: 0")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            appendLine("            hitboxes:")
+
+
+
+
+                appendLine("              - type: shulker")
+                appendLine("                position: 0,0,0")
+                appendLine("                direction: up")
+                appendLine("                peek: 0")
+            appendLine("                scale: 0.8")
+            appendLine("                blocks_building: true")
             appendLine("                interactive: true")
+            appendLine("                interaction_entity: true")
             appendLine("                invisible: true")
             appendLine("                seats:")
             appendLine("                  - 0,0.1,0 180")
@@ -726,7 +1049,7 @@ tasks {
         dependsOn(generateCraftEngineBundle)
         filteringCharset = Charsets.UTF_8.name()
         from(generatedJarResourcesDir)
-        filesMatching("plugin.yml") {
+        filesMatching("paper-plugin.yml") {
             expand(
                 "version" to project.version,
                 "apiVersion" to muzTarget.pluginApiVersion
@@ -738,6 +1061,7 @@ tasks {
         useJUnitPlatform()
         systemProperty("muz.expectedPluginVersion", project.version.toString())
         systemProperty("muz.expectedApiVersion", muzTarget.pluginApiVersion)
+        systemProperty("muz.expectedResourcePackFormat", muzTarget.resourcePackFormat.toString())
     }
 
     build {
@@ -746,4 +1070,3 @@ tasks {
         dependsOn(zipCraftEngineBundle)
     }
 }
-

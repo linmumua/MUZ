@@ -48,6 +48,26 @@ public final class MuzTheme {
         return component.decoration(TextDecoration.ITALIC, false);
     }
 
+    /**
+     * 拼接多个 Component 并去除斜体装饰。null 元素被跳过。
+     *
+     * <p>共用于 {@link linmumua.doudizhu.DoudizhuPlugin} 和
+     * {@link linmumua.doudizhu.world.PhysicalTableManager}，两者逻辑 100% 相同，
+     * 因此必须共用，避免改一处漏一处。
+     *
+     * @param components 要拼接的组件（可含 null）
+     * @return 拼接后去斜体的结果
+     */
+    public static Component concat(Component... components) {
+        Component result = Component.empty();
+        for (Component component : components) {
+            if (component != null) {
+                result = result.append(component);
+            }
+        }
+        return plain(result);
+    }
+
     public static Component text(String content, TextColor color) {
         return gradient(content, color, color, false);
     }

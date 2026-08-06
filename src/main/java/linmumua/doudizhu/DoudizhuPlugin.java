@@ -3,8 +3,10 @@ package linmumua.doudizhu;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.ai.OpenAiCompatibleAiChatGateway;
 
+import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineBundleExporter;
 import linmumua.doudizhu.compat.CraftEngineFurnitureService;
+import linmumua.doudizhu.compat.CraftEngineOffsetService;
 import linmumua.doudizhu.compat.VaultEconomyBridge;
 import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
@@ -17,7 +19,6 @@ import linmumua.doudizhu.listener.WorldTableInteractionListener;
 import linmumua.doudizhu.placeholder.MuzPlaceholderExpansion;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.scheduler.MuzScheduler;
-import linmumua.doudizhu.tabooruntime.MuzTabooRuntime;
 import linmumua.doudizhu.storage.DatabaseManager;
 import linmumua.doudizhu.storage.MatchParticipantRecord;
 import linmumua.doudizhu.storage.MatchRecord;
@@ -58,7 +59,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.block.BlockFace;
 import org.bukkit.command.CommandSender;
-import org.bukkit.command.PluginCommand;
+import org.bukkit.command.Command;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
@@ -72,8 +73,14 @@ import org.bukkit.plugin.java.JavaPlugin;
  */
 public final class DoudizhuPlugin extends JavaPlugin {
     private static final MiniMessage MINI = MiniMessage.miniMessage();
-    private static final String DEFAULT_TABLE_ITEM_MODEL = "muz:furniture/table_visual";
-    private static final String DEFAULT_CHAIR_ITEM_MODEL = "muz:furniture/seat_chair";
+    /**
+     * 家具模型 id。必须和 build.gradle.kts 里的 tableFurnitureId / chairFurnitureId 一致，
+     * 也要和源包 models/item/furniture/ 下的文件名一致，否则 CE 找不到模型、桌椅渲染不出来。
+     */
+    private static final String TABLE_FURNITURE_ID = "table_large";
+    private static final String CHAIR_FURNITURE_ID = "chair_large";
+    private static final String DEFAULT_TABLE_ITEM_MODEL = "muz:furniture/" + TABLE_FURNITURE_ID;
+    private static final String DEFAULT_CHAIR_ITEM_MODEL = "muz:furniture/" + CHAIR_FURNITURE_ID;
     private static final String DEFAULT_TABLE_DISPLAY_NAME = "Dou Dizhu Table";
     private static final String DEFAULT_CHAIR_DISPLAY_NAME = "Dou Dizhu Chair";
     private static final String HISTORY_CYAN = "#5EAACA";
@@ -85,14 +92,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private static final String HISTORY_RED = "#8E314E";
     private static final String HISTORY_GREEN = "#3F9969";
     private static final String HISTORY_MINT = "#74BF98";
-    private static final double OLDER_BUTTON_DISTANCE = 1.10;
-    private static final double LEGACY_BUTTON_DISTANCE = 1.45;
-    private static final double DEFAULT_BUTTON_DISTANCE = 2.10;
+    /** 按钮离桌距离。1.40 是测试服实测调优值，比原来的 2.10 更贴近桌沿。 */
+    private static final double DEFAULT_BUTTON_DISTANCE = 1.40;
 
-    private static final double LEGACY_CARD_HITBOX_VERTICAL_OFFSET = 0.05;
-    private static final double DEFAULT_CARD_HITBOX_VERTICAL_OFFSET = -0.45;
     private static final boolean DEFAULT_SELECTION_SOUND_ENABLED = true;
-    private static final boolean DEFAULT_OPPONENT_PREVIEW_ENABLED = true;
     private static final String DEFAULT_SELECTION_SOUND_SPEC = "minecraft:block.note_block.pling 0.35 1.18 0.92";
     private static final String DEFAULT_COUNTDOWN_SOUND_SPEC = "minecraft:block.note_block.hat 0.45 1.00";
     private static final String DEFAULT_UNREADY_WARNING_SOUND_SPEC = "minecraft:block.note_block.didgeridoo 0.55 0.85";
@@ -106,9 +109,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
         当对手剩牌很少时，可以适当提高压制优先级；当队友仍有机会接管节奏时，避免过度消耗自己的终结资源。
         如果后续系统消息要求你只输出固定格式，你必须严格服从，不解释、不闲聊、不追加额外文本。
         """;
+    // bot.action-delay-ticks 的 min/max 默认值必须通过常量共用：
+    // L2849/L3083 读同一个旧键做 min 回退，L2850/L3087 读同一个旧键做 max 回退，
+    // 若各处硬编码不同字面量，改一处漏一处会导致配置迁移与运行时读取不一致。
+    private static final int DEFAULT_BOT_DELAY_MIN_TICKS = 10;
+    private static final int DEFAULT_BOT_DELAY_MAX_TICKS = 30;
     private static final int PLAYER_OPTION_PROFILE_COUNT = 4;
-    private static final float DEFAULT_PRIVATE_CARD_SCALE = 0.50f;
-    private static final float DEFAULT_PUBLIC_CARD_SCALE = 0.58f;
+    /** 手牌基础大小。0.8 是测试服实测调优值，原来的 0.35 在实机上偏小。 */
+    private static final float DEFAULT_PRIVATE_CARD_SCALE = 0.8f;
+    private static final float DEFAULT_PRIVATE_CARD_AXIS_SCALE = 0.50f;
     private static final List<GlowColorOption> GLOW_COLOR_OPTIONS = List.of(
         new GlowColorOption("默认", null),
         new GlowColorOption("金黄", Color.fromRGB(255, 226, 92)),
@@ -134,6 +143,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private NamespacedKey tableRemoverIdKey;
     private CraftEngineBundleExporter craftEngineBundleExporter;
     private CraftEngineFurnitureService craftEngineFurnitureService;
+    private CraftEngineOffsetService craftEngineOffsetService;
+    private PlayerHeadRenderer playerHeadRenderer;
     private VaultEconomyBridge vaultEconomyBridge;
     private AiChatGateway aiChatGateway;
     private AiChatGateway.ProviderConfig aiProviderConfig;
@@ -145,13 +156,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private boolean duplicateOnlyCardLabels;
     private double tableSpawnOffsetY;
     private float privateCardScale;
-    private float publicCardScale;
     private float privateCardWidthScale;
     private float privateCardHeightScale;
     private float privateCardDepthScale;
-    private float publicCardWidthScale;
-    private float publicCardHeightScale;
-    private float publicCardDepthScale;
     private float hoverCardScale;
     private double hoverCardLift;
     private int cardHoverInterpolationTicks;
@@ -161,20 +168,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private float smallTextScale;
     private float statusTextScale;
     private float labelTextScale;
-    private float playerHeadScale;
-    private PlayerHeadDisplayMode playerHeadDisplayMode = PlayerHeadDisplayMode.BOTH;
-    private float statusAvatarScale;
-    private double statusAvatarLateralOffset;
-    private double statusAvatarVerticalOffset;
-    private double statusAvatarDepthOffset;
     private float statusNameScale;
     private double statusNameLateralOffset;
     private double statusNameVerticalOffset;
     private double statusNameDepthOffset;
-    private float seatAvatarScale;
-    private double seatAvatarLateralOffset;
-    private double seatAvatarVerticalOffset;
-    private double seatAvatarDepthOffset;
     private float seatNameScale;
     private double seatNameLateralOffset;
     private double seatNameVerticalOffset;
@@ -189,7 +186,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double seatInfoDepthOffset;
     private float cardDepthOffset;
     private float handSpacing;
-    private float publicTrickSpacing;
     private float selectedCardScale;
     private double selectedCardLift;
     private boolean hoverGlowEnabled;
@@ -220,15 +216,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double buttonHitboxLateralOffset;
     private double buttonHitboxDepthOffset;
     private double buttonHitboxVerticalOffset;
-    private double cardHitboxLateralOffset;
-    private double cardHitboxDepthOffset;
-    private double cardHitboxVerticalOffset;
-    private double cardHitboxLength;
-    private double cardHitboxWidth;
-    private double cardHitboxHeight;
     private double statusHeight;
     private double playDetailHeight;
-    private double publicTrickHeight;
     private int statusLineWidth;
     private double handCenterDistance;
     private double handCenterHeight;
@@ -245,11 +234,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private double buttonArcLargeAngleDegrees;
     private double buttonArcSmallRadius;
     private double buttonArcLargeRadius;
-    private int previewCardsPerRow;
-    private double publicPreviewCompareRowOffset;
-    private double publicPreviewSelectedRowOffset;
-    private double publicPreviewRowDepthSpacing;
-    private double publicPreviewLabelHeight;
     private float bgmVolume;
     private float effectVolume;
     private int turnCountdownSeconds;
@@ -275,7 +259,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private String chairDisplayName;
     private final Map<UUID, Boolean> playerCardLabelSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> playerSelectionSoundSettings = new ConcurrentHashMap<>();
-    private final Map<UUID, Boolean> playerOpponentPreviewSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerSelectionSoundProfileSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerPlayActionProfileSettings = new ConcurrentHashMap<>();
     private final Map<UUID, EnumMap<PlayActionKind, Integer>> playerPlayActionKindProfileSettings = new ConcurrentHashMap<>();
@@ -336,9 +319,24 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private void saveYamlConfig() {
         try {
-            yamlConfig().save();
+            // 带上打包模板，把注释按键路径补回去；否则每次保存都会把玩家的
+            // config.yml 冲成一份没有任何取值说明的裸配置。
+            yamlConfig().saveWithComments(packagedConfigTemplate());
         } catch (IOException exception) {
             getLogger().warning("保存 config.yml 失败: " + exception.getMessage());
+        }
+    }
+
+    /** 读 jar 里打包的 config.yml 模板；读不到就返回 null，调用方退回无注释保存。 */
+    private String packagedConfigTemplate() {
+        try (java.io.InputStream stream = getResource("config.yml")) {
+            if (stream == null) {
+                return null;
+            }
+            return new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IOException exception) {
+            getLogger().warning("读取打包 config.yml 模板失败: " + exception.getMessage());
+            return null;
         }
     }
 
@@ -352,16 +350,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        // 引导放在 onEnable：Paper 在 onLoad 阶段不允许向插件 ClassLoader 追加类，
-        // 会导致 TabooLib 注入 Kotlin 后仍找不到 kotlin.Lazy。
-        MuzTabooRuntime.bootstrap(getLogger());
-        MuzTabooRuntime.enable(getLogger());
+        // 关服时保存玩家设置会输出空映射，那条 FLOW 分支的 Emitter 内部类必须在此刻加载好：
+        // onDisable 阶段 Paper 已不再为插件 ClassLoader 提供新类。
+        MuzYamlConfig.warmUpFlowEmitter();
         scheduler = new MuzScheduler(this);
         saveDefaultYamlConfig();
         ensureConfigIntegrity();
         optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
         loadRenderSettings();
         loadAiSettings();
+        // 放在两个 load 之后：登记表要等读取点跑过一遍才填满
+        migrateZeroableDefaults();
         playerSettingsFile = new File(getDataFolder(), "player-settings.yml");
         loadPlayerSettings();
         cardIdKey = new NamespacedKey(this, "card-id");
@@ -378,6 +377,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         databaseManager = new DatabaseManager(this);
         craftEngineBundleExporter = new CraftEngineBundleExporter(this);
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
+        craftEngineOffsetService = new CraftEngineOffsetService(this);
+        playerHeadRenderer = new PlayerHeadRenderer(this, craftEngineOffsetService);
         vaultEconomyBridge = new VaultEconomyBridge(this);
         physicalTableManager = new PhysicalTableManager(this);
         initializePersistence();
@@ -417,7 +418,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (databaseManager != null) {
             databaseManager.close();
         }
-        MuzTabooRuntime.disable(getLogger());
     }
 
     public TableManager getTableManager() {
@@ -939,6 +939,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return craftEngineFurnitureService;
     }
 
+    public CraftEngineOffsetService getCraftEngineOffsetService() {
+        return craftEngineOffsetService;
+    }
+
+    public PlayerHeadRenderer getPlayerHeadRenderer() {
+        return playerHeadRenderer;
+    }
+
     public boolean isShuttingDown() {
         return shuttingDown;
     }
@@ -1277,14 +1285,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         setSelectionSoundProfileDefinition(getPlayerSelectionSoundProfileIndex(playerId), optionProfile("玩家自定义", rawSpec, true));
     }
 
-    public boolean isOpponentPreviewEnabledFor(UUID playerId) {
-        return playerOpponentPreviewSettings.getOrDefault(playerId, DEFAULT_OPPONENT_PREVIEW_ENABLED);
-    }
-
-    public boolean toggleOpponentPreviewFor(UUID playerId) {
-        return togglePlayerPreference(playerId, playerOpponentPreviewSettings, DEFAULT_OPPONENT_PREVIEW_ENABLED);
-    }
-
     public void cyclePreviewGlowColor(UUID playerId) {
         playerHoverGlowColorSettings.remove(playerId);
         savePlayerSettings();
@@ -1488,7 +1488,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public void resetPlayerVisualSettings(UUID playerId) {
         playerCardLabelSettings.remove(playerId);
         playerSelectionSoundSettings.remove(playerId);
-        playerOpponentPreviewSettings.remove(playerId);
         playerSelectionSoundProfileSettings.remove(playerId);
         playerPlayActionProfileSettings.remove(playerId);
         playerPlayActionKindProfileSettings.remove(playerId);
@@ -1496,27 +1495,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         playerSelectedGlowColorSettings.remove(playerId);
         playerHandOffsets.remove(playerId);
         savePlayerSettings();
-    }
-
-    private void cyclePlayerGlowColor(UUID playerId, Map<UUID, Integer> settings, boolean previewColor) {
-        int current = clampGlowColorIndex(settings.getOrDefault(playerId, 0));
-        int other = previewColor
-            ? clampGlowColorIndex(playerSelectedGlowColorSettings.getOrDefault(playerId, 0))
-            : clampGlowColorIndex(playerHoverGlowColorSettings.getOrDefault(playerId, 0));
-        Color otherColor = resolveGlowColor(other, !previewColor);
-        for (int attempt = 1; attempt <= GLOW_COLOR_OPTIONS.size(); attempt++) {
-            int next = clampGlowColorIndex((current + attempt) % GLOW_COLOR_OPTIONS.size());
-            Color candidateColor = resolveGlowColor(next, previewColor);
-            if (!sameColor(candidateColor, otherColor)) {
-                if (next == 0) {
-                    settings.remove(playerId);
-                } else {
-                    settings.put(playerId, next);
-                }
-                savePlayerSettings();
-                return;
-            }
-        }
     }
 
     private GlowColorOption glowColorOption(int index) {
@@ -1600,10 +1578,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return privateCardScale;
     }
 
-    public float getPublicCardScale() {
-        return publicCardScale;
-    }
-
 
 
     public float getTableScale() {
@@ -1626,49 +1600,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return labelTextScale;
     }
 
-    public float getPlayerHeadScale() {
-        return playerHeadScale;
-    }
-
-    public PlayerHeadDisplayMode playerHeadDisplayMode() {
-        return playerHeadDisplayMode == null ? PlayerHeadDisplayMode.BOTH : playerHeadDisplayMode;
-    }
-
-    public boolean shouldShowPlayerHeadAvatar() {
-        return playerHeadDisplayMode().showAvatar();
-    }
-
-    public boolean shouldShowPlayerHeadName() {
-        return playerHeadDisplayMode().showName();
-    }
-
-    public String playerHeadDisplayModeLabel() {
-        return playerHeadDisplayMode().label();
-    }
-
-    public void cyclePlayerHeadDisplayMode() {
-        playerHeadDisplayMode = playerHeadDisplayMode().next();
-        yamlConfig().set("render.player-head-show-id", playerHeadDisplayMode.configValue());
-        saveYamlConfig();
-        reloadVisualState(false, ReloadFeedback.silent());
-    }
-
-    public float getStatusAvatarScale() {
-        return statusAvatarScale;
-    }
-
-    public double getStatusAvatarLateralOffset() {
-        return statusAvatarLateralOffset;
-    }
-
-    public double getStatusAvatarVerticalOffset() {
-        return statusAvatarVerticalOffset;
-    }
-
-    public double getStatusAvatarDepthOffset() {
-        return statusAvatarDepthOffset;
-    }
-
     public float getStatusNameScale() {
         return statusNameScale;
     }
@@ -1683,22 +1614,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public double getStatusNameDepthOffset() {
         return statusNameDepthOffset;
-    }
-
-    public float getSeatAvatarScale() {
-        return seatAvatarScale;
-    }
-
-    public double getSeatAvatarLateralOffset() {
-        return seatAvatarLateralOffset;
-    }
-
-    public double getSeatAvatarVerticalOffset() {
-        return seatAvatarVerticalOffset;
-    }
-
-    public double getSeatAvatarDepthOffset() {
-        return seatAvatarDepthOffset;
     }
 
     public float getSeatNameScale() {
@@ -1836,18 +1751,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getLogger().info("Persisting mahjong table: " + id + " at " + center);
     }
 
-    public float getPublicCardWidthScale() {
-        return publicCardWidthScale;
-    }
-
-    public float getPublicCardHeightScale() {
-        return publicCardHeightScale;
-    }
-
-    public float getPublicCardDepthScale() {
-        return publicCardDepthScale;
-    }
-
     public float getHoverCardScale() {
         return hoverCardScale;
     }
@@ -1870,10 +1773,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public float getHandSpacing() {
         return handSpacing;
-    }
-
-    public float getPublicTrickSpacing() {
-        return publicTrickSpacing;
     }
 
 
@@ -2000,36 +1899,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return buttonHitboxVerticalOffset;
     }
 
-
-
-    public double getCardHitboxLateralOffset() {
-        return cardHitboxLateralOffset;
-    }
-
-    public double getCardHitboxDepthOffset() {
-        return cardHitboxDepthOffset;
-    }
-
-    public double getCardHitboxVerticalOffset() {
-        return cardHitboxVerticalOffset;
-    }
-
-    public double getCardHitboxWidth() {
-        return cardHitboxWidth;
-    }
-
-    public double getCardHitboxLength() {
-        return cardHitboxLength;
-    }
-
-    public double getCardHitboxHeight() {
-        return cardHitboxHeight;
-    }
-
-    public double getPublicTrickHeight() {
-        return publicTrickHeight;
-    }
-
     public int getStatusLineWidth() {
         return statusLineWidth;
     }
@@ -2092,26 +1961,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public double getButtonArcLargeRadius() {
         return buttonArcLargeRadius;
-    }
-
-    public int getPreviewCardsPerRow() {
-        return previewCardsPerRow;
-    }
-
-    public double getPublicPreviewCompareRowOffset() {
-        return publicPreviewCompareRowOffset;
-    }
-
-    public double getPublicPreviewSelectedRowOffset() {
-        return publicPreviewSelectedRowOffset;
-    }
-
-    public double getPublicPreviewRowDepthSpacing() {
-        return publicPreviewRowDepthSpacing;
-    }
-
-    public double getPublicPreviewLabelHeight() {
-        return publicPreviewLabelHeight;
     }
 
     public float getBgmVolume() {
@@ -2275,17 +2124,33 @@ public final class DoudizhuPlugin extends JavaPlugin {
             if (resolved != null) {
                 return List.of(resolved.itemId());
             }
-            List<String> configuredCandidates = furnitureItemIdCandidates(configured, null, "table_visual");
+            List<String> configuredCandidates = furnitureItemIdCandidates(configured, null, TABLE_FURNITURE_ID);
             if (!configuredCandidates.isEmpty()) {
                 return configuredCandidates;
             }
         }
-        return furnitureItemIdCandidates(tableItemModelId, "table_visual");
+        return furnitureItemIdCandidates(tableItemModelId, TABLE_FURNITURE_ID);
     }
 
     public String getTableDisplayName() {
         ItemStack configured = getConfiguredFurnitureItem(FurnitureType.TABLE);
         return configured == null ? tableDisplayName : configured.getType().name();
+    }
+
+    /**
+     * 桌子家具 id，供渲染层拼装模型键使用。
+     * @return 家具 id
+     */
+    public static String tableFurnitureId() {
+        return TABLE_FURNITURE_ID;
+    }
+
+    /**
+     * 椅子家具 id，供渲染层拼装模型键使用。
+     * @return 家具 id
+     */
+    public static String chairFurnitureId() {
+        return CHAIR_FURNITURE_ID;
     }
 
     public String getChairItemModelId() {
@@ -2300,12 +2165,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
             if (resolved != null) {
                 return List.of(resolved.itemId());
             }
-            List<String> configuredCandidates = furnitureItemIdCandidates(configured, null, "seat_chair");
+            List<String> configuredCandidates = furnitureItemIdCandidates(configured, null, CHAIR_FURNITURE_ID);
             if (!configuredCandidates.isEmpty()) {
                 return configuredCandidates;
             }
         }
-        return furnitureItemIdCandidates(chairItemModelId, "seat_chair");
+        return furnitureItemIdCandidates(chairItemModelId, CHAIR_FURNITURE_ID);
     }
 
     public boolean canUseHeldItemAsChairFurniture(ItemStack itemStack) {
@@ -2315,7 +2180,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (craftEngineFurnitureService != null && craftEngineFurnitureService.resolveCustomItem(itemStack) != null) {
             return true;
         }
-        return !furnitureItemIdCandidates(itemStack, null, "seat_chair").isEmpty() || itemStack.getType().isBlock();
+        return !furnitureItemIdCandidates(itemStack, null, CHAIR_FURNITURE_ID).isEmpty() || itemStack.getType().isBlock();
     }
 
     public String getChairDisplayName() {
@@ -2539,21 +2404,62 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return "斗地主";
     }
 
+    /**
+     * 读一项管理设置当前生效的小数值。
+     *
+     * 归零项在 config.yml 里写 0 表示"用默认"，菜单必须显示默认值而不是 0。
+     * 否则玩家打开菜单看到的基准是 0，按一下调整就从 0 起步，等于把调好的值清掉。
+     *
+     * @param setting 设置项
+     * @return 生效值
+     */
+    private double adminSettingCurrentValue(AdminSetting setting) {
+        double raw = yamlConfig().getDouble(setting.path(), setting.defaultValue());
+        return setting.zeroIsRealValue() ? raw : zeroMeansDefault(raw, setting.defaultValue());
+    }
+
+    /**
+     * {@link #adminSettingCurrentValue(AdminSetting)} 的整数版本。
+     *
+     * @param setting 设置项
+     * @return 生效值
+     */
+    private int adminSettingCurrentInt(AdminSetting setting) {
+        int fallback = (int) setting.defaultValue();
+        int raw = yamlConfig().getInt(setting.path(), fallback);
+        return setting.zeroIsRealValue() ? raw : zeroMeansDefault(raw, fallback);
+    }
+
     public void adjustAdminSetting(AdminSetting setting, boolean increase, int multiplier) {
+        adjustAdminSetting(setting, increase, multiplier, Double.NaN);
+    }
+
+    public void adjustAdminSetting(AdminSetting setting, boolean increase, int multiplier, double stepOverride) {
         if (setting.booleanSetting()) {
             yamlConfig().set(setting.path(), !yamlConfig().getBoolean(setting.path(), setting.defaultBoolean()));
         } else if (setting.integerSetting()) {
-            int current = yamlConfig().getInt(setting.path(), (int) setting.defaultValue());
+            int current = adminSettingCurrentInt(setting);
             int delta = (int) setting.step() * Math.max(1, multiplier);
+            // 不再按 min/max 夹紧：调整范围已按用户要求放开，声明值只留作默认与步长的参考。
             int next = current + (increase ? delta : -delta);
-            next = Math.max((int) setting.minValue(), Math.min((int) setting.maxValue(), next));
             yamlConfig().set(setting.path(), next);
         } else {
-            double current = yamlConfig().getDouble(setting.path(), setting.defaultValue());
-            double delta = adminSettingStep(setting) * Math.max(1, multiplier);
-            current = normalizeAdminCurrentValue(setting, current);
-            double next = current + (increase ? delta : -delta);
-            next = Math.max(setting.minValue(), Math.min(setting.maxValue(), next));
+            double current = normalizeAdminCurrentValue(
+                setting,
+                adminSettingCurrentValue(setting)
+            );
+            double next = linmumua.doudizhu.config.AdminSettingArithmetic.nextValue(
+                current,
+                stepOverride,
+                adminSettingStep(setting),
+                multiplier,
+                increase,
+                // 传 ±无穷等于不夹紧。nextValue 本身保留夹紧能力（它是纯函数、按传入区间办事），
+                // 这里只是不再把声明的 min/max 当硬边界，调整范围因此放开。
+                Double.NEGATIVE_INFINITY,
+                Double.POSITIVE_INFINITY
+            );
+            // 方块家具那几项要吸附到整格/90 度，所以仍然过一遍专用归一化
             next = normalizeAdminStoredValue(setting, next);
             yamlConfig().set(setting.path(), next);
             if (setting == AdminSetting.TABLE_SPAWN_OFFSET_Y) {
@@ -2575,41 +2481,60 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.HOVER_CARD_ANIMATION_TYPE) {
             return cardHoverAnimationCurve().label();
         }
-        if (setting == AdminSetting.PLAYER_HEAD_SHOW_ID) {
-            return playerHeadDisplayModeLabel();
-        }
         if (setting.booleanSetting()) {
             return yamlConfig().getBoolean(setting.path(), setting.defaultBoolean()) ? "开启" : "关闭";
         }
         if (setting.integerSetting()) {
-            return String.valueOf(yamlConfig().getInt(setting.path(), (int) setting.defaultValue()));
+            return String.valueOf(adminSettingCurrentInt(setting));
         }
         if (setting == AdminSetting.TABLE_SPAWN_OFFSET_Y && usesBlockTablePlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockTableOffset(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockTableOffset(adminSettingCurrentValue(setting))));
         }
         if (setting == AdminSetting.CHAIR_ROTATION_DEGREES && usesBlockChairPlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockChairRotation(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockChairRotation(adminSettingCurrentValue(setting))));
         }
         if (setting == AdminSetting.CHAIR_DISTANCE && usesBlockChairPlacement()) {
-            return String.valueOf((int) Math.round(normalizeBlockChairDistance(yamlConfig().getDouble(setting.path(), setting.defaultValue()))));
+            return String.valueOf((int) Math.round(normalizeBlockChairDistance(adminSettingCurrentValue(setting))));
         }
-        if (usesFinePrecision(setting)) {
-            return String.format(java.util.Locale.ROOT, "%.2f", yamlConfig().getDouble(setting.path(), setting.defaultValue()));
+        // 小数位数跟着该项的实际步长走。
+        //
+        // 固定 0.0001 步长的压层项如果只显示两位小数，
+        // 调一次界面上根本看不出变化，玩家会以为按钮坏了。
+        // 所以按步长推算需要几位：0.0001 → 4 位，0.01 → 2 位。
+        return String.format(
+            java.util.Locale.ROOT,
+            "%." + adminSettingDisplayDecimals(setting) + "f",
+            adminSettingCurrentValue(setting)
+        );
+    }
+
+    /**
+     * 算出某项设置在界面上该显示几位小数。
+     *
+     * 以该项实际生效的步长为准：步长比 0.001 还细就显示 4 位，
+     * 比 0.01 细显示 3 位，其余一律 2 位。
+     *
+     * @param setting 目标设置
+     * @return 小数位数
+     */
+    private int adminSettingDisplayDecimals(AdminSetting setting) {
+        double step = setting.hasFixedStep() ? setting.fixedStep() : setting.step();
+        if (step < 0.001) {
+            return 4;
         }
-        return String.format(java.util.Locale.ROOT, "%.1f", yamlConfig().getDouble(setting.path(), setting.defaultValue()));
+        if (step < 0.01) {
+            return 3;
+        }
+        return 2;
     }
 
     public Component playerIdentityComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
         String playerName = resolvePlayerName(playerId);
         if (playerName != null && !playerName.isBlank()) {
-            Component head = VersionCompat.createPlayerHeadComponent(playerName);
+            Component head = createPlayerHeadComponent(playerId, playerName);
             Component name = MuzTheme.named(" " + playerName, fallbackColor)
                 .decoration(TextDecoration.ITALIC, false);
-            return switch (playerHeadDisplayMode()) {
-                case HEAD_ONLY -> head.decoration(TextDecoration.ITALIC, false);
-                case BOTH -> head.append(name).decoration(TextDecoration.ITALIC, false);
-                case NAME_ONLY -> name;
-            };
+            return head.append(name).decoration(TextDecoration.ITALIC, false);
         }
         return MuzTheme.named(normalizeNonBlank(fallbackText, "未知玩家"), fallbackColor)
             .decoration(TextDecoration.ITALIC, false);
@@ -2618,10 +2543,19 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public Component playerHeadComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
         String playerName = resolvePlayerName(playerId);
         if (playerName != null && !playerName.isBlank()) {
-            return VersionCompat.createPlayerHeadComponent(playerName);
+            return createPlayerHeadComponent(playerId, playerName);
         }
         return MuzTheme.named(normalizeNonBlank(fallbackText, "未知玩家"), fallbackColor)
             .decoration(TextDecoration.ITALIC, false);
+    }
+
+    private Component createPlayerHeadComponent(UUID playerId, String playerName) {
+        org.bukkit.entity.Player online = Bukkit.getPlayer(playerId);
+        return VersionCompat.createPlayerHeadComponent(
+            playerId,
+            playerName,
+            online == null ? null : online.getPlayerProfile()
+        );
     }
 
     public Component playerNameComponent(UUID playerId, String fallbackText, NamedTextColor fallbackColor) {
@@ -2642,62 +2576,195 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return offline.getName();
     }
 
+    /**
+     * 把 config 里读到的原始值解析成生效值，0 表示"这一项没调过，用源码里固化的默认"。
+     *
+     * config.yml 出厂时这些项统一写 0：调好的值固化在源码里，配置文件只承担"我改过什么"。
+     * 玩家一眼能看出哪些项动过，想调直接填数字覆盖，不必先去猜出厂值是多少。
+     * 键不存在时 getDouble 同样返回 0，所以缺键和写 0 走的是同一条路。
+     *
+     * 做成静态纯函数是为了能直接测：0 取默认、非 0 覆盖、负值不被当成未设定。
+     *
+     * @param raw config 里读到的原始值
+     * @param codeDefault 源码里固化的默认值
+     * @return raw 非 0 时用 raw，否则用 codeDefault
+     */
+    static double zeroMeansDefault(double raw, double codeDefault) {
+        return raw == 0.0 ? codeDefault : raw;
+    }
+
+    /**
+     * {@link #zeroMeansDefault(double, double)} 的整数版本。
+     *
+     * @param raw config 里读到的原始值
+     * @param codeDefault 源码里固化的默认值
+     * @return raw 非 0 时用 raw，否则用 codeDefault
+     */
+    static int zeroMeansDefault(int raw, int codeDefault) {
+        return raw == 0 ? codeDefault : raw;
+    }
+
+    /**
+     * 所有走"0 = 用默认"的项及其源码默认值，由 {@link #cfgDouble} / {@link #cfgInt} 读取时自动登记。
+     *
+     * 不单独维护一张路径到默认值的表：那张表会和读取点脱节，
+     * 改了读取点忘了改表，归零迁移就会拿旧默认值去比对。登记表由读取点自己填，天然同步。
+     */
+    private final java.util.Map<String, Double> zeroableDefaults = new java.util.LinkedHashMap<>();
+
+    /**
+     * 一次性归零迁移：把 config.yml 里"值恰好等于源码默认"的项写回 0。
+     *
+     * 老服务器的 config.yml 里这些项都是显式写着出厂值的。逐项比对，
+     * 只有和源码默认完全一致的才归零；玩家自己调过的值一律不动——
+     * 那才是配置文件该留下的内容。
+     *
+     * 因此这个迁移是幂等的：跑第二遍时能归零的都已经是 0，不会再动任何东西，
+     * 也不需要记一个"迁移已执行"的标记位。
+     *
+     * 必须在 {@link #loadRenderSettings()} 之后调用，那时登记表才填满。
+     *
+     * @return 被归零的项数
+     */
+    private int migrateZeroableDefaults() {
+        int zeroed = 0;
+        for (java.util.Map.Entry<String, Double> entry : zeroableDefaults.entrySet()) {
+            String path = entry.getKey();
+            if (!yamlConfig().contains(path)) {
+                // 缺键读出来就是 0，已经等于"取默认"，不用补写
+                continue;
+            }
+            double current = yamlConfig().getDouble(path, 0.0);
+            if (current == 0.0) {
+                continue;
+            }
+            // YAML 往返可能带来末位误差，直接用 == 比会漏掉本该归零的项
+            if (Math.abs(current - entry.getValue()) < 1.0e-9) {
+                yamlConfig().set(path, 0);
+                zeroed++;
+            }
+        }
+        if (zeroed > 0) {
+            saveYamlConfig();
+            getLogger().info("已把 " + zeroed + " 项仍是出厂值的配置写回 0（0 表示用插件内置默认），你调过的值都保留了。");
+        }
+        return zeroed;
+    }
+
+    /**
+     * 按"0 = 用默认"语义读一个小数配置项。
+     *
+     * @param path config 路径
+     * @param codeDefault 源码里固化的默认值
+     * @return 生效值
+     */
+    private double cfgDouble(String path, double codeDefault) {
+        zeroableDefaults.put(path, codeDefault);
+        return zeroMeansDefault(yamlConfig().getDouble(path, 0.0), codeDefault);
+    }
+
+    /**
+     * 按"0 = 用默认"语义读一个整数配置项。
+     *
+     * @param path config 路径
+     * @param codeDefault 源码里固化的默认值
+     * @return 生效值
+     */
+    private int cfgInt(String path, int codeDefault) {
+        zeroableDefaults.put(path, (double) codeDefault);
+        return zeroMeansDefault(yamlConfig().getInt(path, 0), codeDefault);
+    }
+
+    /**
+     * 头像描边色（ARGB），0 表示不描边。
+     *
+     * <p>不走 {@link #cfgInt} 的「0 = 用默认」语义：这里 0 就是字面意思「关掉」。
+     */
+    public int getTrickHudAvatarOutlineArgb() {
+        // 默认开启描边：测试服实测下来，不描边的头像在浅色背景上几乎看不出轮廓
+        if (!yamlConfig().getBoolean("trick-hud.avatar-outline.enabled", true)) {
+            return 0;
+        }
+        String hex = yamlConfig().getString("trick-hud.avatar-outline.color", "#000000");
+        return parseOutlineArgb(hex);
+    }
+
+    /**
+     * 解析 {@code #rrggbb} 或 {@code #aarrggbb}。
+     *
+     * <p>写错不抛异常也不静默变透明：回落成不透明黑并留日志。描边色写错最多是颜色不对，
+     * 不值得让整个 HUD 不显示。
+     */
+    private int parseOutlineArgb(String raw) {
+        String hex = raw == null ? "" : raw.trim();
+        if (hex.startsWith("#")) {
+            hex = hex.substring(1);
+        }
+        try {
+            if (hex.length() == 6) {
+                return 0xFF000000 | Integer.parseInt(hex, 16);
+            }
+            if (hex.length() == 8) {
+                return (int) Long.parseLong(hex, 16);
+            }
+        } catch (NumberFormatException ignored) {
+            // 落到下面统一告警
+        }
+        getLogger().warning("trick-hud.avatar-outline.color=" + raw
+            + " 不是 #rrggbb 或 #aarrggbb，已回退为不透明黑");
+        return 0xFF000000;
+    }
+
     private void loadRenderSettings() {
         cardHologramLabelsEnabled = yamlConfig().getBoolean("cards.hologram-labels.enabled", true);
         duplicateOnlyCardLabels = yamlConfig().getBoolean("cards.hologram-labels.duplicate-ranks-only", false);
-        tableSpawnOffsetY = yamlConfig().getDouble("table.spawn-offset-y", 0.18);
-        privateCardScale = (float) yamlConfig().getDouble("render.private-card-scale", DEFAULT_PRIVATE_CARD_SCALE);
-        publicCardScale = (float) yamlConfig().getDouble("render.public-trick-card-scale", DEFAULT_PUBLIC_CARD_SCALE);
-        privateCardWidthScale = (float) yamlConfig().getDouble("render.private-card-size.width", privateCardScale);
-        privateCardHeightScale = (float) yamlConfig().getDouble("render.private-card-size.height", privateCardScale);
-        privateCardDepthScale = (float) yamlConfig().getDouble("render.private-card-size.depth", privateCardScale);
-        publicCardWidthScale = (float) yamlConfig().getDouble("render.public-card-size.width", publicCardScale);
-        publicCardHeightScale = (float) yamlConfig().getDouble("render.public-card-size.height", publicCardScale);
-        publicCardDepthScale = (float) yamlConfig().getDouble("render.public-card-size.depth", publicCardScale);
-        hoverCardScale = (float) yamlConfig().getDouble("render.card-hover.scale", 1.08);
-        hoverCardLift = yamlConfig().getDouble("render.card-hover.lift", 0.06);
+        // -0.55 是测试服实测调优值，正好是桌面与地面齐平的理论点
+        tableSpawnOffsetY = cfgDouble("table.spawn-offset-y", -0.55);
+        privateCardScale = (float) cfgDouble("render.private-card-scale", DEFAULT_PRIVATE_CARD_SCALE);
+        privateCardWidthScale = (float) cfgDouble("render.private-card-size.width", DEFAULT_PRIVATE_CARD_AXIS_SCALE);
+        privateCardHeightScale = (float) cfgDouble("render.private-card-size.height", DEFAULT_PRIVATE_CARD_AXIS_SCALE);
+        privateCardDepthScale = (float) cfgDouble("render.private-card-size.depth", DEFAULT_PRIVATE_CARD_AXIS_SCALE);
+        hoverCardScale = (float) cfgDouble("render.card-hover.scale", 1.08);
+        hoverCardLift = cfgDouble("render.card-hover.lift", 0.06);
         cardHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.card-hover.interpolation-ticks", 6));
         cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.card-hover.animation-type", 1)));
-        tableScale = (float) yamlConfig().getDouble("render.furniture-scale.table", 2.25);
-        chairScale = (float) yamlConfig().getDouble("render.furniture-scale.chair", 1.35);
-        smallTextScale = (float) yamlConfig().getDouble("render.text-scale.small", 0.46);
-        statusTextScale = (float) yamlConfig().getDouble("render.text-scale.status", 0.72);
-        labelTextScale = (float) yamlConfig().getDouble("render.text-scale.label", 0.40);
-        playerHeadScale = (float) yamlConfig().getDouble("render.player-head-scale", 1.00);
-        playerHeadDisplayMode = PlayerHeadDisplayMode.fromConfig(yamlConfig().get("render.player-head-show-id"));
-        statusAvatarScale = (float) yamlConfig().getDouble("render.status-avatar.scale", playerHeadScale);
-        statusAvatarLateralOffset = yamlConfig().getDouble("render.status-avatar-offset.lateral", 0.0);
-        statusAvatarVerticalOffset = yamlConfig().getDouble("render.status-avatar-offset.vertical", 0.82);
-        statusAvatarDepthOffset = yamlConfig().getDouble("render.status-avatar-offset.depth", 0.0);
-        statusNameScale = (float) yamlConfig().getDouble("render.status-name.scale", smallTextScale);
+        // 新桌椅模型是按成品尺寸导出的（桌 2.5x2.5 格、椅 0.875x1.56 格），所以默认不再放大。
+        // 旧模型只有 0.875 格，当年默认值 2.25 / 1.35 是为了把它撑到可用大小；
+        // 换模型后若继续沿用旧默认值，桌子会变成 5.6 格宽，椅子会被埋进桌子里。
+        tableScale = (float) cfgDouble("render.furniture-scale.table", 1.0);
+        chairScale = (float) cfgDouble("render.furniture-scale.chair", 1.0);
+        smallTextScale = (float) cfgDouble("render.text-scale.small", 0.46);
+        statusTextScale = (float) cfgDouble("render.text-scale.status", 0.72);
+        labelTextScale = (float) cfgDouble("render.text-scale.label", 0.40);
+        statusNameScale = (float) cfgDouble("render.status-name.scale", smallTextScale);
         statusNameLateralOffset = yamlConfig().getDouble("render.status-name-offset.lateral", 0.0);
-        statusNameVerticalOffset = yamlConfig().getDouble("render.status-name-offset.vertical", 0.56);
+        statusNameVerticalOffset = cfgDouble("render.status-name-offset.vertical", 0.56);
         statusNameDepthOffset = yamlConfig().getDouble("render.status-name-offset.depth", 0.0);
-        seatAvatarScale = (float) yamlConfig().getDouble("render.seat-avatar.scale", playerHeadScale);
-        seatAvatarLateralOffset = yamlConfig().getDouble("render.seat-avatar-offset.lateral", 0.0);
-        seatAvatarVerticalOffset = yamlConfig().getDouble("render.seat-avatar-offset.vertical", 0.18);
-        seatAvatarDepthOffset = yamlConfig().getDouble("render.seat-avatar-offset.depth", 0.0);
-        seatNameScale = (float) yamlConfig().getDouble("render.seat-name.scale", smallTextScale);
+        seatNameScale = (float) cfgDouble("render.seat-name.scale", smallTextScale);
         seatNameLateralOffset = yamlConfig().getDouble("render.seat-name-offset.lateral", 0.0);
-        seatNameVerticalOffset = yamlConfig().getDouble("render.seat-name-offset.vertical", -0.04);
+        seatNameVerticalOffset = cfgDouble("render.seat-name-offset.vertical", -0.04);
         seatNameDepthOffset = yamlConfig().getDouble("render.seat-name-offset.depth", 0.0);
-        emptySeatScale = (float) yamlConfig().getDouble("render.empty-seat.scale", seatNameScale);
+        // 0.9 是测试服实测调优值：空位字条要比入座后的名字更醒目，
+        // 所以不再跟随 seatNameScale（0.46），两者从此有意分开
+        emptySeatScale = (float) cfgDouble("render.empty-seat.scale", 0.9);
         emptySeatLateralOffset = yamlConfig().getDouble("render.empty-seat-offset.lateral", seatNameLateralOffset);
-        emptySeatVerticalOffset = yamlConfig().getDouble("render.empty-seat-offset.vertical", seatNameVerticalOffset);
+        // 1.5 是测试服实测调优值：空位字条要抬到椅背上方，不再跟随 seatNameVerticalOffset（-0.04）
+        emptySeatVerticalOffset = cfgDouble("render.empty-seat-offset.vertical", 1.5);
         emptySeatDepthOffset = yamlConfig().getDouble("render.empty-seat-offset.depth", seatNameDepthOffset);
-        seatInfoScale = (float) yamlConfig().getDouble("render.seat-info.scale", smallTextScale);
+        // 0.5 是测试服实测调优值，略大于 smallTextScale（0.46）
+        seatInfoScale = (float) cfgDouble("render.seat-info.scale", 0.5);
         seatInfoLateralOffset = yamlConfig().getDouble("render.seat-info-offset.lateral", 0.0);
-        seatInfoVerticalOffset = yamlConfig().getDouble("render.seat-info-offset.vertical", -0.22);
+        seatInfoVerticalOffset = cfgDouble("render.seat-info-offset.vertical", -0.5);
         seatInfoDepthOffset = yamlConfig().getDouble("render.seat-info-offset.depth", 0.0);
-        selectedCardScale = (float) yamlConfig().getDouble("render.selected-card.scale", 1.00);
-        selectedCardLift = yamlConfig().getDouble("render.selected-card.lift", 0.18);
+        selectedCardScale = (float) cfgDouble("render.selected-card.scale", 1.00);
+        selectedCardLift = cfgDouble("render.selected-card.lift", 0.18);
         hoverGlowEnabled = yamlConfig().getBoolean("render.hover-glow.enabled", true);
         Color loadedHoverGlow = parseRgbSpec(
             yamlConfig().getString("render.hover-glow.color"),
             Color.fromRGB(
-                yamlConfig().getInt("render.hover-glow.color.red", 96),
-                yamlConfig().getInt("render.hover-glow.color.green", 180),
-                yamlConfig().getInt("render.hover-glow.color.blue", 255)
+                cfgInt("render.hover-glow.color.red", 96),
+                cfgInt("render.hover-glow.color.green", 180),
+                cfgInt("render.hover-glow.color.blue", 255)
             )
         );
         hoverGlowRed = loadedHoverGlow.getRed();
@@ -2707,91 +2774,85 @@ public final class DoudizhuPlugin extends JavaPlugin {
         Color loadedSelectedGlow = parseRgbSpec(
             yamlConfig().getString("render.selected-glow.color"),
             Color.fromRGB(
-                yamlConfig().getInt("render.selected-glow.color.red", 255),
-                yamlConfig().getInt("render.selected-glow.color.green", 226),
-                yamlConfig().getInt("render.selected-glow.color.blue", 92)
+                cfgInt("render.selected-glow.color.red", 255),
+                cfgInt("render.selected-glow.color.green", 226),
+                cfgInt("render.selected-glow.color.blue", 92)
             )
         );
         selectedGlowRed = loadedSelectedGlow.getRed();
         selectedGlowGreen = loadedSelectedGlow.getGreen();
         selectedGlowBlue = loadedSelectedGlow.getBlue();
-        cardLabelHeight = yamlConfig().getDouble("render.card-label-height", 0.34);
-        cardLabelLateralOffset = yamlConfig().getDouble("render.card-label-offset.lateral", 0.0);
+        cardLabelHeight = cfgDouble("render.card-label-height", 0.05);
+        cardLabelLateralOffset = yamlConfig().getDouble("render.card-label-offset.lateral", 0.05);
         cardLabelDepthOffset = yamlConfig().getDouble("render.card-label-offset.depth", 0.0);
-        cardDepthOffset = (float) yamlConfig().getDouble("render.card-depth-offset", 0.01);
-        handSpacing = (float) yamlConfig().getDouble("render.hand-spacing", 0.21);
-        publicTrickSpacing = (float) yamlConfig().getDouble("render.public-trick-spacing", 0.22);
-        buttonDistance = yamlConfig().getDouble("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
-        buttonHeight = yamlConfig().getDouble("render.button-offset.height", 1.02);
-        tableDisplayHeight = yamlConfig().getDouble("render.layout.table-display-height", 0.55);
-        tableColliderHeight = yamlConfig().getDouble("render.layout.table-collider-height", 0.72);
-        chairBaseHeight = yamlConfig().getDouble("render.layout.chair-base-height", 0.20);
-        chairColliderHeight = yamlConfig().getDouble("render.layout.chair-collider-height", 0.18);
-        chairSeatHeight = yamlConfig().getDouble("render.layout.chair-seat-height", 0.18);
-        chairInteractionHeight = yamlConfig().getDouble("render.layout.chair-interaction-height", 0.38);
-        chairLabelHeight = yamlConfig().getDouble("render.layout.chair-label-height", 1.35);
-        chairRotationDegrees = yamlConfig().getDouble("render.chair-rotation-degrees", 0.0);
+        cardDepthOffset = (float) cfgDouble("render.card-depth-offset", 0.005);
+        handSpacing = (float) cfgDouble("render.hand-spacing", 0.1);
+        buttonDistance = cfgDouble("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
+        buttonHeight = cfgDouble("render.button-offset.height", 2.5);
+        tableDisplayHeight = cfgDouble("render.layout.table-display-height", 0.55);
+        tableColliderHeight = cfgDouble("render.layout.table-collider-height", 0.72);
+        chairBaseHeight = cfgDouble("render.layout.chair-base-height", 0.20);
+        chairColliderHeight = cfgDouble("render.layout.chair-collider-height", 0.18);
+        chairSeatHeight = cfgDouble("render.layout.chair-seat-height", 0.18);
+        chairInteractionHeight = cfgDouble("render.layout.chair-interaction-height", 0.38);
+        chairLabelHeight = cfgDouble("render.layout.chair-label-height", 1.35);
+        // 180 是测试服实测调优值：椅子模型默认朝向与桌子相反，转半圈才朝向桌心
+        chairRotationDegrees = yamlConfig().getDouble("render.chair-rotation-degrees", 180.0);
         chairVisualLateralOffset = yamlConfig().getDouble("render.chair-visual-offset.lateral", 0.0);
-        chairVisualVerticalOffset = yamlConfig().getDouble("render.chair-visual-offset.vertical", -0.04);
+        chairVisualVerticalOffset = cfgDouble("render.chair-visual-offset.vertical", 0.35);
         chairHitboxLateralOffset = yamlConfig().getDouble("render.chair-hitbox-offset.lateral", 0.0);
-        chairHitboxVerticalOffset = yamlConfig().getDouble("render.chair-hitbox-offset.vertical", 0.02);
+        chairHitboxVerticalOffset = cfgDouble("render.chair-hitbox-offset.vertical", 0.02);
         // 判定框尺寸不再配置，改为按按钮文字缩放自动推算，只保留位置微调。
         buttonHitboxLateralOffset = yamlConfig().getDouble("render.button-hitbox-offset.lateral", 0.0);
         buttonHitboxDepthOffset = yamlConfig().getDouble("render.button-hitbox-offset.depth", 0.0);
-        buttonHitboxVerticalOffset = yamlConfig().getDouble("render.button-hitbox-offset.vertical", 0.02);
-        cardHitboxLateralOffset = yamlConfig().getDouble("render.card-hitbox-offset.lateral", 0.0);
-        cardHitboxDepthOffset = yamlConfig().getDouble("render.card-hitbox-offset.depth", 0.0);
-        cardHitboxVerticalOffset = yamlConfig().getDouble("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
-        cardHitboxLength = yamlConfig().getDouble("render.card-hitbox.length", 0.28);
-        cardHitboxWidth = yamlConfig().getDouble("render.card-hitbox.width", 0.16);
-        cardHitboxHeight = yamlConfig().getDouble("render.card-hitbox.height", 0.56);
-        statusHeight = yamlConfig().getDouble("render.status-height", 3.10);
-        playDetailHeight = yamlConfig().getDouble("render.play-detail-height", 2.35);
-        publicTrickHeight = yamlConfig().getDouble("render.public-trick-height", 1.55);
+        buttonHitboxVerticalOffset = cfgDouble("render.button-hitbox-offset.vertical", 0.02);
+        // render.card-hitbox / render.card-hitbox-offset 已整组删除：手牌上没有交互箱了，
+        // 点到哪张牌由射线与牌平面解析求交裁决，没有可偏移、可调尺寸的判定框。
+        // 两组键都在 RETIRED_RENDER_KEYS 里，启动时会从老配置里清掉。
+        statusHeight = cfgDouble("render.status-height", 5.0);
+        playDetailHeight = cfgDouble("render.play-detail-height", 4.0);
         statusLineWidth = yamlConfig().getInt("render.layout.status-line-width", 250);
-        handCenterDistance = yamlConfig().getDouble("render.layout.hand-center.distance", 1.62);
-        handCenterHeight = yamlConfig().getDouble("render.layout.hand-center.height", 1.23);
-        chairDistance = yamlConfig().getDouble("render.layout.chair-distance", 2.35);
-        joinLabelHeight = yamlConfig().getDouble("render.button-layout.join-label-height", 0.18);
-        joinLabelScale = (float) yamlConfig().getDouble("render.button-layout.join-label-scale", 0.46);
-        actionLabelHeight = yamlConfig().getDouble("render.button-layout.action-label-height", 0.18);
-        actionLabelScale = (float) yamlConfig().getDouble("render.button-layout.action-label-scale", 0.20);
-        buttonFrontBaseDistance = yamlConfig().getDouble("render.button-layout.front-base-distance", 1.40);
-        buttonSideBaseDistance = yamlConfig().getDouble("render.button-layout.side-base-distance", 1.72);
-        buttonDistanceFactor = yamlConfig().getDouble("render.button-layout.distance-factor", 0.45);
-        buttonSpacingScale = yamlConfig().getDouble("render.button-layout.spacing-scale", 1.0);
-        buttonArcSmallAngleDegrees = yamlConfig().getDouble("render.button-layout.arc-angle-small", 30.0);
-        buttonArcLargeAngleDegrees = yamlConfig().getDouble("render.button-layout.arc-angle-large", 42.0);
-        buttonArcSmallRadius = yamlConfig().getDouble("render.button-layout.arc-radius-small", 0.70);
-        buttonArcLargeRadius = yamlConfig().getDouble("render.button-layout.arc-radius-large", 0.86);
-        previewCardsPerRow = Math.max(1, yamlConfig().getInt("render.public-trick.cards-per-row", 6));
-        publicPreviewCompareRowOffset = yamlConfig().getDouble("render.public-trick.compare-row-offset", 0.28);
-        publicPreviewSelectedRowOffset = yamlConfig().getDouble("render.public-trick.selected-row-offset", -0.24);
-        publicPreviewRowDepthSpacing = yamlConfig().getDouble("render.public-trick.row-depth-spacing", 0.22);
-        publicPreviewLabelHeight = yamlConfig().getDouble("render.public-trick.label-height", 0.22);
-        globalPrivateHandLateralOffset = yamlConfig().getDouble("render.private-hand-offset.lateral", 0.0);
-        globalPrivateHandVerticalOffset = yamlConfig().getDouble("render.private-hand-offset.vertical", 0.0);
-        globalPrivateHandDepthOffset = yamlConfig().getDouble("render.private-hand-offset.depth", 0.0);
+        handCenterDistance = cfgDouble("render.layout.hand-center.distance", 1.62);
+        handCenterHeight = cfgDouble("render.layout.hand-center.height", 1.23);
+        chairDistance = cfgDouble("render.layout.chair-distance", 2.5);
+        joinLabelHeight = cfgDouble("render.button-layout.join-label-height", 0.18);
+        joinLabelScale = (float) cfgDouble("render.button-layout.join-label-scale", 0.4);
+        actionLabelHeight = cfgDouble("render.button-layout.action-label-height", 0.2);
+        actionLabelScale = (float) cfgDouble("render.button-layout.action-label-scale", 0.4);
+        buttonFrontBaseDistance = cfgDouble("render.button-layout.front-base-distance", 1.40);
+        buttonSideBaseDistance = cfgDouble("render.button-layout.side-base-distance", 1.72);
+        buttonDistanceFactor = cfgDouble("render.button-layout.distance-factor", 0.45);
+        buttonSpacingScale = cfgDouble("render.button-layout.spacing-scale", 1.2);
+        buttonArcSmallAngleDegrees = cfgDouble("render.button-layout.arc-angle-small", 30.0);
+        buttonArcLargeAngleDegrees = cfgDouble("render.button-layout.arc-angle-large", 42.0);
+        buttonArcSmallRadius = cfgDouble("render.button-layout.arc-radius-small", 0.70);
+        buttonArcLargeRadius = cfgDouble("render.button-layout.arc-radius-large", 0.8);
+        // 三家手牌的整体位置：全是测试服实测调优值，把手牌抬到桌沿上方、略微前推
+        globalPrivateHandLateralOffset = yamlConfig().getDouble("render.private-hand-offset.lateral", 0.03);
+        globalPrivateHandVerticalOffset = yamlConfig().getDouble("render.private-hand-offset.vertical", 1.9);
+        globalPrivateHandDepthOffset = yamlConfig().getDouble("render.private-hand-offset.depth", 0.55);
         bgmVolume = (float) yamlConfig().getDouble("audio.bgm-volume", 0.55);
         effectVolume = (float) yamlConfig().getDouble("audio.effect-volume", 1.0);
         turnCountdownSeconds = yamlConfig().getInt("actionbar.turn-countdown-seconds", 20);
         countdownSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("actionbar.countdown-sound", DEFAULT_COUNTDOWN_SOUND_SPEC));
         unreadyWarningSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("actionbar.unready-warning-sound", DEFAULT_UNREADY_WARNING_SOUND_SPEC));
         placementBlockedSoundSpec = safeNormalizeCountdownSoundSpec(yamlConfig().getString("table.placement-blocked-sound", DEFAULT_PLACEMENT_BLOCKED_SOUND_SPEC));
-        botActionDelayMinTicks = yamlConfig().getInt("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
-        botActionDelayMaxTicks = yamlConfig().getInt("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
-        botAiEnabled = yamlConfig().getBoolean("bot.ai.enabled", false);
-        botAiTimeoutMs = Math.max(1000, yamlConfig().getInt("bot.ai.timeout-ms", 5000));
+        botActionDelayMinTicks = yamlConfig().getInt("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", DEFAULT_BOT_DELAY_MIN_TICKS));
+        botActionDelayMaxTicks = cfgInt("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", DEFAULT_BOT_DELAY_MAX_TICKS));
+        // 默认 true：ensureBotAiConfig 补键时写的是 true，config.yml 出厂也是 true，
+        // 这里原先写 false，只有"键被手动删掉"时才会显出差异——那种情况下机器人会莫名不走 AI。
+        botAiEnabled = yamlConfig().getBoolean("bot.ai.enabled", true);
+        botAiTimeoutMs = Math.max(1000, cfgInt("bot.ai.timeout-ms", 5000));
         if (botActionDelayMaxTicks < botActionDelayMinTicks) {
             int swapped = botActionDelayMinTicks;
             botActionDelayMinTicks = botActionDelayMaxTicks;
             botActionDelayMaxTicks = swapped;
         }
-        hintGroupLimit = yamlConfig().getInt("hints.max-groups", 6);
-        debugTableSpacing = yamlConfig().getDouble("debug.table-spacing", 6.5);
+        hintGroupLimit = cfgInt("hints.max-groups", 6);
+        debugTableSpacing = cfgDouble("debug.table-spacing", 6.5);
         vaultEconomyEnabled = yamlConfig().getBoolean("economy.vault.enabled", true);
         chipPaymentEnabled = yamlConfig().getBoolean("economy.payment.use-chip", false);
-        vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, yamlConfig().getDouble("economy.vault.doudizhu.currency-per-point", 1.0));
+        vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, cfgDouble("economy.vault.doudizhu.currency-per-point", 1.0));
         vaultPreferredProviderNames = normalizedStringList(yamlConfig().getStringList("economy.vault.preferred-providers"), List.of("EzEconomy", "XConomy", "CMI"));
         loadRoomLevelProfiles();
         tableItemModelId = normalizeItemModelId(yamlConfig().getString("craftengine-items.table.item-model"), DEFAULT_TABLE_ITEM_MODEL);
@@ -2810,9 +2871,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
             yamlConfig().getString("ai.deepseek.models-path", "/models"),
             yamlConfig().getString("ai.deepseek.api-key", ""),
             yamlConfig().getString("ai.deepseek.model", "deepseek-chat"),
-            yamlConfig().getInt("ai.deepseek.connect-timeout-ms", 10000),
-            yamlConfig().getInt("ai.deepseek.request-timeout-ms", 45000),
-            roundToSingleDecimal(yamlConfig().getDouble("ai.deepseek.temperature", 0.7)),
+            cfgInt("ai.deepseek.connect-timeout-ms", 10000),
+            cfgInt("ai.deepseek.request-timeout-ms", 45000),
+            roundToSingleDecimal(cfgDouble("ai.deepseek.temperature", 0.7)),
             yamlConfig().getInt("ai.deepseek.max-tokens", 0),
             normalizeNonBlank(yamlConfig().getString("ai.deepseek.system-prompt"), DEFAULT_AI_SYSTEM_PROMPT)
         );
@@ -2855,7 +2916,41 @@ public final class DoudizhuPlugin extends JavaPlugin {
         "render.button-hitbox.height",
         "render.button-scale",
         "render.button-roll-degrees",
-        "render.button-hover"
+        "render.button-hover",
+        "render.status-avatar",
+        "render.status-avatar-offset",
+        // 手牌判定改成射线与牌平面解析求交后，牌身上再没有交互箱实体，
+        // 这两组键连读取点都没有了；子键先删、父节点最后删，避免遗留空 section。
+        "render.card-hitbox.length",
+        "render.card-hitbox.width",
+        "render.card-hitbox.height",
+        "render.card-hitbox",
+        "render.card-hitbox-offset.lateral",
+        "render.card-hitbox-offset.depth",
+        "render.card-hitbox-offset.vertical",
+        "render.card-hitbox-offset",
+        // 悬停不再沿法向平移：位移会让射线交点跟着悬停漂移，形成抖动闭环。
+        // 悬停反馈全部交给 render.card-hover.scale（只放大长宽）和 .lift。
+        "render.card-hover.backward-offset",
+        // 椅子朝向旋转没有任何读取点：椅子朝向由座位方位算，改这个键不会有反应。
+        // 留在配置里只会让人以为还能调。
+        "render.chair-visual-offset.rotation-degrees",
+        // 座位头像 ItemDisplay 已移除，这些配置键连读取点都没有了。
+        "render.seat-avatar.scale",
+        "render.seat-avatar",
+        "render.seat-avatar-offset.lateral",
+        "render.seat-avatar-offset.vertical",
+        "render.seat-avatar-offset.depth",
+        "render.seat-avatar-offset",
+        // 头像/名字显示模式枚举已移除，座位始终显示名字。
+        "render.player-head-show-id",
+        // player-head-scale 原作为 seat-avatar.scale 的迁移默认值，现在两者都删了。
+        "render.player-head-scale",
+        // 屏幕中央那条「轮到谁出牌」的头像 Title 已整体移除，这两个键连读取点都没有了；
+        // 子键先删、父节点最后删，避免遗留空 section。
+        "render.current-play-head.enabled",
+        "render.current-play-head.drop",
+        "render.current-play-head"
     };
 
     /**
@@ -2867,10 +2962,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         "render.button-offset.height",
         "render.button-hitbox-offset.lateral",
         "render.button-hitbox-offset.depth",
-        "render.button-hitbox-offset.vertical",
-        "render.card-hitbox.length",
-        "render.card-hitbox.width",
-        "render.card-hitbox.height"
+        "render.button-hitbox-offset.vertical"
     };
 
     private boolean migrateChairHitboxConfig() {
@@ -2884,7 +2976,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             }
         }
         if (yamlConfig().getDouble("render.chair-hitbox-offset.vertical", 0.02) >= 0.08) {
-            yamlConfig().set("render.chair-hitbox-offset.vertical", 0.02);
+            yamlConfig().set("render.chair-hitbox-offset.vertical", 0);
             changed = true;
         }
         return changed;
@@ -2893,7 +2985,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private boolean ensureBotAiConfig() {
         boolean changed = false;
         changed |= ensureMissingConfigValue("bot.ai.enabled", true);
-        changed |= ensureMissingConfigValue("bot.ai.timeout-ms", 5000);
+        changed |= ensureMissingConfigValue("bot.ai.timeout-ms", 0);
         return changed;
     }
 
@@ -2922,9 +3014,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         changed |= ensureMissingConfigValue("ai.deepseek.models-path", "/models");
         changed |= ensureMissingConfigValue("ai.deepseek.api-key", "");
         changed |= ensureMissingConfigValue("ai.deepseek.model", "deepseek-chat");
-        changed |= ensureMissingConfigValue("ai.deepseek.connect-timeout-ms", 10000);
-        changed |= ensureMissingConfigValue("ai.deepseek.request-timeout-ms", 45000);
-        changed |= ensureMissingConfigValue("ai.deepseek.temperature", 0.7);
+        changed |= ensureMissingConfigValue("ai.deepseek.connect-timeout-ms", 0);
+        changed |= ensureMissingConfigValue("ai.deepseek.request-timeout-ms", 0);
+        changed |= ensureMissingConfigValue("ai.deepseek.temperature", 0);
         changed |= ensureMissingConfigValue("ai.deepseek.max-tokens", 0);
         changed |= ensureMissingConfigValue("ai.deepseek.system-prompt", DEFAULT_AI_SYSTEM_PROMPT);
         return changed;
@@ -2932,33 +3024,25 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean ensureAvatarConfig() {
         boolean changed = false;
-        double legacyScale = yamlConfig().getDouble("render.player-head-scale", 1.00);
-        double defaultSmallTextScale = yamlConfig().getDouble("render.text-scale.small", 0.46);
-        changed |= ensureDoubleConfig("render.status-avatar.scale", legacyScale);
-        changed |= ensureDoubleConfig("render.status-avatar-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.status-avatar-offset.vertical", 0.82);
-        changed |= ensureDoubleConfig("render.status-avatar-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.status-name.scale", defaultSmallTextScale);
+        // 补键统一写 0（= 取源码默认），不写字面量：
+        // 写字面量的话，源码默认值改了而这里漏改，删键重生成就会拿到旧值。
+        changed |= ensureDoubleConfig("render.status-name.scale", 0);
         changed |= ensureDoubleConfig("render.status-name-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.status-name-offset.vertical", 0.56);
+        changed |= ensureDoubleConfig("render.status-name-offset.vertical", 0);
         changed |= ensureDoubleConfig("render.status-name-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.seat-avatar.scale", legacyScale);
-        changed |= ensureDoubleConfig("render.seat-avatar-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.seat-avatar-offset.vertical", 0.18);
-        changed |= ensureDoubleConfig("render.seat-avatar-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.seat-name.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.seat-name.scale", 0);
         changed |= ensureDoubleConfig("render.seat-name-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.seat-name-offset.vertical", -0.04);
+        changed |= ensureDoubleConfig("render.seat-name-offset.vertical", 0);
         changed |= ensureDoubleConfig("render.seat-name-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.empty-seat.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.empty-seat.scale", 0);
         changed |= ensureDoubleConfig("render.empty-seat-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.empty-seat-offset.vertical", -0.04);
+        changed |= ensureDoubleConfig("render.empty-seat-offset.vertical", 0);
         changed |= ensureDoubleConfig("render.empty-seat-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.seat-info.scale", defaultSmallTextScale);
+        changed |= ensureDoubleConfig("render.seat-info.scale", 0);
         changed |= ensureDoubleConfig("render.seat-info-offset.lateral", 0.0);
-        changed |= ensureDoubleConfig("render.seat-info-offset.vertical", -0.22);
+        changed |= ensureDoubleConfig("render.seat-info-offset.vertical", 0);
         changed |= ensureDoubleConfig("render.seat-info-offset.depth", 0.0);
-        changed |= ensureDoubleConfig("render.button-layout.join-label-scale", 0.46);
+        changed |= ensureDoubleConfig("render.button-layout.join-label-scale", 0);
         return changed;
 
     }
@@ -2973,30 +3057,26 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private boolean migrateLegacyRenderConfig() {
         boolean changed = false;
-        if (
-            yamlConfig().contains("render.button-offset.distance")
-                && (
-                    Math.abs(yamlConfig().getDouble("render.button-offset.distance", Double.NaN) - OLDER_BUTTON_DISTANCE) < 0.0001
-                        || Math.abs(yamlConfig().getDouble("render.button-offset.distance", Double.NaN) - LEGACY_BUTTON_DISTANCE) < 0.0001
-                )
-        ) {
-            yamlConfig().set("render.button-offset.distance", DEFAULT_BUTTON_DISTANCE);
-            changed = true;
-        }
-        if (
-            yamlConfig().contains("render.card-hitbox-offset.vertical")
-                && Math.abs(yamlConfig().getDouble("render.card-hitbox-offset.vertical", Double.NaN) - LEGACY_CARD_HITBOX_VERTICAL_OFFSET) < 0.0001
-        ) {
-            yamlConfig().set("render.card-hitbox-offset.vertical", DEFAULT_CARD_HITBOX_VERTICAL_OFFSET);
-            changed = true;
-        }
+        // 所有"数值精确等于旧默认值就强制覆盖成新默认值"式的迁移都已删除
+        // （按钮离桌距离 1.45/1.10 → 2.10、手牌缩放 0.50、公牌缩放 0.58）。
+        //
+        // 两个致命缺陷：
+        // 1. 无法区分"这是旧默认值残留"和"用户就是想要这个值"，一律当前者处理；
+        // 2. 它不只在升级时跑一次——每次 reloadVisualState 都会跑，而管理菜单里
+        //    每点一下调节按钮都会触发重载，于是用户把数值调到某个旧默认值上时，
+        //    下一帧就被强制弹到新默认值，表现为"这个值调不过去"的跳档。
+        //    按钮距离从 1.45 直接跳 2.10 就是这么来的。
+        //
+        // 迁移已完成历史使命，新安装一律以 AdminSetting 枚举默认值为准，不再做值覆盖。
+        // 下面 bot.action-delay-ticks 的迁移保留：它是"缺键才补"的幂等写入，
+        // 不覆盖任何已有值，重复执行无副作用。
         if (yamlConfig().contains("bot.action-delay-ticks")) {
             if (!yamlConfig().contains("bot.action-delay-min-ticks")) {
-                yamlConfig().set("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
+                yamlConfig().set("bot.action-delay-min-ticks", yamlConfig().getInt("bot.action-delay-ticks", DEFAULT_BOT_DELAY_MIN_TICKS));
                 changed = true;
             }
             if (!yamlConfig().contains("bot.action-delay-max-ticks")) {
-                yamlConfig().set("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", 20));
+                yamlConfig().set("bot.action-delay-max-ticks", yamlConfig().getInt("bot.action-delay-ticks", DEFAULT_BOT_DELAY_MAX_TICKS));
                 changed = true;
             }
         }
@@ -3110,7 +3190,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             changed = true;
         }
         if (!yamlConfig().contains("economy.vault.doudizhu.currency-per-point")) {
-            yamlConfig().set("economy.vault.doudizhu.currency-per-point", 1.0);
+            yamlConfig().set("economy.vault.doudizhu.currency-per-point", 0);
             changed = true;
         }
         for (TableLevel level : TableLevel.values()) {
@@ -3146,10 +3226,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         if (!yamlConfig().contains("storage.sql.type")) {
             yamlConfig().set("storage.sql.type", "sqlite");
-            changed = true;
-        }
-        if (!yamlConfig().contains("render.player-head-show-id")) {
-            yamlConfig().set("render.player-head-show-id", PlayerHeadDisplayMode.BOTH.configValue());
             changed = true;
         }
         if (!yamlConfig().contains("storage.sql.sqlite.file")) {
@@ -3400,15 +3476,26 @@ public final class DoudizhuPlugin extends JavaPlugin {
         );
     }
 
+    /**
+     * 渲染角色标签 + 玩家身份的通用行前缀。
+     * <p>被 historyLandlordLine / historyFarmerLines / historySelfLine 共用。</p>
+     */
+    private Component historyRoleLine(String roleLabel, String startColor, String endColor,
+                                       UUID playerId, String playerName) {
+        return concat(
+            gradientLabel(roleLabel, startColor, endColor),
+            Component.text(" ", NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
+            playerIdentityComponent(playerId, playerName, NamedTextColor.WHITE)
+        );
+    }
+
     private Component historySelfLine(PlayerHistoryEntry entry) {
         MatchParticipantRecord self = entry.self();
         if (self == null) {
             return plain(Component.text("玩家信息缺失", NamedTextColor.GRAY));
         }
         return concat(
-            gradientLabel("玩家", HISTORY_CYAN, HISTORY_SKY),
-            Component.text(" ", NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
-            playerIdentityComponent(self.playerId(), self.playerName(), NamedTextColor.WHITE),
+            historyRoleLine("玩家", HISTORY_CYAN, HISTORY_SKY, self.playerId(), self.playerName()),
             historyDivider(),
             historyRoleChip(self.roleLabel())
         );
@@ -3422,11 +3509,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (landlord == null) {
             return plain(Component.text("地主 未知", NamedTextColor.GRAY));
         }
-        return concat(
-            gradientLabel("地主", HISTORY_PINK, HISTORY_ROSE),
-            Component.text(" ", NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
-            playerIdentityComponent(landlord.playerId(), landlord.playerName(), NamedTextColor.WHITE)
-        );
+        return historyRoleLine("地主", HISTORY_PINK, HISTORY_ROSE, landlord.playerId(), landlord.playerName());
     }
 
     private List<Component> historyFarmerLines(PlayerHistoryEntry entry) {
@@ -3435,13 +3518,29 @@ public final class DoudizhuPlugin extends JavaPlugin {
             .toList();
         List<Component> lines = new ArrayList<>(farmers.size());
         for (MatchParticipantRecord farmer : farmers) {
-            lines.add(concat(
-                gradientLabel("农民", HISTORY_GOLD, HISTORY_CREAM),
-                Component.text(" ", NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false),
-                playerIdentityComponent(farmer.playerId(), farmer.playerName(), NamedTextColor.WHITE)
-            ));
+            lines.add(historyRoleLine("农民", HISTORY_GOLD, HISTORY_CREAM, farmer.playerId(), farmer.playerName()));
         }
         return lines;
+    }
+
+    /**
+     * 渲染结算行通用的 收入/支出/净变化 尾部组件。
+     * <p>被 historyPersonalSettlementLine 和 historyParticipantLine 共用。</p>
+     */
+    private Component settlementTail(double delta, String unit) {
+        double income = Math.max(0.0, delta);
+        double expense = Math.max(0.0, -delta);
+        NamedTextColor deltaColor = delta >= 0 ? NamedTextColor.GREEN : NamedTextColor.RED;
+        return concat(
+            gradientLabel("收入", HISTORY_GREEN, HISTORY_MINT),
+            Component.text(" " + formatAmount(income) + unit, NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false),
+            historyDivider(),
+            gradientLabel("支出", HISTORY_PINK, HISTORY_RED),
+            Component.text(" " + formatAmount(expense) + unit, expense > 0.0001 ? NamedTextColor.RED : NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false),
+            historyDivider(),
+            historyNetChip(delta >= 0),
+            Component.text(" " + formatSigned(delta) + unit, deltaColor).decoration(TextDecoration.ITALIC, false)
+        );
     }
 
     private Component historyPersonalSettlementLine(PlayerHistoryEntry entry) {
@@ -3451,9 +3550,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         boolean win = "WIN".equalsIgnoreCase(self.outcome());
         String unit = selfUnitLabel(entry);
-        double income = Math.max(0.0, self.settlementDelta());
-        double expense = Math.max(0.0, -self.settlementDelta());
-        NamedTextColor deltaColor = self.settlementDelta() >= 0 ? NamedTextColor.GREEN : NamedTextColor.RED;
         Component line = concat(
             historyMatchChip(win),
             historyDivider(),
@@ -3461,14 +3557,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             historyDivider(),
             historyGainLossChip(self.settlementDelta() >= 0, formatAmount(Math.abs(self.settlementDelta())) + unit),
             historyDivider(),
-            gradientLabel("收入", HISTORY_GREEN, HISTORY_MINT),
-            Component.text(" " + formatAmount(income) + unit, NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false),
-            historyDivider(),
-            gradientLabel("支出", HISTORY_PINK, HISTORY_RED),
-            Component.text(" " + formatAmount(expense) + unit, expense > 0.0001 ? NamedTextColor.RED : NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false),
-            historyDivider(),
-            historyNetChip(self.settlementDelta() >= 0),
-            Component.text(" " + formatSigned(self.settlementDelta()) + unit, deltaColor).decoration(TextDecoration.ITALIC, false)
+            settlementTail(self.settlementDelta(), unit)
         );
         if (self.debtAfter() > 0.0001) {
             line = line.append(Component.text(" | 欠 " + formatCompactAmount(self.debtAfter()) + unit, NamedTextColor.RED));
@@ -3481,9 +3570,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private Component historyParticipantLine(MatchParticipantRecord participant) {
         String unit = normalizeNonBlank(participant.unitLabel(), "金币");
-        double income = Math.max(0.0, participant.settlementDelta());
-        double expense = Math.max(0.0, -participant.settlementDelta());
-        NamedTextColor deltaColor = participant.settlementDelta() >= 0 ? NamedTextColor.GREEN : NamedTextColor.RED;
         return concat(
             Component.text("• ", NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false),
             playerIdentityComponent(participant.playerId(), participant.playerName(), NamedTextColor.WHITE),
@@ -3492,14 +3578,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             historyDivider(),
             historyGainLossChip(participant.settlementDelta() >= 0, formatAmount(Math.abs(participant.settlementDelta())) + unit),
             historyDivider(),
-            gradientLabel("收入", HISTORY_GREEN, HISTORY_MINT),
-            Component.text(" " + formatAmount(income) + unit, NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false),
-            historyDivider(),
-            gradientLabel("支出", HISTORY_PINK, HISTORY_RED),
-            Component.text(" " + formatAmount(expense) + unit, expense > 0.0001 ? NamedTextColor.RED : NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false),
-            historyDivider(),
-            historyNetChip(participant.settlementDelta() >= 0),
-            Component.text(" " + formatSigned(participant.settlementDelta()) + unit, deltaColor).decoration(TextDecoration.ITALIC, false)
+            settlementTail(participant.settlementDelta(), unit)
         );
     }
 
@@ -3519,8 +3598,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return gradientLabel("其他玩家", HISTORY_CYAN, HISTORY_GOLD);
     }
 
+    /**
+     * 根据正/负状态渲染带颜色切换的标签芯片。
+     * <p>被 historyMatchChip / historyNetChip 等共用。</p>
+     */
+    private Component historyToggleChip(String text, boolean positive) {
+        return positive
+            ? gradientLabel(text, HISTORY_CYAN, HISTORY_GREEN)
+            : gradientLabel(text, HISTORY_PINK, HISTORY_RED);
+    }
+
     private Component historyMatchChip(boolean win) {
-        return win ? gradientLabel("对局", HISTORY_CYAN, HISTORY_GREEN) : gradientLabel("对局", HISTORY_PINK, HISTORY_RED);
+        return historyToggleChip("对局", win);
     }
 
     private Component historyOutcomeChip(boolean win) {
@@ -3528,7 +3617,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private Component historyNetChip(boolean positive) {
-        return positive ? gradientLabel("净变化", HISTORY_CYAN, HISTORY_GREEN) : gradientLabel("净变化", HISTORY_PINK, HISTORY_RED);
+        return historyToggleChip("净变化", positive);
     }
 
     private Component historyGainLossChip(boolean positive, String amountText) {
@@ -3560,13 +3649,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private Component concat(Component... components) {
-        Component result = Component.empty();
-        for (Component component : components) {
-            if (component != null) {
-                result = result.append(component);
-            }
-        }
-        return plain(result);
+        return MuzTheme.concat(components);
     }
 
     private String selfUnitLabel(PlayerHistoryEntry entry) {
@@ -3581,8 +3664,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return formatSignedCompactAmount(value);
     }
 
+    /**
+     * 判断浮点值是否实质上为整数（误差 < 0.0001）。
+     * <p>被 formatAmount / compactNumber 共用，避免重复的整数检测逻辑。</p>
+     */
+    private static boolean isEffectivelyInteger(double value) {
+        return Math.abs(value - Math.rint(value)) < 0.0001;
+    }
+
     private String formatAmount(double value) {
-        if (Math.abs(value - Math.rint(value)) < 0.0001) {
+        if (isEffectivelyInteger(value)) {
             return String.valueOf((long) Math.rint(value));
         }
         return String.format(Locale.ROOT, "%.2f", value);
@@ -3604,7 +3695,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private String compactNumber(double value) {
-        if (Math.abs(value - Math.rint(value)) < 0.0001) {
+        if (isEffectivelyInteger(value)) {
             return String.valueOf((long) Math.rint(value));
         }
         String formatted = String.format(Locale.ROOT, "%.2f", value);
@@ -3671,10 +3762,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.CHAIR_DISTANCE && usesBlockChairPlacement()) {
             return 1.0;
         }
-        if (usesFinePrecision(setting)) {
-            return setting.step();
-        }
-        return setting.integerSetting() ? setting.step() : Math.max(0.1, roundToSingleDecimal(setting.step()));
+        // 直接用各项自己声明的 step 作为兜底。
+        //
+        // 原先非白名单项会被 Math.max(0.1, ...) 抬到至少 0.1，
+        // 那是为了配合当时"只保留一位小数"的存储精度；
+        // 现在存储保留三位小数，不需要再抬底，
+        // 否则声明了 0.02 步长的设置（如手牌宽高缩放）会被硬拉成 0.1。
+        return setting.step();
     }
 
     private double normalizeAdminCurrentValue(AdminSetting setting, double current) {
@@ -3687,10 +3781,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.CHAIR_DISTANCE && usesBlockChairPlacement()) {
             return normalizeBlockChairDistance(current);
         }
-        if (usesFinePrecision(setting)) {
-            return current;
-        }
-        return roundToSingleDecimal(current);
+        // 同 normalizeAdminStoredValue：统一走存储精度（五位小数）。
+        // 这里若按更粗的精度取整，0.01 / 0.0001 的加减会在读出当前值时就被抹平，
+        // 表现为连点多次数字都不动。
+        return roundToStorePrecision(current);
     }
 
     private double normalizeAdminStoredValue(AdminSetting setting, double value) {
@@ -3703,26 +3797,31 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (setting == AdminSetting.CHAIR_DISTANCE && usesBlockChairPlacement()) {
             return normalizeBlockChairDistance(value);
         }
-        if (usesFinePrecision(setting)) {
-            return value;
-        }
-        return roundToSingleDecimal(value);
-    }
-
-    private boolean usesFinePrecision(AdminSetting setting) {
-        return setting == AdminSetting.TABLE_SPAWN_OFFSET_Y
-            || setting == AdminSetting.HAND_SPACING
-            || setting == AdminSetting.CARD_DEPTH_OFFSET
-            || setting == AdminSetting.HOVER_CARD_SCALE
-            || setting == AdminSetting.HOVER_CARD_LIFT;
+        // 统一走 AdminSettingArithmetic 的存储精度（五位小数）。
+        //
+        // 原先这里对不在 usesFinePrecision 白名单里的设置调 roundToSingleDecimal，
+        // 结果 0.01 步长会被四舍五入抹成 0 或 0.1，等于步长失效。
+        // 白名单只有 17 项，漏掉了桌子高度、弧度等一堆设置。
+        // 现在精度既能吃住 0.01 步长，也能吃住压层类设置的 0.0001 固定步长。
+        return roundToStorePrecision(value);
     }
 
     private double roundToSingleDecimal(double value) {
         return Math.round(value * 10.0) / 10.0;
     }
 
+    /**
+     * 按存储精度取整，用于消浮点噪音又不破坏细步长（0.01 / 0.0001）。
+     *
+     * @param value 原始值
+     * @return 按存储精度取整后的值
+     */
+    private double roundToStorePrecision(double value) {
+        return linmumua.doudizhu.config.AdminSettingArithmetic.roundToStorePrecision(value);
+    }
+
     private double normalizeBlockChairRotation(double value) {
-        return Math.round(value / 90.0) * 90.0;
+        return linmumua.doudizhu.config.AdminSettingArithmetic.snapToBlockChairRotation(value);
     }
 
     private double normalizeBlockChairDistance(double value) {
@@ -3764,14 +3863,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         ItemMeta meta = itemStack.getItemMeta();
         if (meta != null && VersionCompat.supportsItemModel()) {
-            try {
-                java.lang.reflect.Method hasItemModel = meta.getClass().getMethod("hasItemModel");
-                java.lang.reflect.Method getItemModel = meta.getClass().getMethod("getItemModel");
-                if ((boolean) hasItemModel.invoke(meta)) {
-                    Object model = getItemModel.invoke(meta);
-                    candidates.addAll(furnitureItemIdCandidates(model.toString(), fallbackKey));
-                }
-            } catch (Exception ignored) {
+            if (meta.hasItemModel()) {
+                candidates.addAll(furnitureItemIdCandidates(meta.getItemModel().toString(), fallbackKey));
             }
         }
         addCandidatesFromTranslationKey(candidates, itemStack.translationKey());
@@ -3842,7 +3935,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private void loadPlayerSettings() {
         playerCardLabelSettings.clear();
         playerSelectionSoundSettings.clear();
-        playerOpponentPreviewSettings.clear();
         playerSelectionSoundProfileSettings.clear();
         playerPlayActionProfileSettings.clear();
         playerPlayActionKindProfileSettings.clear();
@@ -3863,9 +3955,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 }
                 if (playerSettingsConfig.contains(base + ".selection-sound")) {
                     playerSelectionSoundSettings.put(playerId, playerSettingsConfig.getBoolean(base + ".selection-sound", false));
-                }
-                if (playerSettingsConfig.contains(base + ".opponent-preview")) {
-                    playerOpponentPreviewSettings.put(playerId, playerSettingsConfig.getBoolean(base + ".opponent-preview", false));
                 }
                 if (playerSettingsConfig.contains(base + ".selection-sound-profile")) {
                     playerSelectionSoundProfileSettings.put(playerId, clampProfileIndex(playerSettingsConfig.getInt(base + ".selection-sound-profile", 0)));
@@ -3908,7 +3997,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
                         playerHandOffsets.put(playerId, offsets);
                     }
                 }
-            } catch (IllegalArgumentException ignored) {
+            } catch (IllegalArgumentException e) {
+                getLogger().warning("加载玩家设置失败，跳过条目 '" + rawId + "': " + e.getMessage());
             }
         }
     }
@@ -3921,7 +4011,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         Set<UUID> players = new LinkedHashSet<>();
         players.addAll(playerCardLabelSettings.keySet());
         players.addAll(playerSelectionSoundSettings.keySet());
-        players.addAll(playerOpponentPreviewSettings.keySet());
         players.addAll(playerSelectionSoundProfileSettings.keySet());
         players.addAll(playerPlayActionProfileSettings.keySet());
         players.addAll(playerPlayActionKindProfileSettings.keySet());
@@ -3937,9 +4026,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
             }
             if (playerSelectionSoundSettings.containsKey(playerId)) {
                 configuration.set(base + ".selection-sound", playerSelectionSoundSettings.get(playerId));
-            }
-            if (playerOpponentPreviewSettings.containsKey(playerId)) {
-                configuration.set(base + ".opponent-preview", playerOpponentPreviewSettings.get(playerId));
             }
             if (playerSelectionSoundProfileSettings.containsKey(playerId)) {
                 configuration.set(base + ".selection-sound-profile", playerSelectionSoundProfileSettings.get(playerId));
@@ -4209,108 +4295,42 @@ public final class DoudizhuPlugin extends JavaPlugin {
         PREVIEW_SCALE
     }
 
-    public enum PlayerHeadDisplayMode {
-        HEAD_ONLY(0, "只显示头像"),
-        BOTH(1, "都显示"),
-        NAME_ONLY(2, "只显示名字");
-
-        private final int configValue;
-        private final String label;
-
-        PlayerHeadDisplayMode(int configValue, String label) {
-            this.configValue = configValue;
-            this.label = label;
-        }
-
-        public int configValue() {
-            return configValue;
-        }
-
-        public String label() {
-            return label;
-        }
-
-        public boolean showAvatar() {
-            return this != NAME_ONLY;
-        }
-
-        public boolean showName() {
-            return this != HEAD_ONLY;
-        }
-
-        public PlayerHeadDisplayMode next() {
-            return switch (this) {
-                case HEAD_ONLY -> BOTH;
-                case BOTH -> NAME_ONLY;
-                case NAME_ONLY -> HEAD_ONLY;
-            };
-        }
-
-        public static PlayerHeadDisplayMode fromConfig(Object raw) {
-            if (raw instanceof Boolean bool) {
-                return bool ? BOTH : HEAD_ONLY;
-            }
-            if (raw instanceof Number number) {
-                return switch (number.intValue()) {
-                    case 0 -> HEAD_ONLY;
-                    case 2 -> NAME_ONLY;
-                    default -> BOTH;
-                };
-            }
-            String normalized = raw == null ? "" : raw.toString().trim().toLowerCase(Locale.ROOT);
-            return switch (normalized) {
-                case "0", "head_only", "head-only", "avatar", "avatar_only", "avatar-only" -> HEAD_ONLY;
-                case "2", "name_only", "name-only", "name" -> NAME_ONLY;
-                default -> BOTH;
-            };
-        }
-    }
-
     public enum AdminSetting {
-        TABLE_SPAWN_OFFSET_Y("table.spawn-offset-y", "桌子高度", 0.18, -5.0, 5.0, 0.05, false, false, false),
+        TABLE_SPAWN_OFFSET_Y("table.spawn-offset-y", "桌子高度", -0.55, -5.0, 5.0, 0.05, false, false, false),
         PRIVATE_CARD_SCALE("render.private-card-scale", "实体手牌大小", DEFAULT_PRIVATE_CARD_SCALE, 0.10, 5.0, 0.02, false, false, false),
-        PUBLIC_TRICK_CARD_SCALE("render.public-trick-card-scale", "出牌预览大小", DEFAULT_PUBLIC_CARD_SCALE, 0.10, 5.0, 0.02, false, false, false),
-        PRIVATE_CARD_WIDTH_SCALE("render.private-card-size.width", "手牌宽度缩放", DEFAULT_PRIVATE_CARD_SCALE, 0.05, 5.0, 0.02, false, false, false),
-        PRIVATE_CARD_HEIGHT_SCALE("render.private-card-size.height", "手牌高度缩放", DEFAULT_PRIVATE_CARD_SCALE, 0.05, 5.0, 0.02, false, false, false),
-        PRIVATE_CARD_DEPTH_SCALE("render.private-card-size.depth", "手牌厚度缩放", DEFAULT_PRIVATE_CARD_SCALE, 0.01, 5.0, 0.02, false, false, false),
-        PUBLIC_CARD_WIDTH_SCALE("render.public-card-size.width", "预览宽度缩放", DEFAULT_PUBLIC_CARD_SCALE, 0.05, 5.0, 0.02, false, false, false),
-        PUBLIC_CARD_HEIGHT_SCALE("render.public-card-size.height", "预览高度缩放", DEFAULT_PUBLIC_CARD_SCALE, 0.05, 5.0, 0.02, false, false, false),
-        PUBLIC_CARD_DEPTH_SCALE("render.public-card-size.depth", "预览厚度缩放", DEFAULT_PUBLIC_CARD_SCALE, 0.01, 5.0, 0.02, false, false, false),
+        PRIVATE_CARD_WIDTH_SCALE("render.private-card-size.width", "手牌宽度缩放", DEFAULT_PRIVATE_CARD_AXIS_SCALE, 0.05, 5.0, 0.02, false, false, false),
+        PRIVATE_CARD_HEIGHT_SCALE("render.private-card-size.height", "手牌高度缩放", DEFAULT_PRIVATE_CARD_AXIS_SCALE, 0.05, 5.0, 0.02, false, false, false),
+        PRIVATE_CARD_DEPTH_SCALE("render.private-card-size.depth", "手牌厚度缩放", DEFAULT_PRIVATE_CARD_AXIS_SCALE, 0.01, 5.0, 0.02, false, false, false),
+        // 悬停突出效果由这一项独家承担：牌只放大长与宽，厚度恒定、位置不动。
+        // 曾经并存的「悬停向后偏移」已删除——沿法向平移会让射线与牌平面的交点跟着
+        // 悬停漂移，形成命中即脱靶的抖动闭环；长宽放大不移动牌面所在的平面，安全。
         HOVER_CARD_SCALE("render.card-hover.scale", "悬停放大倍数", 1.08, 1.0, 2.5, 0.01, false, false, false),
         HOVER_CARD_LIFT("render.card-hover.lift", "悬停上移高度", 0.06, 0.0, 1.0, 0.01, false, false, false),
         HOVER_CARD_INTERPOLATION_TICKS("render.card-hover.interpolation-ticks", "牌预览动画时长", 6.0, 1.0, 20.0, 1.0, false, true, false),
         HOVER_CARD_ANIMATION_TYPE("render.card-hover.animation-type", "牌预览动画类型", 1.0, 0.0, 3.0, 1.0, false, true, false),
-        HAND_SPACING("render.hand-spacing", "默认手牌间距", 0.21, 0.02, 2.0, 0.01, false, false, false),
-        PUBLIC_TRICK_SPACING("render.public-trick-spacing", "出牌预览间距", 0.22, 0.02, 2.0, 0.01, false, false, false),
-        PUBLIC_PREVIEW_ROW_DEPTH_SPACING("render.public-trick.row-depth-spacing", "预览前后错开", 0.22, 0.0, 3.0, 0.01, false, false, false),
-        CARD_LABEL_HEIGHT("render.card-label-height", "牌面标签高度", 0.34, 0.0, 3.0, 0.02, false, false, false),
-        CARD_LABEL_LATERAL("render.card-label-offset.lateral", "牌面标签左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
+        HAND_SPACING("render.hand-spacing", "默认手牌间距", 0.1, 0.02, 2.0, 0.01, false, false, false),
+        CARD_LABEL_HEIGHT("render.card-label-height", "牌面标签高度", 0.05, 0.0, 3.0, 0.02, false, false, false),
+        CARD_LABEL_LATERAL("render.card-label-offset.lateral", "牌面标签左右偏移", 0.05, -2.0, 2.0, 0.02, false, false, false),
         CARD_LABEL_DEPTH("render.card-label-offset.depth", "牌面标签前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
-        PLAYER_HEAD_SCALE("render.player-head-scale", "玩家头像大小", 1.00, 0.50, 4.0, 0.10, false, false, false),
-        PLAYER_HEAD_SHOW_ID("render.player-head-show-id", "头像/名字显示模式", 1.0, 0.0, 2.0, 1.0, false, true, false),
-        STATUS_AVATAR_SCALE("render.status-avatar.scale", "顶栏头像大小", 1.00, 0.40, 4.0, 0.05, false, false, false),
-        STATUS_AVATAR_LATERAL("render.status-avatar-offset.lateral", "顶栏头像左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        STATUS_AVATAR_VERTICAL("render.status-avatar-offset.vertical", "顶栏头像上下偏移", 0.82, -2.0, 4.0, 0.05, false, false, false),
-        STATUS_AVATAR_DEPTH("render.status-avatar-offset.depth", "顶栏头像前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         STATUS_NAME_SCALE("render.status-name.scale", "顶栏名字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
         STATUS_NAME_LATERAL("render.status-name-offset.lateral", "顶栏名字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         STATUS_NAME_VERTICAL("render.status-name-offset.vertical", "顶栏名字上下偏移", 0.56, -2.0, 4.0, 0.05, false, false, false),
         STATUS_NAME_DEPTH("render.status-name-offset.depth", "顶栏名字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        SEAT_AVATAR_SCALE("render.seat-avatar.scale", "座位头像大小", 1.00, 0.40, 4.0, 0.05, false, false, false),
-        SEAT_AVATAR_LATERAL("render.seat-avatar-offset.lateral", "座位头像左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        SEAT_AVATAR_VERTICAL("render.seat-avatar-offset.vertical", "座位头像上下偏移", 0.18, -2.0, 4.0, 0.05, false, false, false),
-        SEAT_AVATAR_DEPTH("render.seat-avatar-offset.depth", "座位头像前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
+        // SEAT_NAME_* 四项已停用：入座后的字条改为统一读 EMPTY_SEAT_*。
+        // 两组出厂默认值本来就相同，但玩家只调得到看得见的空位字条，
+        // 一入座就切到没调过的 SEAT_NAME_*，字条尺寸和位置会瞬间跳变。
+        // 枚举项与配置键保留（含槽位 10/12/14/16 的 GUI 入口），兼容既有 config.yml。
         SEAT_NAME_SCALE("render.seat-name.scale", "座位名字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
         SEAT_NAME_LATERAL("render.seat-name-offset.lateral", "座位名字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         SEAT_NAME_VERTICAL("render.seat-name-offset.vertical", "座位名字上下偏移", -0.04, -2.0, 4.0, 0.05, false, false, false),
         SEAT_NAME_DEPTH("render.seat-name-offset.depth", "座位名字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        EMPTY_SEAT_SCALE("render.empty-seat.scale", "空位主文字大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+        EMPTY_SEAT_SCALE("render.empty-seat.scale", "空位主文字大小", 0.9, 0.20, 4.0, 0.05, false, false, false),
          EMPTY_SEAT_LATERAL("render.empty-seat-offset.lateral", "空位主文字左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        EMPTY_SEAT_VERTICAL("render.empty-seat-offset.vertical", "空位主文字上下偏移", -0.04, -2.0, 4.0, 0.05, false, false, false),
+        EMPTY_SEAT_VERTICAL("render.empty-seat-offset.vertical", "空位主文字上下偏移", 1.5, -2.0, 4.0, 0.05, false, false, false),
         EMPTY_SEAT_DEPTH("render.empty-seat-offset.depth", "空位主文字前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        SEAT_INFO_SCALE("render.seat-info.scale", "座位副标题大小", 0.46, 0.20, 4.0, 0.05, false, false, false),
+        SEAT_INFO_SCALE("render.seat-info.scale", "座位副标题大小", 0.5, 0.20, 4.0, 0.05, false, false, false),
         SEAT_INFO_LATERAL("render.seat-info-offset.lateral", "座位副标题左右偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
-        SEAT_INFO_VERTICAL("render.seat-info-offset.vertical", "座位副标题上下偏移", -0.22, -2.0, 4.0, 0.05, false, false, false),
+        SEAT_INFO_VERTICAL("render.seat-info-offset.vertical", "座位副标题上下偏移", -0.5, -2.0, 4.0, 0.05, false, false, false),
         SEAT_INFO_DEPTH("render.seat-info-offset.depth", "座位副标题前后偏移", 0.0, -3.0, 3.0, 0.02, false, false, false),
         HOVER_GLOW_ENABLED("render.hover-glow.enabled", "预览发光", 1.0, 0.0, 1.0, 1.0, true, false, true),
         HOVER_GLOW_RED("render.hover-glow.color.red", "预览发光红", 96.0, 0.0, 255.0, 1.0, false, true, false),
@@ -4320,30 +4340,29 @@ public final class DoudizhuPlugin extends JavaPlugin {
         SELECTED_GLOW_RED("render.selected-glow.color.red", "预选发光红", 255.0, 0.0, 255.0, 1.0, false, true, false),
         SELECTED_GLOW_GREEN("render.selected-glow.color.green", "预选发光绿", 226.0, 0.0, 255.0, 1.0, false, true, false),
         SELECTED_GLOW_BLUE("render.selected-glow.color.blue", "预选发光蓝", 92.0, 0.0, 255.0, 1.0, false, true, false),
-        BUTTON_DISTANCE("render.button-offset.distance", "按钮离桌距离", 2.10, 0.20, 4.0, 0.05, false, false, false),
-        BUTTON_HEIGHT("render.button-offset.height", "按钮高度", 1.02, 0.20, 4.0, 0.05, false, false, false),
-        CHAIR_ROTATION_DEGREES("render.chair-rotation-degrees", "椅子旋转角度", 0.0, -360.0, 360.0, 5.0, false, false, false),
-        CHAIR_DISTANCE("render.layout.chair-distance", "椅子离桌距离", 2.35, 1.0, 8.0, 0.05, false, false, false),
+        BUTTON_DISTANCE("render.button-offset.distance", "按钮离桌距离", DEFAULT_BUTTON_DISTANCE, 0.20, 4.0, 0.05, false, false, false),
+        BUTTON_HEIGHT("render.button-offset.height", "按钮高度", 2.5, 0.20, 4.0, 0.05, false, false, false),
+        // 角度类设置：固定 1 度步长，全局 0.01 调角度没有意义。
+        // 方块椅模式下 normalizeBlockChairRotation 仍会把结果吸附到 90 度整数倍。
+        CHAIR_ROTATION_DEGREES("render.chair-rotation-degrees", "椅子旋转角度", 180.0, -360.0, 360.0, 5.0, false, false, false, 1.0),
+        CHAIR_DISTANCE("render.layout.chair-distance", "椅子离桌距离", 2.5, 1.0, 8.0, 0.05, false, false, false),
         CHAIR_VISUAL_LATERAL("render.chair-visual-offset.lateral", "椅子左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
-        CHAIR_VISUAL_VERTICAL("render.chair-visual-offset.vertical", "椅子上下偏移", -0.04, -2.0, 2.0, 0.02, false, false, false),
+        CHAIR_VISUAL_VERTICAL("render.chair-visual-offset.vertical", "椅子上下偏移", 0.35, -2.0, 2.0, 0.02, false, false, false),
         CHAIR_HITBOX_LATERAL("render.chair-hitbox-offset.lateral", "加入按钮交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         CHAIR_HITBOX_VERTICAL("render.chair-hitbox-offset.vertical", "加入按钮交互箱上下偏移", 0.02, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_HITBOX_LATERAL("render.button-hitbox-offset.lateral", "按钮交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_HITBOX_DEPTH("render.button-hitbox-offset.depth", "按钮交互箱前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
         BUTTON_HITBOX_VERTICAL("render.button-hitbox-offset.vertical", "按钮交互箱上下偏移", 0.02, -2.0, 2.0, 0.02, false, false, false),
-        CARD_HITBOX_LATERAL("render.card-hitbox-offset.lateral", "扑克牌交互箱左右偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
-        CARD_HITBOX_DEPTH("render.card-hitbox-offset.depth", "扑克牌交互箱前后偏移", 0.0, -2.0, 2.0, 0.02, false, false, false),
-        CARD_HITBOX_VERTICAL("render.card-hitbox-offset.vertical", "扑克牌交互箱上下偏移", -0.45, -2.0, 2.0, 0.02, false, false, false),
-        CARD_HITBOX_LENGTH("render.card-hitbox.length", "扑克牌交互箱长度", 0.28, 0.05, 3.0, 0.05, false, false, false),
-        CARD_HITBOX_WIDTH("render.card-hitbox.width", "扑克牌交互箱宽度", 0.16, 0.05, 3.0, 0.05, false, false, false),
-        CARD_HITBOX_HEIGHT("render.card-hitbox.height", "扑克牌交互箱高度", 0.56, 0.05, 3.0, 0.05, false, false, false),
-        CARD_DEPTH_OFFSET("render.card-depth-offset", "手牌压层深度", 0.01, 0.01, 1.0, 0.01, false, false, false),
-        STATUS_HEIGHT("render.status-height", "状态文字高度", 3.10, 0.0, 10.0, 0.05, false, false, false),
-        PLAY_DETAIL_HEIGHT("render.play-detail-height", "上一手文字高度", 2.35, 0.0, 10.0, 0.05, false, false, false),
-        PUBLIC_TRICK_HEIGHT("render.public-trick-height", "出牌预览高度", 1.55, 0.0, 10.0, 0.05, false, false, false),
-        GLOBAL_HAND_LATERAL("render.private-hand-offset.lateral", "全局手牌横向偏移", 0.0, -5.0, 5.0, 0.02, false, false, false),
-        GLOBAL_HAND_VERTICAL("render.private-hand-offset.vertical", "全局手牌竖向偏移", 0.0, -5.0, 5.0, 0.02, false, false, false),
-        GLOBAL_HAND_DEPTH("render.private-hand-offset.depth", "全局手牌纵深偏移", 0.0, -5.0, 5.0, 0.02, false, false, false),
+        // 压层类设置：固定 0.0001 步长。
+        // min 从 0.01 下调到 0.0001：原来的下限正好等于默认值，
+        // 0.0001 步长往下调会被立刻夹回 0.01，等于只能加不能减。
+        // 下限跟步长对齐后才调得动，且仍然大于 0，不会退化成"完全不压层"。
+        CARD_DEPTH_OFFSET("render.card-depth-offset", "手牌压层深度", 0.005, 0.0001, 1.0, 0.01, false, false, false, 0.0001),
+        STATUS_HEIGHT("render.status-height", "状态文字高度", 5.0, 0.0, 10.0, 0.05, false, false, false),
+        PLAY_DETAIL_HEIGHT("render.play-detail-height", "上一手文字高度", 4.0, 0.0, 10.0, 0.05, false, false, false),
+        GLOBAL_HAND_LATERAL("render.private-hand-offset.lateral", "全局手牌横向偏移", 0.03, -5.0, 5.0, 0.02, false, false, false),
+        GLOBAL_HAND_VERTICAL("render.private-hand-offset.vertical", "全局手牌竖向偏移", 1.9, -5.0, 5.0, 0.02, false, false, false),
+        GLOBAL_HAND_DEPTH("render.private-hand-offset.depth", "全局手牌纵深偏移", 0.55, -5.0, 5.0, 0.02, false, false, false),
         LABELS_ENABLED("cards.hologram-labels.enabled", "全局点数标签", 1.0, 0.0, 1.0, 1.0, true, false, true),
         DUPLICATE_ONLY("cards.hologram-labels.duplicate-ranks-only", "仅重复牌显示标签", 0.0, 0.0, 1.0, 1.0, true, false, false),
         BGM_VOLUME("audio.bgm-volume", "背景音乐音量", 0.55, 0.0, 6.0, 0.05, false, false, false),
@@ -4353,17 +4372,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
         BOT_DELAY_MAX("bot.action-delay-max-ticks", "机器人最长思考", 30.0, 0.0, 400.0, 1.0, false, true, false),
         HINT_GROUP_LIMIT("hints.max-groups", "提示组数上限", 6.0, 1.0, 20.0, 1.0, false, true, false),
         JOIN_LABEL_HEIGHT("render.button-layout.join-label-height", "空位加入文字高度", 0.18, 0.0, 3.0, 0.02, false, false, false),
-        JOIN_LABEL_SCALE("render.button-layout.join-label-scale", "空位加入文字大小", 0.46, 0.08, 4.0, 0.05, false, false, false),
-        ACTION_LABEL_HEIGHT("render.button-layout.action-label-height", "按钮文字高度", 0.18, 0.0, 3.0, 0.02, false, false, false),
-        ACTION_LABEL_SCALE("render.button-layout.action-label-scale", "按钮文字大小", 0.20, 0.08, 4.0, 0.05, false, false, false),
+        JOIN_LABEL_SCALE("render.button-layout.join-label-scale", "空位加入文字大小", 0.4, 0.08, 4.0, 0.05, false, false, false),
+        ACTION_LABEL_HEIGHT("render.button-layout.action-label-height", "按钮文字高度", 0.2, 0.0, 3.0, 0.02, false, false, false),
+        ACTION_LABEL_SCALE("render.button-layout.action-label-scale", "按钮文字大小", 0.4, 0.08, 4.0, 0.05, false, false, false),
         BUTTON_FRONT_BASE_DISTANCE("render.button-layout.front-base-distance", "前座按钮基准距离", 1.40, 0.2, 5.0, 0.02, false, false, false),
         BUTTON_SIDE_BASE_DISTANCE("render.button-layout.side-base-distance", "侧座按钮基准距离", 1.72, 0.2, 5.0, 0.02, false, false, false),
         BUTTON_DISTANCE_FACTOR("render.button-layout.distance-factor", "按钮距离增量系数", 0.45, 0.0, 2.0, 0.01, false, false, false),
-        BUTTON_SPACING("render.button-layout.spacing-scale", "按钮间距倍率", 1.0, 0.2, 2.5, 0.02, false, false, false),
-        BUTTON_ARC_SMALL_ANGLE("render.button-layout.arc-angle-small", "三按钮弧度", 30.0, 0.0, 90.0, 1.0, false, false, false),
-        BUTTON_ARC_LARGE_ANGLE("render.button-layout.arc-angle-large", "多按钮弧度", 42.0, 0.0, 120.0, 1.0, false, false, false),
+        BUTTON_SPACING("render.button-layout.spacing-scale", "按钮间距倍率", 1.2, 0.2, 2.5, 0.02, false, false, false),
+        // 角度类设置：固定 1 度步长。
+        BUTTON_ARC_SMALL_ANGLE("render.button-layout.arc-angle-small", "三按钮弧度", 30.0, 0.0, 90.0, 1.0, false, false, false, 1.0),
+        BUTTON_ARC_LARGE_ANGLE("render.button-layout.arc-angle-large", "多按钮弧度", 42.0, 0.0, 120.0, 1.0, false, false, false, 1.0),
         BUTTON_ARC_SMALL_RADIUS("render.button-layout.arc-radius-small", "三按钮半径", 0.70, 0.05, 3.0, 0.02, false, false, false),
-        BUTTON_ARC_LARGE_RADIUS("render.button-layout.arc-radius-large", "多按钮半径", 0.86, 0.05, 3.0, 0.02, false, false, false);
+        BUTTON_ARC_LARGE_RADIUS("render.button-layout.arc-radius-large", "多按钮半径", 0.8, 0.05, 3.0, 0.02, false, false, false);
 
         private final String path;
         private final String label;
@@ -4374,8 +4394,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
         private final boolean booleanSetting;
         private final boolean integerSetting;
         private final boolean defaultBoolean;
+        private final double fixedStep;
 
         AdminSetting(String path, String label, double defaultValue, double minValue, double maxValue, double step, boolean booleanSetting, boolean integerSetting, boolean defaultBoolean) {
+            this(path, label, defaultValue, minValue, maxValue, step, booleanSetting, integerSetting, defaultBoolean, 0.0);
+        }
+
+        AdminSetting(String path, String label, double defaultValue, double minValue, double maxValue, double step, boolean booleanSetting, boolean integerSetting, boolean defaultBoolean, double fixedStep) {
             this.path = path;
             this.label = label;
             this.defaultValue = defaultValue;
@@ -4385,6 +4410,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             this.booleanSetting = booleanSetting;
             this.integerSetting = integerSetting;
             this.defaultBoolean = defaultBoolean;
+            this.fixedStep = fixedStep;
         }
 
         public String path() {
@@ -4421,6 +4447,55 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
         public boolean defaultBoolean() {
             return defaultBoolean;
+        }
+
+        /**
+         * 该设置自己钉死的步长，不吃玩家在 GUI 里选的全局微调步长。
+         *
+         * 做成枚举元数据而不是放在 HandGuiListener 里判定：
+         * 步长本来就和上下限、声明步长一样属于"这一项的数值语义"，
+         * 放在枚举里只有一处定义，新增设置时也不会漏改 Listener。
+         *
+         * @return 固定步长；返回 0 表示这一项跟随全局步长
+         */
+        public double fixedStep() {
+            return fixedStep;
+        }
+
+        /**
+         * 是否钉死了自己的步长。
+         *
+         * @return true 表示该项忽略全局微调步长
+         */
+        public boolean hasFixedStep() {
+            return Double.isFinite(fixedStep) && fixedStep > 0.0;
+        }
+
+        /**
+         * 这几项写 0 是它的真实取值，不表示"用默认值"。
+         *
+         * 绝大多数数值项在 config.yml 里出厂写 0，含义是"没调过，用源码里固化的默认"。
+         * 但下面这些项的 0 本身就是一档有效设置：音量 0 是静音、倒计时 0 是关闭、
+         * 机器人最短思考 0 是立刻出牌、显示模式与动画类型的 0 是第一个档位。
+         * 它们必须按字面值读，否则玩家把音量调到 0 会被当成"没设置"而弹回 0.55。
+         *
+         * 放在枚举里而不是各读取点各判一次：这属于"这一项的数值语义"，
+         * 和上下限、步长同级，只在一处定义，新增设置时不会漏改。
+         */
+        private static final java.util.Set<String> ZERO_IS_REAL_VALUE = java.util.Set.of(
+            "audio.bgm-volume",
+            "audio.effect-volume",
+            "actionbar.turn-countdown-seconds",
+            "bot.action-delay-min-ticks",
+            "render.card-hover.interpolation-ticks",
+            "render.card-hover.animation-type"
+        );
+
+        /**
+         * @return true 表示这一项的 0 按字面值生效，不会被换成默认值
+         */
+        public boolean zeroIsRealValue() {
+            return ZERO_IS_REAL_VALUE.contains(path);
         }
     }
 
@@ -4599,6 +4674,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         for (int index = 0; index < loadingLines.size(); index++) {
             getLogger().info(applyStartupGradient(fitToWidth(loadingLines.get(index), separator.length()), art.length + 1 + index, totalGradientLines));
         }
+        getLogger().info("声明：娱乐插件严禁赌博！");
     }
 
     private List<String> buildStartupInfoLines(CraftEngineBundleExporter.BundleExportResult exportResult, List<HookSnapshot> hooks, int consoleWidth) {
@@ -4731,33 +4807,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (vaultHook == null || vaultHook.state() == HookState.HOOKED || vaultHook.state() == HookState.DISABLED) {
             return;
         }
-        getLogger().warning("经济未接入: " + vaultHook.detail());
-        if (vaultEconomyBridge != null) {
-            getLogger().warning("  可用的经济插件: " + vaultEconomyBridge.availableProvidersDetail());
-        }
-        getLogger().warning("  检测结果: "
-            + "CMI=" + pluginState("CMI")
-            + ", CMILib=" + pluginState("CMILib")
-            + ", EzEconomy=" + pluginState("EzEconomy")
-            + ", XConomy=" + pluginState("XConomy")
-            + ", Vault=" + pluginState("Vault"));
-        getLogger().warning("  挑选顺序: " + String.join(" -> ", vaultPreferredProviderNames));
-        if (isPluginEnabled("CMI")) {
-            getLogger().warning("  CMI 的经济要接 Vault，通常还需要额外的桥接插件。");
-        }
+        getLogger().warning("未接入经济插件，不可结算");
 
     }
 
     private boolean isPluginEnabled(String name) {
         return getServer().getPluginManager().isPluginEnabled(name);
-    }
-
-    private String pluginState(String name) {
-        org.bukkit.plugin.Plugin plugin = getServer().getPluginManager().getPlugin(name);
-        if (plugin == null) {
-            return "missing";
-        }
-        return plugin.isEnabled() ? "enabled" : "disabled";
     }
 
     private double stageProgress(int stageIndex, int totalStages) {
@@ -4797,17 +4852,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return builder.toString();
     }
 
-    private String startupInfoLine(double progress, String label, String detail) {
-        return buildAsciiProgressBar(progress, 20) + " " + label + ": " + detail;
-    }
-
-    private String describeHookForStartup(HookSnapshot hook) {
-        if (hook == null) {
-            return "未检测到";
-        }
-        return hook.state().label() + " | " + hook.detail();
-    }
-
     private HookSnapshot findHook(List<HookSnapshot> hooks, String key) {
         for (HookSnapshot hook : hooks) {
             if (hook.key().equalsIgnoreCase(key)) {
@@ -4819,7 +4863,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private String bundleSummaryPlain(CraftEngineBundleExporter.BundleExportResult result) {
         return switch (result.state()) {
-            case EXPORTED -> "材质已同步 " + result.copiedEntries() + "/" + result.totalEntries() + " 个";
+            // 只有真的拷过文件才提示重载。材质落进 CraftEngine 的 resources 目录不等于
+            // 客户端能拿到：CraftEngine 是在自己启动时打 resource_pack.zip 的，而它按
+            // paper-plugin.yml 的 load: BEFORE 先于 MUZ 加载，所以这一批文件进的是
+            // 「已经打完包」的目录。不重载 CraftEngine 客户端下载到的仍是旧 zip，
+            // 表现为字形变豆腐块，而这一行却是绿色的「已同步」，等于把人往错方向带。
+            //
+            // 不需要重启第二次：/muz reload 走 ensureBundleReady(force=true)，
+            // 绕过指纹全量重拷一遍，效果和重启时的导出等价。
+            // 所以恢复路径是「重载 CraftEngine → 客户端重新下载」，
+            // 只有在 MUZ 这边的文件也需要重新推一遍时才额外跑一次 /muz reload。
+            case EXPORTED -> "材质已同步 " + result.copiedEntries() + "/" + result.totalEntries()
+                + " 个，还需重载 CraftEngine 让它重新打包，再让客户端重新下载资源包才会生效";
             case UP_TO_DATE -> "材质已是最新";
             case SKIPPED -> "跳过材质同步: " + result.detail();
             case FAILED -> "材质同步失败: " + result.detail();
@@ -4883,7 +4938,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private Component plain(Component component) {
-        return component.decoration(TextDecoration.ITALIC, false);
+        return MuzTheme.plain(component);
     }
 
     private int maxWidth(String[] lines) {
@@ -5096,16 +5151,41 @@ public final class DoudizhuPlugin extends JavaPlugin {
     /**
      * 绑定 /muz 命令的执行器与补全器
      */
+    /**
+     * 注册 /muz。
+     *
+     * paper-plugin.yml 不支持 commands 段，getCommand("muz") 只会返回 null，
+     * 所以命令改在这里通过 CommandMap 手动注册。命令的元信息（别名、描述、用法、权限）
+     * 原先写在 plugin.yml 里，现在跟着注册代码一起放在这。
+     *
+     * 只包一层转发，不改 DoudizhuCommand：它那 15 个子命令和状态感知的 tab 补全
+     * 是已经跑通的逻辑，重写成 Brigadier 树只会凭空多出一批出错的机会。
+     */
     private void registerMuzCommand() {
-        PluginCommand command = getCommand("muz");
-        if (command == null) {
-            // plugin.yml 里没有声明 commands 段时会走到这里，早点说清楚，免得玩家以为指令坏了。
-            getLogger().warning("plugin.yml 里没有找到 muz 命令，/muz 用不了。");
-            return;
-        }
         DoudizhuCommand executor = new DoudizhuCommand(this);
-        command.setExecutor(executor);
-        command.setTabCompleter(executor);
+        Command command = new Command("muz", "管理 MUZ 牌桌与对局。", "/muz help", List.of("MUZ")) {
+            @Override
+            public boolean execute(CommandSender sender, String label, String[] args) {
+                if (!testPermission(sender)) {
+                    // testPermission 自己会把无权限提示发给玩家
+                    return true;
+                }
+                return executor.onCommand(sender, this, label, args);
+            }
+
+            @Override
+            public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
+                if (!testPermissionSilent(sender)) {
+                    // 没权限的人不该从补全里看出有哪些子命令
+                    return List.of();
+                }
+                List<String> completions = executor.onTabComplete(sender, this, alias, args);
+                return completions == null ? List.of() : completions;
+            }
+        };
+        command.setPermission("muz.command");
+        // 前缀用插件名小写：万一别的插件也占了 muz，玩家还能用 /muz:muz 兜底
+        getServer().getCommandMap().register("muz", "muz", command);
     }
 
     private void logShutdownDiagnostics() {

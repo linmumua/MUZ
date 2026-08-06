@@ -7,9 +7,6 @@ import linmumua.doudizhu.ui.HandInventoryHolder;
 import linmumua.doudizhu.ui.MuzTheme;
 // import io.papermc.paper.event.player.AsyncChatEvent; // 1.20.1 不支持
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -78,6 +75,15 @@ public final class HandGuiListener implements Listener {
 
         int rawSlot = event.getRawSlot();
         try {
+            if (rawSlot == 4 && isAdminViewMode(holder.viewMode())) {
+                if (!player.hasPermission("muz.admin")) {
+                    throw new IllegalStateException("这个菜单需要管理员权限才能打开。");
+                }
+                String step = plugin.getHandGuiService().cycleHitboxAdjustmentStep(player.getUniqueId());
+                notifySettingSaved(player, "微调步长已切到 " + step, false);
+                plugin.getHandGuiService().refreshSettingsIfOpen(player);
+                return;
+            }
             switch (holder.viewMode()) {
                 case SETTINGS -> handleSettingsClick(player, rawSlot);
                 case SETTINGS_ACTION_KIND_MENU -> handlePlayerActionKindClick(player, rawSlot);
@@ -93,6 +99,17 @@ public final class HandGuiListener implements Listener {
             player.sendMessage(message(exception.getMessage()));
             plugin.getHandGuiService().refreshSettingsIfOpen(player);
         }
+    }
+
+    private boolean isAdminViewMode(HandInventoryHolder.ViewMode viewMode) {
+        return switch (viewMode) {
+            case ADMIN_PLAY_ACTION_KIND_PICKER,
+                 ADMIN_SELECTION_SOUND_EDITOR,
+                 ADMIN_PLAY_ACTION_EDITOR,
+                 ADMIN_COUNTDOWN_SOUND_EDITOR,
+                 ADMIN_MODELS -> true;
+            default -> false;
+        };
     }
 
     @EventHandler
@@ -129,10 +146,6 @@ public final class HandGuiListener implements Listener {
             case 10 -> {
                 boolean enabled = plugin.toggleCardLabelsFor(player.getUniqueId());
                 notifySettingSaved(player, "点数标签现在已" + (enabled ? "开启" : "关闭"));
-            }
-            case 12 -> {
-                boolean enabled = plugin.toggleOpponentPreviewFor(player.getUniqueId());
-                notifySettingSaved(player, "对手出牌对比现在已" + (enabled ? "开启" : "关闭"));
             }
             case 14 -> {
                 plugin.getHandGuiService().openSelectionSoundPicker(player);
@@ -413,7 +426,7 @@ public final class HandGuiListener implements Listener {
                 case DDZ_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
                 case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
                 case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
-                case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
+                case GLOBAL_STATUS_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
             };
             if (parent != null) {
                 plugin.getHandGuiService().openAdminModels(player, parent);
@@ -454,11 +467,8 @@ public final class HandGuiListener implements Listener {
             case GLOBAL_ECONOMY -> handleAdminEconomyPage(player, rawSlot, leftClick, rightClick, middleClick, multiplier);
             case GLOBAL_ANIMATION -> handleAdminAnimationPage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_HIGHLIGHT -> handleAdminHighlightPage(player, rawSlot, leftClick, multiplier, current);
-            case GLOBAL_AVATARS -> handleAdminAvatarHomePage(player, rawSlot);
-            case GLOBAL_STATUS_AVATARS -> handleAdminStatusAvatarPage(player, rawSlot, leftClick, multiplier, current);
+            case GLOBAL_AVATARS -> handleAdminAvatarHomePage(player, rawSlot, leftClick, multiplier, current);
             case GLOBAL_STATUS_NAMES -> handleAdminStatusNamePage(player, rawSlot, leftClick, multiplier, current);
-            case GLOBAL_SEAT_AVATARS -> handleAdminSeatAvatarPage(player, rawSlot, leftClick, multiplier, current);
-            case GLOBAL_SEAT_NAMES -> handleAdminSeatNamePage(player, rawSlot, leftClick, multiplier, current);
         }
     }
 
@@ -500,17 +510,15 @@ public final class HandGuiListener implements Listener {
         }
     }
 
-    private void handleAdminAvatarHomePage(Player player, int rawSlot) {
+    private void handleAdminAvatarHomePage(
+        Player player,
+        int rawSlot,
+        boolean increase,
+        int multiplier,
+        HandInventoryHolder.AdminPage page
+    ) {
         switch (rawSlot) {
-            case 19 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_AVATARS);
-            case 20 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_NAMES);
-            case 22 -> {
-                plugin.cyclePlayerHeadDisplayMode();
-                notifySettingSaved(player, "头像/名字显示模式已切到 " + plugin.playerHeadDisplayModeLabel());
-                plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_AVATARS);
-            }
-            case 24 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_AVATARS);
-            case 25 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_NAMES);
+            case 19 -> plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_NAMES);
             default -> {
             }
         }
@@ -642,18 +650,6 @@ public final class HandGuiListener implements Listener {
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BUTTONS);
     }
 
-    private void handleAdminStatusAvatarPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_SCALE, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_LATERAL, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_VERTICAL, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_DEPTH, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_AVATARS);
-    }
-
     private void handleAdminStatusNamePage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.STATUS_NAME_SCALE, increase, multiplier, page);
@@ -664,30 +660,6 @@ public final class HandGuiListener implements Listener {
             }
         }
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_STATUS_NAMES);
-    }
-
-    private void handleAdminSeatAvatarPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_SCALE, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_LATERAL, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_VERTICAL, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_DEPTH, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_AVATARS);
-    }
-
-    private void handleAdminSeatNamePage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_SCALE, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_LATERAL, increase, multiplier, page);
-            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_VERTICAL, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.SEAT_NAME_DEPTH, increase, multiplier, page);
-            default -> {
-            }
-        }
-        plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.GLOBAL_SEAT_NAMES);
     }
 
     private void handleAdminAnimationPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
@@ -721,23 +693,16 @@ public final class HandGuiListener implements Listener {
     private void handleAdminCardsPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_SCALE, increase, multiplier, page);
-            case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_CARD_SCALE, increase, multiplier, page);
             case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_WIDTH_SCALE, increase, multiplier, page);
             case 13 -> adjust(player, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_HEIGHT_SCALE, increase, multiplier, page);
             case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_DEPTH_SCALE, increase, multiplier, page);
-            case 15 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_WIDTH_SCALE, increase, multiplier, page);
-            case 16 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_HEIGHT_SCALE, increase, multiplier, page);
-            case 17 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_DEPTH_SCALE, increase, multiplier, page);
             case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.HAND_SPACING, increase, multiplier, page);
-            case 20 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_SPACING, increase, multiplier, page);
-            case 21 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_HEIGHT, increase, multiplier, page);
             case 22 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_DEPTH_OFFSET, increase, multiplier, page);
-            case 23 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_CARD_SCALE, increase, multiplier, page);
             case 24 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_CARD_LIFT, increase, multiplier, page);
+            case 25 -> adjust(player, DoudizhuPlugin.AdminSetting.HOVER_CARD_SCALE, increase, multiplier, page);
             case 28 -> adjust(player, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_LATERAL, increase, multiplier, page);
             case 29 -> adjust(player, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_VERTICAL, increase, multiplier, page);
             case 30 -> adjust(player, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_DEPTH, increase, multiplier, page);
-            case 31 -> adjust(player, DoudizhuPlugin.AdminSetting.PUBLIC_PREVIEW_ROW_DEPTH_SPACING, increase, multiplier, page);
             default -> {
             }
         }
@@ -813,17 +778,11 @@ public final class HandGuiListener implements Listener {
 
     private void handleAdminHitboxPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
-            case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_LATERAL, increase, multiplier, page);
-            case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_DEPTH, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_VERTICAL, increase, multiplier, page);
-            case 19 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LATERAL, increase, multiplier, page);
-            case 20 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_DEPTH, increase, multiplier, page);
-            case 21 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_VERTICAL, increase, multiplier, page);
-            case 22 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LENGTH, increase, multiplier, page);
-            case 23 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_WIDTH, increase, multiplier, page);
-            case 24 -> adjust(player, DoudizhuPlugin.AdminSetting.CARD_HITBOX_HEIGHT, increase, multiplier, page);
-            case 28 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_LATERAL, increase, multiplier, page);
-            case 29 -> adjust(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_VERTICAL, increase, multiplier, page);
+            case 10 -> adjustHitbox(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_LATERAL, increase, multiplier, page);
+            case 11 -> adjustHitbox(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_DEPTH, increase, multiplier, page);
+            case 12 -> adjustHitbox(player, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_VERTICAL, increase, multiplier, page);
+            case 28 -> adjustHitbox(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_LATERAL, increase, multiplier, page);
+            case 29 -> adjustHitbox(player, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_VERTICAL, increase, multiplier, page);
             default -> {
             }
         }
@@ -881,33 +840,63 @@ public final class HandGuiListener implements Listener {
         };
     }
 
+    /**
+     * DDZ_BOTS 页的点击处理，槽位必须和 HandGuiService 里画的按钮一一对应。
+     *
+     * 这里曾经整体错位：AI 配置从这一页拆到 DDZ_AI 页时，
+     * 只改了绘制侧没改这里，于是
+     *   slot 11 处理"最长思考"但页面上没这个按钮（孤立分支）；
+     *   slot 12 页面显示"最长思考"，点下去改的却是"提示组数上限"；
+     *   slot 14 页面显示"提示组数上限"，点下去弹出 AI 链接输入框；
+     *   slot 15 / 16 是旧版 AI 密钥、模型的残留，页面上同样没有按钮。
+     * 现在改回与绘制侧一致，AI 三项的唯一入口在 DDZ_AI 页的 12 / 13 / 14。
+     *
+     * @param player 操作的玩家
+     * @param rawSlot 点击的槽位
+     * @param increase true 为增加
+     * @param multiplier 倍数，Shift 点击时为 10
+     * @param page 调完后要重新打开的管理页
+     */
     private void handleAdminBotsPage(Player player, int rawSlot, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
         switch (rawSlot) {
             case 10 -> adjust(player, DoudizhuPlugin.AdminSetting.BOT_DELAY_MIN, increase, multiplier, page);
-            case 11 -> adjust(player, DoudizhuPlugin.AdminSetting.BOT_DELAY_MAX, increase, multiplier, page);
-            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.HINT_GROUP_LIMIT, increase, multiplier, page);
-            case 14 -> {
-                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_URL, -1);
-                return;
-            }
-            case 15 -> {
-                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_KEY, -1);
-                return;
-            }
-            case 16 -> {
-                plugin.getHandGuiService().beginCustomInput(player, HandInventoryHolder.EditorTarget.ADMIN_AI_MODEL, -1);
-                return;
-            }
+            case 12 -> adjust(player, DoudizhuPlugin.AdminSetting.BOT_DELAY_MAX, increase, multiplier, page);
+            case 14 -> adjust(player, DoudizhuPlugin.AdminSetting.HINT_GROUP_LIMIT, increase, multiplier, page);
             default -> {
             }
         }
         plugin.getHandGuiService().openAdminModels(player, HandInventoryHolder.AdminPage.DDZ_BOTS);
     }
 
+    /**
+     * 数值设置的加减，默认吃玩家在 GUI 里选的微调步长。
+     *
+     * 之前这里不传 stepOverride，于是每项都用自己写死的 step：
+     * 桌子高度 0.05、弧度 1.0，玩家把步长切到 0.01 也没用。
+     * 现在和 adjustHitbox 走同一条路，步长选择器对小数设置生效。
+     * 整数设置不受影响，adjustAdminSetting 内部走的是另一条分支。
+     *
+     * 例外是声明了 fixedStep 的设置（压层类 0.0001、角度类 1）：
+     * 它们的合理调节粒度和全局步长差了两个数量级，跟着全局走只会调不动或跳太多。
+     * 固定步长定义在 AdminSetting 枚举上，这里只负责优先取用，不散落硬编码。
+     *
+     * @param player 操作的玩家
+     * @param setting 要调节的设置
+     * @param increase true 为增加
+     * @param multiplier 倍数，Shift 点击时为 10
+     * @param page 调完后要重新打开的管理页
+     */
     private void adjust(Player player, DoudizhuPlugin.AdminSetting setting, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
-        plugin.adjustAdminSetting(setting, increase, multiplier);
+        double step = setting.hasFixedStep()
+            ? setting.fixedStep()
+            : plugin.getHandGuiService().hitboxAdjustmentStep(player.getUniqueId());
+        plugin.adjustAdminSetting(setting, increase, multiplier, step);
         notifySettingSaved(player, setting.label() + " 现在是 " + plugin.adminSettingValue(setting));
         plugin.getHandGuiService().openAdminModels(player, page);
+    }
+
+    private void adjustHitbox(Player player, DoudizhuPlugin.AdminSetting setting, boolean increase, int multiplier, HandInventoryHolder.AdminPage page) {
+        adjust(player, setting, increase, multiplier, page);
     }
 
     private void applyHeldItemToFurniture(Player player, DoudizhuPlugin.FurnitureType type) {

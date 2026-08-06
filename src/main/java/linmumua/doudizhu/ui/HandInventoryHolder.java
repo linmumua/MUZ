@@ -25,10 +25,7 @@ public final class HandInventoryHolder implements InventoryHolder {
         GLOBAL_ANIMATION,
         GLOBAL_HIGHLIGHT,
         GLOBAL_AVATARS,
-        GLOBAL_STATUS_AVATARS,
-        GLOBAL_STATUS_NAMES,
-        GLOBAL_SEAT_AVATARS,
-        GLOBAL_SEAT_NAMES
+        GLOBAL_STATUS_NAMES
     }
 
     public enum ViewMode {

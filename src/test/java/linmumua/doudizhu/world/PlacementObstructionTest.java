@@ -20,19 +20,32 @@ class PlacementObstructionTest {
 
     @Test
     void scanAreaCoversConfiguredRadiusAndHeightRange() {
-        BoundingBox area = PlacementObstruction.scanArea(10.5, 64.0, -20.5, 0.95, -0.10, 0.95);
+        // 半径与竖直范围一律引用生产常量：原来这里写死 0.95，而生产值早已是 1.20，
+        // 检测几何改动时测试完全不会失败，放桌检测因此长期脱节。
+        double radius = PhysicalTableManager.TABLE_PLACEMENT_RADIUS;
+        BoundingBox area = PlacementObstruction.scanArea(
+            10.5, 64.0, -20.5,
+            radius,
+            PhysicalTableManager.TABLE_PLACEMENT_MIN_Y,
+            PhysicalTableManager.TABLE_PLACEMENT_MAX_Y
+        );
 
-        assertEquals(9.55, area.getMinX(), 1.0E-9);
-        assertEquals(11.45, area.getMaxX(), 1.0E-9);
-        assertEquals(63.90, area.getMinY(), 1.0E-9);
-        assertEquals(64.95, area.getMaxY(), 1.0E-9);
-        assertEquals(-21.45, area.getMinZ(), 1.0E-9);
-        assertEquals(-19.55, area.getMaxZ(), 1.0E-9);
+        assertEquals(10.5 - radius, area.getMinX(), 1.0E-9);
+        assertEquals(10.5 + radius, area.getMaxX(), 1.0E-9);
+        assertEquals(64.0 + PhysicalTableManager.TABLE_PLACEMENT_MIN_Y, area.getMinY(), 1.0E-9);
+        assertEquals(64.0 + PhysicalTableManager.TABLE_PLACEMENT_MAX_Y, area.getMaxY(), 1.0E-9);
+        assertEquals(-20.5 - radius, area.getMinZ(), 1.0E-9);
+        assertEquals(-20.5 + radius, area.getMaxZ(), 1.0E-9);
     }
 
     @Test
     void scanAreaStaysInsideNeighbouringBlockSoFlushSurfacesDoNotBlockPlacement() {
-        BoundingBox area = PlacementObstruction.scanArea(10.5, 64.0, 10.5, 0.95, -0.10, 0.95);
+        BoundingBox area = PlacementObstruction.scanArea(
+            10.5, 64.0, 10.5,
+            PhysicalTableManager.TABLE_PLACEMENT_RADIUS,
+            PhysicalTableManager.TABLE_PLACEMENT_MIN_Y,
+            PhysicalTableManager.TABLE_PLACEMENT_MAX_Y
+        );
 
         // 桌面检测区域必须停在相邻方块内部，否则贴边的墙面会被误判为阻挡。
         assertTrue(area.getMinX() > 9.0, "检测区域不应触及 x=9 整格边界");
@@ -42,8 +55,18 @@ class PlacementObstructionTest {
 
     @Test
     void chairScanAreaIsNarrowerThanTableScanArea() {
-        BoundingBox table = PlacementObstruction.scanArea(0.5, 64.0, 0.5, 0.95, -0.10, 0.95);
-        BoundingBox chair = PlacementObstruction.scanArea(0.5, 64.0, 0.5, 0.55, -0.10, 1.05);
+        BoundingBox table = PlacementObstruction.scanArea(
+            0.5, 64.0, 0.5,
+            PhysicalTableManager.TABLE_PLACEMENT_RADIUS,
+            PhysicalTableManager.TABLE_PLACEMENT_MIN_Y,
+            PhysicalTableManager.TABLE_PLACEMENT_MAX_Y
+        );
+        BoundingBox chair = PlacementObstruction.scanArea(
+            0.5, 64.0, 0.5,
+            PhysicalTableManager.CHAIR_PLACEMENT_RADIUS,
+            PhysicalTableManager.CHAIR_PLACEMENT_MIN_Y,
+            PhysicalTableManager.CHAIR_PLACEMENT_MAX_Y
+        );
 
         assertTrue(chair.getWidthX() < table.getWidthX(), "椅子水平检测范围应比桌面更窄");
         assertTrue(chair.getHeight() > table.getHeight(), "椅子垂直检测范围应比桌面更高");

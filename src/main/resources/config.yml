@@ -1,205 +1,190 @@
 # DouDizhuPaper 配置文件
+#
+# 数值项写 0 表示"用插件内置的默认值"，行尾注释标了默认值是多少。
+# 想改就把 0 换成你要的数字；改完想退回默认，填回 0 即可。
+#
+# 少数项的 0 是真实取值而不是"取默认"，所以出厂就保留原值、行尾也不标默认：
+#   audio.bgm-volume / effect-volume（0 = 静音）
+#   actionbar.turn-countdown-seconds（0 = 关闭倒计时）
+#   bot.action-delay-min-ticks（0 = 机器人立刻出牌）
+#   room-levels.*.multiplier（0 = 该房间不结算）
+#   render.card-hover.interpolation-ticks / animation-type、render.layout.status-line-width
+#   ai.deepseek.max-tokens（0 = 不限制）、trick-hud 的 5 项尺寸、storage.sql.mysql.port
 
 table:
   # 放置桌子时的整体垂直偏移
-  spawn-offset-y: 0.18
+  spawn-offset-y: 0  # 默认 -0.55
   # 放桌位置被方块挡住时播放的警告音格式：音效名 [音量] [音高]
   placement-blocked-sound: "minecraft:block.note_block.bass 0.55 0.75"
 
 craftengine-items:
   table:
     # 桌子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
-    item-model: muz:furniture/table_visual
+    item-model: muz:furniture/table_large
     # 桌子显示名称，仅用于物品显示名
     item-name: "Dou Dizhu Table"
   chair:
     # 椅子显示物品的完整 item_model；可直接写成类似 magicstore:medieval_furnitures_fullpack_v4_6
-    item-model: muz:furniture/seat_chair
+    item-model: muz:furniture/chair_large
     # 板凳显示名称，仅用于物品显示名
     item-name: "Dou Dizhu Chair"
 
 render:
   furniture-scale:
-    # 桌子模型大小
-    table: 2.25
-    # 椅子模型大小
-    chair: 1.35
+    # 桌子模型大小。新桌子模型本身就是 2.5x2.5 格的成品尺寸，所以按 1.0 渲染；
+    # 旧模型只有 0.875 格，才需要放大 2.25 倍。
+    table: 0  # 默认 1.0
+    # 椅子模型大小。同上，新椅子模型已是 0.875 宽 / 1.56 高的成品尺寸。
+    chair: 0  # 默认 1.0
   text-scale:
     # 座位信息和上一手文字大小
-    small: 0.46
+    small: 0  # 默认 0.46
     # 桌面主状态文字大小
-    status: 0.72
+    status: 0  # 默认 0.72
     # 按钮和牌面上方的小标签大小
-    label: 0.40
-  # 玩家头像在牌桌文本中的显示倍率
-  player-head-scale: 1.00
-  status-avatar:
-    # 顶栏头像的单独缩放
-    scale: 1.00
-  status-avatar-offset:
-    # 顶栏头像左右偏移
-    lateral: 0.0
-    # 顶栏头像上下偏移
-    vertical: 0.82
-    # 顶栏头像前后偏移
-    depth: 0.0
+    label: 0  # 默认 0.40
   status-name:
     # 顶栏名字的单独缩放
-    scale: 0.46
+    scale: 0  # 默认 0.46
   status-name-offset:
     # 顶栏名字左右偏移
     lateral: 0.0
     # 顶栏名字上下偏移
-    vertical: 0.56
+    vertical: 0  # 默认 0.56
     # 顶栏名字前后偏移
-    depth: 0.0
-  seat-avatar:
-    # 椅子外侧头像的单独缩放
-    scale: 1.00
-  seat-avatar-offset:
-    # 椅子外侧头像左右偏移
-    lateral: 0.0
-    # 椅子外侧头像上下偏移
-    vertical: 0.18
-    # 椅子外侧头像前后偏移
     depth: 0.0
   seat-name:
     # 椅子外侧名字的单独缩放
-    scale: 0.46
+    scale: 0  # 默认 0.46
   seat-name-offset:
     # 椅子外侧名字左右偏移
     lateral: 0.0
     # 椅子外侧名字上下偏移
-    vertical: -0.04
+    vertical: 0  # 默认 -0.04
     # 椅子外侧名字前后偏移
     depth: 0.0
   empty-seat:
     # 空位文字的单独缩放
-    scale: 0.46
+    scale: 0  # 默认 0.9
   empty-seat-offset:
     # 空位文字左右偏移
     lateral: 0.0
     # 空位文字上下偏移
-    vertical: -0.04
+    vertical: 0  # 默认 1.5
     # 空位文字前后偏移
     depth: 0.0
   seat-info:
     # 座位副标题（座位号、准备状态、分数等）大小
-    scale: 0.46
+    scale: 0  # 默认 0.5
   seat-info-offset:
     # 座位副标题左右偏移
     lateral: 0.0
     # 座位副标题上下偏移
-    vertical: -0.22
+    vertical: 0  # 默认 -0.5
     # 座位副标题前后偏移
     depth: 0.0
-  # 玩家自己手牌区的牌整体基础大小
-  private-card-scale: 0.50
+  # 玩家自己手牌区的牌整体基础大小（相较上一版缩小 30%）
+  private-card-scale: 0  # 默认 0.8
   private-card-size:
     # 只改手牌宽度
-    width: 0.50
+    width: 0  # 默认 0.50
     # 只改手牌高度
-    height: 0.50
+    height: 0  # 默认 0.50
     # 只改手牌厚度
-    depth: 0.50
+    depth: 0  # 默认 0.50
   private-hand-offset:
     # 三家手牌一起左右平移
-    lateral: 0.00
+    lateral: 0.03
     # 三家手牌一起上下平移
-    vertical: 0.00
+    vertical: 1.90
     # 三家手牌一起朝桌心/远离桌心移动（正数更靠近桌子中心）
-    depth: 0.00
-  # 桌子中间公共出牌区的牌整体基础大小
-  public-trick-card-scale: 0.58
-  public-card-size:
-    # 只改预览牌宽度
-    width: 0.58
-    # 只改预览牌高度
-    height: 0.58
-    # 只改预览牌厚度
-    depth: 0.58
+    depth: 0.55
   card-hover:
-    # 鼠标对准牌时的放大倍数
-    scale: 1.08
+    # 鼠标对准牌时长宽的放大倍数（厚度恒定，避免射线交点随悬停漂移）
+    scale: 0  # 默认 1.08
     # 鼠标对准牌时的上移高度
-    lift: 0.06
+    lift: 0  # 默认 0.06
     # 牌预览动画时长（tick）
     interpolation-ticks: 6
     # 牌预览动画类型: 0=线性 1=缓出 2=缓入缓出 3=回弹
     animation-type: 1
   selected-card:
     # 已选中的牌当前不再额外放大，保留此项仅兼容旧配置
-    scale: 1.00
+    scale: 0  # 默认 1.00
     # 已选中的牌会额外上移多少
-    lift: 0.18
+    lift: 0  # 默认 0.18
   hover-glow:
     # 鼠标指向牌时是否发光
     enabled: true
+    # 悬停发光的颜色，三个分量各取 0-255
     color:
-      red: 96
-      green: 180
-      blue: 255
+      # 红色分量
+      red: 0  # 默认 96
+      # 绿色分量
+      green: 0  # 默认 180
+      # 蓝色分量
+      blue: 0  # 默认 255
   selected-glow:
     # 已预选的牌是否发光
     enabled: true
+    # 预选发光的颜色，三个分量各取 0-255
     color:
-      red: 255
-      green: 226
-      blue: 92
+      # 红色分量
+      red: 0  # 默认 255
+      # 绿色分量
+      green: 0  # 默认 226
+      # 蓝色分量
+      blue: 0  # 默认 92
   # 牌面数字标签离牌面的高度
-  card-label-height: 0.34
+  card-label-height: 0  # 默认 0.05
   card-label-offset:
     # 牌面数字标签左右偏移
-    lateral: 0.00
+    lateral: 0.05
     # 牌面数字标签前后偏移
     depth: 0.00
   # 手牌左右间距
-  hand-spacing: 0.21
-  # 公共出牌区左右间距
-  public-trick-spacing: 0.22
+  hand-spacing: 0  # 默认 0.1
   button-offset:
     # 按钮离桌子的远近
-    distance: 2.10
+    distance: 0  # 默认 1.40
     # 按钮高度
-    height: 1.02
+    height: 0  # 默认 2.5
   button-layout:
     # 空位加入文字高度
-    join-label-height: 0.18
+    join-label-height: 0  # 默认 0.18
     # 空位加入文字大小
-    join-label-scale: 0.46
+    join-label-scale: 0  # 默认 0.4
     # 操作按钮文字高度
-    action-label-height: 0.18
+    action-label-height: 0  # 默认 0.2
     # 操作按钮文字大小
-    action-label-scale: 0.20
+    action-label-scale: 0  # 默认 0.4
 
     # 正前方座位按钮的基础距离
-    front-base-distance: 1.40
+    front-base-distance: 0  # 默认 1.40
     # 左右两侧座位按钮的基础距离
-    side-base-distance: 1.72
+    side-base-distance: 0  # 默认 1.72
     # 当 button-offset.distance 增大时，额外往外推的系数
-    distance-factor: 0.45
+    distance-factor: 0  # 默认 0.45
     # 按钮沿弧线展开的疏密倍率
-    spacing-scale: 1.00
+    spacing-scale: 0  # 默认 1.2
     # 3 个按钮时使用的小弧度角
-    arc-angle-small: 30.0
+    arc-angle-small: 0  # 默认 30.0
     # 4 个按钮时使用的大弧度角
-    arc-angle-large: 42.0
+    arc-angle-large: 0  # 默认 42.0
     # 3 个按钮时使用的小弧形半径
-    arc-radius-small: 0.70
+    arc-radius-small: 0  # 默认 0.70
     # 4 个按钮时使用的大弧形半径
-    arc-radius-large: 0.86
+    arc-radius-large: 0  # 默认 0.8
   chair-visual-offset:
-    # 椅子朝向额外旋转多少度；方块类建议使用 90 的倍数
-    rotation-degrees: 0.0
     # 椅子左右偏移
     lateral: 0.00
     # 椅子上下偏移
-    vertical: -0.04
+    vertical: 0  # 默认 0.35
   chair-hitbox-offset:
     # 空位"加入座位"交互箱左右偏移
     lateral: 0.00
     # 空位"加入座位"交互箱上下偏移
-    vertical: 0.02
+    vertical: 0  # 默认 0.02
   # 按钮判定框的尺寸不再手调，改为按 button-layout 里的文字缩放自动贴合文字。
   # 想让点击范围变大就调 join-label-scale / action-label-scale，文字大了判定框跟着大。
   button-hitbox-offset:
@@ -208,64 +193,99 @@ render:
     # 按钮点击范围前后偏移
     depth: 0.00
     # 按钮点击范围上下偏移
-    vertical: 0.02
-  card-hitbox-offset:
-    # 手牌点击范围左右偏移
-    lateral: 0.00
-    # 手牌点击范围前后偏移（朝桌心/远离桌心）
-    depth: 0.00
-    # 手牌点击范围上下偏移
-    vertical: -0.45
-  card-hitbox:
-    # 扑克牌交互箱长度
-    length: 0.28
-    # 扑克牌交互箱宽度
-    width: 0.16
-    # 扑克牌交互箱高度
-    height: 0.56
+    vertical: 0  # 默认 0.02
   # 相邻牌之间的前后错层，用来减少闪烁
-  card-depth-offset: 0.01
+  card-depth-offset: 0  # 默认 0.005
   # 桌面状态文字高度
-  status-height: 3.10
+  status-height: 0  # 默认 5.0
   # “上一手出牌详情”文字高度
-  play-detail-height: 2.35
-  # 公共出牌区整体高度
-  public-trick-height: 1.55
-  public-trick:
-    # 预览区每一行最多摆几张牌
-    cards-per-row: 6
-    # 当同时显示“上一手”和“你当前选中的牌”时，上一手那一排向上偏移多少
-    compare-row-offset: 0.28
-    # 当同时显示两排时，你当前选中的牌那一排向下偏移多少（负数会更低）
-    selected-row-offset: -0.24
-    # 多排预览时，第二维向桌心展开的深度间距
-    row-depth-spacing: 0.22
-    # 预览牌数字标签离牌面的高度
-    label-height: 0.22
+  play-detail-height: 0  # 默认 4.0
   layout:
     # 桌面模型离锚点的高度
-    table-display-height: 0.55
+    table-display-height: 0  # 默认 0.55
     # 桌面碰撞体离锚点的高度
-    table-collider-height: 0.72
+    table-collider-height: 0  # 默认 0.72
     # 椅子模型离锚点的基础高度
-    chair-base-height: 0.20
+    chair-base-height: 0  # 默认 0.20
     # 椅子碰撞体离椅子的高度
-    chair-collider-height: 0.18
+    chair-collider-height: 0  # 默认 0.18
     # 玩家坐上去的挂载点高度
-    chair-seat-height: 0.18
+    chair-seat-height: 0  # 默认 0.18
     # 椅子交互箱离椅子的基础高度
-    chair-interaction-height: 0.38
+    chair-interaction-height: 0  # 默认 0.38
     # 座位文字离椅子的高度
-    chair-label-height: 1.35
+    chair-label-height: 0  # 默认 1.35
     # 桌面状态文字的最大宽度
     status-line-width: 250
     hand-center:
       # 三家手牌离桌心的距离
-      distance: 1.62
+      distance: 0  # 默认 1.62
       # 三家手牌离地面的基础高度
-      height: 1.23
+      height: 0  # 默认 1.23
     # 三把椅子离桌心的距离；方块类椅子建议按整格调整
-    chair-distance: 2.35
+    chair-distance: 0  # 默认 2.5
+
+# 出牌 HUD：屏幕顶部那一条「谁出的 + 出了什么」，头像与牌并排在同一行
+# 本段单位是【屏幕像素】，和上面 render 段的世界坐标偏移不是一回事
+trick-hud:
+  # 总开关；关掉后完全不显示这条 HUD，也不占用 BossBar
+  enabled: true
+  # 正中间那个大头像（当前该出牌的人）的放大倍数；两侧小头像固定 4 倍。
+  # 它决定头像盒高（10 * 本项），也就是两行不重叠所需的最小间距，
+  # 改了要连 avatar-offset-down 一起核算，见那一项的说明。
+  # 资源包只为 4..10 预生成了字形，超出范围头像会整片变豆腐块，
+  # 所以插件会拒绝越界值、回退到 6 并在控制台留下警告。
+  #
+  # 【6 倍占 60 像素高，不是 48】：48 是关掉描边后能看见的那张 8x8 脸，
+  # 而字形盒恒按 10 行算（描边那两行永远参与度量，关描边只是不画）。
+  # 头像行要往下让开的就是这 60 像素，按 48 算两行会压在一起。
+  avatar-scale: 6
+  # 头像右缘到第一张牌左缘的间距；允许为负，负值会让牌压在头像上
+  avatar-gap: 6
+  # 相邻两张牌左缘的间距。牌宽 35，小于 35 即为叠放；
+  # 一手最多 20 张（四个三带的飞机），取 22 是为了整手牌不超出屏幕宽度
+  card-step: 22
+  # 牌面渲染高度（像素），也就是缩放。
+  # 只能取资源包预生成的这几档：53 / 48 / 42 / 37 / 32
+  # （53 是贴图原始尺寸即 1:1）。写别的值会回退成 53 并留警告。
+  # 只有缩小没有放大：贴图本身 35x53，放大只会得到插值模糊的牌，
+  # 而且满手 20 张放大后会横出屏幕。
+  # 注意缩放后牌宽会等比变窄，叠放看着会变松，一般要把 card-step 一起调小
+  card-height: 53
+  # 整条 HUD 相对 BossBar 默认位置往下推多少像素。这里只调【牌那一行】，
+  # 头像行由下面的 avatar-offset-down 单独调，两行互不影响。
+  # 只能取预生成的这几档：0 / 4 / 8 / 12 / 16 / 20 / 24 / 28 / 32 / 36 / 40 / 44 / 48 / 50 / 52
+  # 写别的值（如 26、54）会回退成 0 并留警告。
+  # 没有「往上」：BossBar 本来就贴着屏幕顶部，往上会直接出屏。
+  offset-down: 50
+  # 头像那一行往下推多少像素。与上面的 offset-down 【完全独立】：
+  # 改 offset-down 不会动头像行，改这一项也不会动牌行。
+  # 只能取头像行自己预生成的这几档（注意和牌行不是同一套值）：
+  #   0 / 40 / 50 / 60 / 70 / 80 / 90 / 100 / 110 / 120 / 130 / 140 / 150
+  # 写别的值会回退成 110 并留警告。步长是 10，因为头像盒高恒等于 10 * avatar-scale。
+  #
+  # 【两行会不会重叠要自己算】：这一项独立可调的代价就是插件不再替你保证不重叠。
+  # 不重叠的条件是：avatar-offset-down >= offset-down + 10 * avatar-scale
+  # 默认组合 50 + 10*6 = 110 正好相接、零重叠。配小了头像会压进牌里，
+  # 插件会在控制台留警告并直接写出「应该设成多少」，但仍按你写的值渲染。
+  #
+  # 【是 10 * avatar-scale，不是 8 * avatar-scale】：描边那两行永远参与字形度量，
+  # 运行期关掉 avatar-outline 只是不画描边像素，字形盒照样占 10 行。按 8 算会重叠。
+  avatar-offset-down: 110
+  # 整条 HUD 的水平偏移：正数右移、负数左移，0 保持居中。
+  # 这一项是任意整数，不受档位限制（靠负空格实现，不需要预生成字形）
+  offset-x: 0
+  # 头像描边。在 8x8 头像外面加一圈，变成 10x10。
+  # 实现是纯像素膨胀（原本透明、四邻有不透明像素的位置填成描边色），
+  # 不依赖 shader，也不影响聊天/记分板等其他文字。
+  avatar-outline:
+    # 关掉就完全不加描边，头像仍是 8x8
+    enabled: true
+    # 描边色，支持 #rrggbb 与 #aarrggbb 两种写法。
+    # 写错格式会回退成不透明黑并留警告，不会让 HUD 消失。
+    # 描边是往外扩的，不会盖掉脸上的像素；代价是头像整体宽高各多 2 像素，
+    # 与牌的水平间距观感会变紧，必要时把 avatar-gap 调大一点
+    color: "#000000"
 
 cards:
   hologram-labels:
@@ -292,12 +312,12 @@ bot:
   # 机器人每次行动前的最短延迟 tick
   action-delay-min-ticks: 10
   # 机器人每次行动前的最长延迟 tick
-  action-delay-max-ticks: 30
+  action-delay-max-ticks: 0  # 默认 30
   ai:
     # true 时机器人会尝试调用外部 AI 决策；失败或超时会自动回退本地规则
     enabled: true
     # 单次机器人 AI 决策最多等待多久；超过后会直接回退本地规则
-    timeout-ms: 5000
+    timeout-ms: 0  # 默认 5000
 
 ai:
   deepseek:
@@ -317,11 +337,11 @@ ai:
     # 默认模型；DeepSeek 官方常用值如 deepseek-chat / deepseek-reasoner
     model: "deepseek-chat"
     # 建立连接超时毫秒
-    connect-timeout-ms: 10000
+    connect-timeout-ms: 0  # 默认 10000
     # 单次请求总超时毫秒
-    request-timeout-ms: 45000
+    request-timeout-ms: 0  # 默认 45000
     # 默认采样温度，建议 0.0 - 1.3
-    temperature: 0.7
+    temperature: 0  # 默认 0.7
     # 默认最大输出 token；0 表示交给服务端默认策略
     max-tokens: 0
     # 每次请求前附加的系统提示词；默认就是稳健牌风，可在管理菜单里继续微调
@@ -336,11 +356,11 @@ ai:
 
 hints:
   # “提示”按钮循环的最大方案数
-  max-groups: 6
+  max-groups: 0  # 默认 6
 
 debug:
   # /muz debug add 生成多张观察桌时，桌与桌之间的间距
-  table-spacing: 6.50
+  table-spacing: 0  # 默认 6.50
 
 economy:
   payment:
@@ -358,26 +378,40 @@ economy:
       - CMI
     doudizhu:
       # 斗地主基础每分折算多少金币，实际结算会再乘房间倍率
-      currency-per-point: 1.0
+      currency-per-point: 0  # 默认 1.0
 
 room-levels:
   # 放置新牌桌时默认使用的场次
   default-create-level: low
   low:
+    # 这个场次在菜单和提示里显示的名字
     label: "低级场"
+    # 底分倍率：结算时按「基础分 × 这个倍率」换算成货币。
+    # 写 0 表示这一场不结算任何货币（娱乐场就是这么配的），
+    # 所以这四项的 0 是真实取值，不参与「0 = 取默认值」那套转换
     multiplier: 100.0
+    # 这一场是否接入经济系统。关掉后只记分不动钱
     economy-enabled: true
   mid:
+    # 场次显示名
     label: "中级场"
+    # 底分倍率，含义同 low.multiplier
     multiplier: 1000.0
+    # 是否接入经济系统
     economy-enabled: true
   high:
+    # 场次显示名
     label: "高级场"
+    # 底分倍率，含义同 low.multiplier
     multiplier: 10000.0
+    # 是否接入经济系统
     economy-enabled: true
   fun:
+    # 场次显示名
     label: "娱乐场"
+    # 0 = 不结算货币，纯打着玩
     multiplier: 0.0
+    # 娱乐场默认不接经济
     economy-enabled: false
 
 storage:
@@ -385,39 +419,69 @@ storage:
     # sqlite 或 mysql，默认直接使用插件目录里的 sqlite 文件
     type: sqlite
     sqlite:
+      # 数据库文件路径，相对插件数据目录
       file: "storage/mumu-data.db"
+    # 下面这些只在 type 设为 mysql 时才用得上
     mysql:
+      # 数据库地址
       host: "127.0.0.1"
+      # 端口，MySQL 默认 3306
       port: 3306
+      # 库名，需要先自己建好
       database: "muz"
+      # 登录用户名
       username: "root"
+      # 登录密码
       password: ""
+      # JDBC 连接参数，一般不用改；时区不对会导致记录时间偏移
       parameters: "useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
 
+# 玩家在个人设置菜单里能自选的档位。每档的 label 是菜单上显示的名字，
+# spec 是这一档实际生效的内容。想加档就照着格式往下加 profile-5、profile-6
 player-options:
+  # 选牌时的提示音。spec 格式：音效名 [音量] [音高] [随机音高浮动]
   selection-sound-profiles:
     profile-1:
+      # 菜单上显示的档位名
       label: "清脆提示"
+      # 音效名 音量 音高 随机浮动
       spec: "minecraft:block.note_block.pling 0.4 1.2 0.9"
     profile-2:
+      # 菜单上显示的档位名
       label: "告示牌提示"
+      # 音效名 音量 音高 随机浮动
       spec: "minecraft:block.hanging_sign.place 0.4 1.1 0.9"
     profile-3:
+      # 菜单上显示的档位名
       label: "洞穴提示"
+      # 音效名 音量 音高 随机浮动
       spec: "minecraft:ambient.cave 0.3 1.0 0.9"
     profile-4:
+      # 菜单上显示的档位名
       label: "静音"
+      # 音量那一位写 0 就听不见，音效名本身留着不影响
       spec: "minecraft:block.note_block.hat 0.0 1.0 1.0"
+  # 出牌成功后额外做什么。spec 用 "type: 类型; 参数: 值" 的写法，
+  # 支持 none（什么都不做）、message（发聊天）、actionbar（发动作栏）、play_sound（放音效）。
+  # 文本里可以用 <arg:pattern> 引用刚出的牌型、<arg:player.name> 引用出牌人
   play-action-profiles:
     profile-1:
+      # 菜单上显示的档位名
       label: "无操作"
+      # type: none 表示出牌后不做任何额外提示
       spec: "type: none"
     profile-2:
+      # 菜单上显示的档位名
       label: "聊天提示"
+      # type: message 表示往聊天栏发一条，message 后面是 MiniMessage 富文本
       spec: "type: message; message: <#8FD4FF>出牌完成</#8FD4FF><dark_gray> · </dark_gray><#F1D398><arg:pattern></#F1D398>"
     profile-3:
+      # 菜单上显示的档位名
       label: "动作栏提示"
+      # type: actionbar 表示发到物品栏上方那一行，不占聊天记录
       spec: "type: actionbar; actionbar: <#9AA8B6><arg:player.name></#9AA8B6><dark_gray> · </dark_gray><#F1D398><arg:pattern></#F1D398>"
     profile-4:
+      # 菜单上显示的档位名
       label: "播放音效"
+      # type: play_sound 表示放个音效；source 是音量分类，master 跟随主音量
       spec: "type: play_sound; sound: minecraft:entity.player.levelup; volume: 0.35; pitch: 1.05; source: master"

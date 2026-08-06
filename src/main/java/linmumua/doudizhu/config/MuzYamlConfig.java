@@ -3,6 +3,7 @@ package linmumua.doudizhu.config;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
+import java.io.StringWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -43,7 +44,6 @@ public final class MuzYamlConfig {
         LoaderOptions loaderOptions = new LoaderOptions();
         loaderOptions.setAllowDuplicateKeys(false);
         loaderOptions.setCodePointLimit(16 * 1024 * 1024);
-
         DumperOptions dumperOptions = new DumperOptions();
         dumperOptions.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
         dumperOptions.setDefaultScalarStyle(DumperOptions.ScalarStyle.PLAIN);
@@ -54,6 +54,26 @@ public final class MuzYamlConfig {
         dumperOptions.setWidth(120);
         dumperOptions.setSplitLines(false);
         return new Yaml(loaderOptions, dumperOptions);
+    }
+
+    /**
+     * 在启动阶段预加载 SnakeYAML 输出空映射所需的 Emitter 内部类。
+     *
+     * <p>空映射会被按 FLOW 样式输出（{@code {}}），这条分支用到的 Emitter 内部类
+     * 在只输出 BLOCK 样式时从不加载。而 onDisable 阶段 Paper 已停止为插件
+     * ClassLoader 提供新类，那时首次加载会抛 NoClassDefFoundError，
+     * 导致 savePlayerSettings() 中断、玩家设置丢失。
+     *
+     * <p>这里在内存中 dump 一次空映射，把相关类提前加载好，让关服时的写入只走已加载的代码路径。
+     *
+     * @return 预热时产生的 YAML 文本，供测试确认确实走了 FLOW 分支
+     */
+    public static String warmUpFlowEmitter() {
+        Map<String, Object> probe = new LinkedHashMap<>();
+        probe.put("players", new LinkedHashMap<String, Object>());
+        StringWriter writer = new StringWriter();
+        createYaml().dump(probe, writer);
+        return writer.toString();
     }
 
     public void reload() {
@@ -94,7 +114,33 @@ public final class MuzYamlConfig {
         }
     }
 
+    /**
+     * 带注释模板的保存：写盘前把模板里的注释按键路径补回去。
+     *
+     * <p>{@link #save()} 走的是 {@code dump(Map)}，注释挂在 Node 上，拿不到，所以每次保存都会
+     * 写出一份裸配置。需要保留注释的文件（目前只有 config.yml）走这个方法。
+     *
+     * @param template 打包在 jar 里的同名模板内容；为 null 时等价于 {@link #save()}
+     */
+    public void saveWithComments(String template) throws IOException {
+        if (template == null || template.isBlank()) {
+            save();
+            return;
+        }
+        writeAtomically(YamlCommentMerger.merge(template, dumpToString()));
+    }
+
+    private String dumpToString() {
+        StringWriter writer = new StringWriter();
+        yaml.dump(root, writer);
+        return writer.toString();
+    }
+
     public void save() throws IOException {
+        writeAtomically(dumpToString());
+    }
+
+    private void writeAtomically(String content) throws IOException {
         Path parent = file.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
@@ -103,7 +149,7 @@ public final class MuzYamlConfig {
         // 截断的 YAML，下次启动解析失败会让整个插件被禁用。
         Path temp = file.resolveSibling(file.getFileName() + ".tmp");
         try (Writer writer = Files.newBufferedWriter(temp, StandardCharsets.UTF_8)) {
-            yaml.dump(root, writer);
+            writer.write(content);
         }
         try {
             Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);

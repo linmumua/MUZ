@@ -110,6 +110,16 @@ final class TableStatusViews {
             .append(MuzTheme.warning(String.join("、", unreadyNames)));
     }
 
+    /**
+     * 组合行动栏里的当前出牌身份，固定为“当前出牌 · 玩家名”。
+     */
+    static Component currentPlayIdentity(Component name) {
+        Component safeName = name == null ? Component.empty() : name;
+        return MuzTheme.orange("当前出牌")
+            .append(MuzTheme.divider(" · "))
+            .append(safeName);
+    }
+
     static Component persistentActionBar(
         GamePhase phase,
         UUID viewerId,
@@ -119,6 +129,7 @@ final class TableStatusViews {
         int remainingSeconds,
         int selectedCount,
         Function<UUID, Component> identity,
+        Function<UUID, Component> currentPlayIdentity,
         Component lobbyActionBar,
         int currentTurnTimeoutSeconds
     ) {
@@ -145,11 +156,18 @@ final class TableStatusViews {
                 : Component.text("当前由 ", NamedTextColor.GRAY)
                     .append(identity.apply(currentTurn))
                     .append(Component.text(" 正在决定是否加倍" + countdown, NamedTextColor.GRAY));
-            case PLAYING -> viewerId.equals(currentTurn)
-                ? Component.text("轮到你出牌了 · 已选 " + selectedCount + " 张" + countdown, NamedTextColor.AQUA)
-                : Component.text("当前由 ", NamedTextColor.GRAY)
-                    .append(identity.apply(currentTurn))
-                    .append(Component.text(" 在出牌" + countdown, NamedTextColor.GRAY));
+            case PLAYING -> {
+                Component line = currentPlayIdentity.apply(currentTurn);
+                if (viewerId.equals(currentTurn)) {
+                    line = line.append(MuzTheme.divider(" · "))
+                        .append(MuzTheme.accent("已选 " + selectedCount + " 张"));
+                }
+                if (currentTurnTimeoutSeconds > 0) {
+                    line = line.append(MuzTheme.divider(" | "))
+                        .append(MuzTheme.warning(remainingSeconds + " 秒"));
+                }
+                yield line;
+            }
             case LOBBY -> lobbyActionBar;
         };
     }

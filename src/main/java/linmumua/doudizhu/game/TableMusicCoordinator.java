@@ -78,9 +78,13 @@ final class TableMusicCoordinator {
         }
     }
 
+    /**
+     * 只要场上任何一家手牌降到 3 张及以下就一直保持紧张 BGM。
+     * 早期写的是 size() == 3，出到 2 张时音乐会退回普通循环，紧张感断在残局最关键的时候。
+     */
     private boolean shouldUseExcitedBgm() {
         return phaseSupplier.get() == GamePhase.PLAYING
-            && handsSupplier.get().values().stream().anyMatch(hand -> hand.size() == 3);
+            && handsSupplier.get().values().stream().anyMatch(hand -> !hand.isEmpty() && hand.size() <= 3);
     }
 
     private String nextScheduledTrack(String previousTrack) {

@@ -28,13 +28,45 @@ public final class HandGuiService {
     private static final int COUNTDOWN_EDITOR_SIZE = 36;
     private static final int HISTORY_SIZE = 54;
     private static final MiniMessage MINI = MiniMessage.miniMessage();
+    private static final double[] HITBOX_ADJUSTMENT_STEPS = {0.01, 0.1, 1.0};
+    private static final String[] HITBOX_ADJUSTMENT_STEP_LABELS = {"0.01", "0.1", "1"};
 
     private final DoudizhuPlugin plugin;
     private final Map<UUID, InputSession> pendingInputs = new ConcurrentHashMap<>();
     private final Map<UUID, SignInputSession> pendingSignInputs = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> hitboxAdjustmentStepIndexes = new ConcurrentHashMap<>();
+    /**
+     * 正在被 openAdminModels 绘制的那个玩家。
+     *
+     * 为什么用字段而不是把玩家当参数传下去：adminSettingItem 的
+     * (Material, AdminSetting) 两参形态被 HoverCardScaleSettingTest
+     * 的正则锚住（它靠这个形态解析槽位到设置的映射），加参数会让那条测试失效。
+     * 而"跟随全局步长"这行 lore 必须知道是谁在看，才能显示他自己选的步长。
+     * 赋值与读取都发生在 openAdminModels 的同一次同步调用里（Bukkit 主线程），
+     * 不跨调用存活。
+     */
+    private volatile UUID adminMenuViewer;
 
     public HandGuiService(DoudizhuPlugin plugin) {
         this.plugin = plugin;
+    }
+
+    public double hitboxAdjustmentStep(UUID playerId) {
+        return HITBOX_ADJUSTMENT_STEPS[hitboxAdjustmentStepIndex(playerId)];
+    }
+
+    public String hitboxAdjustmentStepLabel(UUID playerId) {
+        return HITBOX_ADJUSTMENT_STEP_LABELS[hitboxAdjustmentStepIndex(playerId)];
+    }
+
+    public String cycleHitboxAdjustmentStep(UUID playerId) {
+        int nextIndex = (hitboxAdjustmentStepIndex(playerId) + 1) % HITBOX_ADJUSTMENT_STEPS.length;
+        hitboxAdjustmentStepIndexes.put(playerId, nextIndex);
+        return HITBOX_ADJUSTMENT_STEP_LABELS[nextIndex];
+    }
+
+    private int hitboxAdjustmentStepIndex(UUID playerId) {
+        return Math.floorMod(hitboxAdjustmentStepIndexes.getOrDefault(playerId, 0), HITBOX_ADJUSTMENT_STEPS.length);
     }
 
     public void openSettings(Player player) {
@@ -46,17 +78,19 @@ public final class HandGuiService {
         Inventory inventory = Bukkit.createInventory(holder, SETTINGS_SIZE, "MUMU | 个人设置");
         holder.setInventory(inventory);
         inventory.setItem(4, noteItem(Material.BOOK, "个人设置总览", List.of(
-            "点数标签 " + bool(plugin.isCardLabelsEnabledFor(player.getUniqueId())) + " · 出牌对比 " + bool(plugin.isOpponentPreviewEnabledFor(player.getUniqueId())) + "。",
+            "点数标签 " + bool(plugin.isCardLabelsEnabledFor(player.getUniqueId())) + "。",
             "选牌音效 · " + selectionSoundDisplayLabel(plugin.getSelectionSoundProfile(plugin.getPlayerSelectionSoundProfileIndex(player.getUniqueId()))) + "。",
             "预览色 · " + plugin.previewGlowColorLabel(player.getUniqueId()) + " | 选中色 · " + plugin.selectionGlowColorLabel(player.getUniqueId()) + "。"
         )));
         inventory.setItem(10, toggleItem(Material.NAME_TAG, "点数标签", plugin.isCardLabelsEnabledFor(player.getUniqueId()), "牌面额外显示数字提示。"));
-        inventory.setItem(12, toggleItem(Material.SPYGLASS, "出牌对比", plugin.isOpponentPreviewEnabledFor(player.getUniqueId()), "选牌时顺带看上一手。"));
         inventory.setItem(14, item(Material.NOTE_BLOCK, "选牌音效 · " + selectionSoundDisplayLabel(plugin.getSelectionSoundProfile(plugin.getPlayerSelectionSoundProfileIndex(player.getUniqueId()))), List.of("点开切换方案。")));
         inventory.setItem(16, item(Material.COMMAND_BLOCK, "出牌动作", List.of("按牌型切换动作。")));
         inventory.setItem(19, colorSettingItem(Material.OAK_SIGN, "预览色", playerPreviewColorDisplayLabel(player.getUniqueId()), plugin.previewGlowColorFor(player.getUniqueId()), List.of("鼠标指向牌时使用。")));
         inventory.setItem(21, colorSettingItem(Material.OAK_SIGN, "选中色", playerSelectionColorDisplayLabel(player.getUniqueId()), plugin.selectionGlowColorFor(player.getUniqueId()), List.of("已经预选的牌会使用这个颜色。")));
-        inventory.setItem(23, noteItem(Material.BOOK, "恢复默认", List.of("清空个人偏好。")));
+        inventory.setItem(23, richItem(Material.BOOK, MuzTheme.warning("恢复默认"), List.of(
+            MuzTheme.muted("点击立刻清空点数标签、选牌音效和自定义颜色。"),
+            MuzTheme.muted("无法撤销。")
+        )));
         inventory.setItem(25, closeItem());
         player.openInventory(inventory);
     }
@@ -161,7 +195,7 @@ public final class HandGuiService {
         )));
         List<PlayerHistoryEntry> entries = plugin.loadPlayerHistory(targetPlayerId, 36, (normalizedPage - 1) * 36);
         if (entries.isEmpty()) {
-            inventory.setItem(22, richItem(Material.BARRIER, MuzTheme.danger("暂无战绩"), List.of(MuzTheme.muted("这里暂时还没有可展示的历史记录。"))));
+            inventory.setItem(22, richItem(Material.BARRIER, MuzTheme.muted("暂无战绩"), List.of(MuzTheme.muted("这里暂时还没有可展示的历史记录。"))));
         } else {
             int slot = 9;
             for (PlayerHistoryEntry entry : entries) {
@@ -212,10 +246,10 @@ public final class HandGuiService {
 
     public void openAdminModels(Player player, HandInventoryHolder.AdminPage page) {
         // 管理菜单改成“首页 -> 斗地主/通用 -> 具体分类页”的三级结构。
+        adminMenuViewer = player.getUniqueId();
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_MODELS, page);
         Inventory inventory = Bukkit.createInventory(holder, ADMIN_SIZE, "MUMU | 管理菜单 | " + pageTitle(page));
         holder.setInventory(inventory);
-        inventory.setItem(4, noteItem(Material.WRITABLE_BOOK, pageTitle(page) + " · 管理台", adminPageSummary(page)));
         HandInventoryHolder.AdminPage parent = parentPage(page);
         if (parent != null) {
             inventory.setItem(44, backItem(pageTitle(parent)));
@@ -244,16 +278,16 @@ public final class HandGuiService {
                 inventory.setItem(29, item(Material.STRUCTURE_VOID, "碰撞交互", List.of("手牌、按钮、椅子点击范围。")));
                 inventory.setItem(30, item(Material.NOTE_BLOCK, "音频", List.of("背景音乐、提示音、倒计时。")));
                 inventory.setItem(31, item(Material.BOOK, "玩家选项", List.of("音效方案、动作方案。")));
-                inventory.setItem(32, item(Material.CLOCK, "机器人行为", List.of("本地 bot 延迟、提示数量。")));
+                inventory.setItem(32, item(Material.CLOCK, "机器人行为", List.of("机器人出牌快慢、提示数量。")));
                 inventory.setItem(33, item(Material.ENDER_EYE, "AI 配置", List.of("DeepSeek、全局人设词、调试入口。")));
             }
             case GLOBAL_HOME -> {
                 inventory.setItem(20, item(Material.COMPARATOR, "动画节奏", List.of("牌的预览动画。")));
                 inventory.setItem(22, item(Material.SPECTRAL_ARROW, "高亮颜色", List.of("预览色、选中色。")));
-                inventory.setItem(24, item(Material.PLAYER_HEAD, "头像组件", List.of("顶栏头像、座位头像。")));
+                inventory.setItem(24, item(Material.PLAYER_HEAD, "头像组件", List.of("顶栏名字。")));
             }
             case GLOBAL_ECONOMY -> {
-                inventory.setItem(10, item(Material.GOLD_INGOT, "支付模式 · " + plugin.paymentModeLabel(), List.of("左键直接切换金币或筹码支付。", "金币模式依赖 Vault，筹码模式使用全局余额。")));
+                inventory.setItem(10, item(Material.GOLD_INGOT, "支付模式 · " + plugin.paymentModeLabel(), List.of("左键直接切换金币或筹码支付。", "金币走服务器经济插件，筹码走插件自带余额。")));
                 inventory.setItem(12, item(Material.GRAVEL, "主手设为全局筹码", List.of("把你主手物品设置成筹码外观。")));
                 inventory.setItem(14, item(Material.BRUSH, "恢复默认筹码", List.of("改回默认的石子筹码外观。")));
                 inventory.setItem(19, roomLevelItem(Material.COPPER_INGOT, linmumua.doudizhu.room.TableLevel.LOW));
@@ -286,7 +320,7 @@ public final class HandGuiService {
             case DDZ_FURNITURE -> {
                 inventory.setItem(10, item(Material.CARTOGRAPHY_TABLE, "主手设为桌子", List.of("把你主手的物品拿来当桌子外观。")));
                 inventory.setItem(12, item(Material.BRUSH, "桌子恢复默认", List.of("把桌子外观改回默认。")));
-                inventory.setItem(14, item(Material.OAK_STAIRS, "主手设为椅子", List.of("支持 CraftEngine 家具、CraftEngine 方块物品和原版方块。")));
+                inventory.setItem(14, item(Material.OAK_STAIRS, "主手设为椅子", List.of("家具、方块都能当椅子。")));
                 inventory.setItem(16, item(Material.BRUSH, "椅子恢复默认", List.of("把椅子外观改回默认。")));
                 inventory.setItem(19, adminSettingItem(Material.LODESTONE, DoudizhuPlugin.AdminSetting.TABLE_SPAWN_OFFSET_Y));
                 inventory.setItem(21, adminSettingItem(Material.OAK_STAIRS, DoudizhuPlugin.AdminSetting.CHAIR_VISUAL_LATERAL));
@@ -309,23 +343,16 @@ public final class HandGuiService {
             }
             case DDZ_CARDS -> {
                 inventory.setItem(10, adminSettingItem(Material.PAPER, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_SCALE));
-                inventory.setItem(11, adminSettingItem(Material.MAP, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_CARD_SCALE));
                 inventory.setItem(12, adminSettingItem(Material.PAPER, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_WIDTH_SCALE));
                 inventory.setItem(13, adminSettingItem(Material.PAPER, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_HEIGHT_SCALE));
                 inventory.setItem(14, adminSettingItem(Material.PAPER, DoudizhuPlugin.AdminSetting.PRIVATE_CARD_DEPTH_SCALE));
-                inventory.setItem(15, adminSettingItem(Material.MAP, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_WIDTH_SCALE));
-                inventory.setItem(16, adminSettingItem(Material.MAP, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_HEIGHT_SCALE));
-                inventory.setItem(17, adminSettingItem(Material.MAP, DoudizhuPlugin.AdminSetting.PUBLIC_CARD_DEPTH_SCALE));
                 inventory.setItem(19, adminSettingItem(Material.STRING, DoudizhuPlugin.AdminSetting.HAND_SPACING));
-                inventory.setItem(20, adminSettingItem(Material.LEAD, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_SPACING));
-                inventory.setItem(21, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.PUBLIC_TRICK_HEIGHT));
                 inventory.setItem(22, adminSettingItem(Material.LIGHT_BLUE_CANDLE, DoudizhuPlugin.AdminSetting.CARD_DEPTH_OFFSET));
-                inventory.setItem(23, adminSettingItem(Material.SPYGLASS, DoudizhuPlugin.AdminSetting.HOVER_CARD_SCALE));
                 inventory.setItem(24, adminSettingItem(Material.FEATHER, DoudizhuPlugin.AdminSetting.HOVER_CARD_LIFT));
+                inventory.setItem(25, adminSettingItem(Material.SPYGLASS, DoudizhuPlugin.AdminSetting.HOVER_CARD_SCALE));
                 inventory.setItem(28, adminSettingItem(Material.RAIL, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_LATERAL));
                 inventory.setItem(29, adminSettingItem(Material.LADDER, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_VERTICAL));
                 inventory.setItem(30, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.GLOBAL_HAND_DEPTH));
-                inventory.setItem(31, adminSettingItem(Material.WARPED_FUNGUS_ON_A_STICK, DoudizhuPlugin.AdminSetting.PUBLIC_PREVIEW_ROW_DEPTH_SPACING));
             }
             case GLOBAL_ANIMATION -> {
                 inventory.setItem(11, adminSettingItem(Material.COMPARATOR, DoudizhuPlugin.AdminSetting.HOVER_CARD_INTERPOLATION_TICKS));
@@ -342,32 +369,13 @@ public final class HandGuiService {
                 inventory.setItem(30, colorSettingItem(Material.OAK_SIGN, "全局选中色", plugin.selectedGlowColorLabel(), plugin.selectedGlowColor(), List.of("点击后输入 r,g,b 或十六进制。", "这是所有玩家未自定义时的默认选中色。")));
                 inventory.setItem(22, noteItem(Material.WRITABLE_BOOK, "颜色说明", List.of(
                     "上半区控制预览发光，下半区控制已选发光。",
-                    "颜色支持 r,g,b，也支持十六进制。",
-                    "选中的牌被鼠标指向时只会切到预览色，不再额外抬升。"
+                    "颜色支持 r,g,b，也支持十六进制。"
                 )));
             }
             case GLOBAL_AVATARS -> {
-                inventory.setItem(19, item(Material.ENDER_EYE, "顶栏头像", List.of("单独调顶部头像的位置与大小。")));
-                inventory.setItem(20, item(Material.NAME_TAG, "顶栏名字", List.of("单独调顶部名字的位置与大小。")));
-                inventory.setItem(22, item(Material.COMPARATOR, "显示模式 · " + plugin.playerHeadDisplayModeLabel(), List.of(
-                    "点击切换：只显示名字、只显示头像、都显示。",
-                    "顶栏和座位会一起生效。"
-                )));
-                inventory.setItem(24, item(Material.PLAYER_HEAD, "座位头像", List.of("单独调座位头像的位置与大小。")));
-                inventory.setItem(25, item(Material.OAK_SIGN, "座位名字", List.of("单独调座位名字的位置与大小。")));
+                inventory.setItem(19, item(Material.NAME_TAG, "顶栏名字", List.of("单独调顶部名字的位置与大小。")));
                 inventory.setItem(31, noteItem(Material.BOOK, "布局说明", List.of(
-                    "头像、名字、附属信息必须分开调。",
-                    "这页只用来分类，具体数值在里面调。"
-                )));
-            }
-            case GLOBAL_STATUS_AVATARS -> {
-                inventory.setItem(10, adminSettingItem(Material.PLAYER_HEAD, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_SCALE));
-                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_LATERAL));
-                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_VERTICAL));
-                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.STATUS_AVATAR_DEPTH));
-                inventory.setItem(31, noteItem(Material.BOOK, "顶栏头像", List.of(
-                    "这里只调顶部头像。",
-                    "不会再连带移动顶栏名字。"
+                    "顶部玩家名字的位置与大小在这里调。"
                 )));
             }
             case GLOBAL_STATUS_NAMES -> {
@@ -376,28 +384,21 @@ public final class HandGuiService {
                 inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.STATUS_NAME_VERTICAL));
                 inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.STATUS_NAME_DEPTH));
                 inventory.setItem(31, noteItem(Material.BOOK, "顶栏名字", List.of(
-                    "这里只调顶部名字。",
-                    "不会再连带移动顶栏头像。"
+                    "调整顶部玩家名字的大小和位置。"
                 )));
             }
-            case GLOBAL_SEAT_AVATARS -> {
-                inventory.setItem(10, adminSettingItem(Material.PLAYER_HEAD, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_SCALE));
-                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_LATERAL));
-                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_VERTICAL));
-                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_AVATAR_DEPTH));
-                inventory.setItem(31, noteItem(Material.BOOK, "座位头像", List.of(
-                    "这里只调座位头像。",
-                    "不会再连带移动座位名字。"
-                )));
-            }
-            case GLOBAL_SEAT_NAMES -> {
-                inventory.setItem(10, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.SEAT_NAME_SCALE));
-                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_NAME_LATERAL));
-                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_NAME_VERTICAL));
-                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_NAME_DEPTH));
-                inventory.setItem(31, noteItem(Material.BOOK, "座位名字", List.of(
-                    "这里只调玩家座位名字。",
-                    "不改空位主文字、座位副标题、准备/开始/离开等按钮文字。"
+            case DDZ_SEAT_TEXT -> {
+                inventory.setItem(10, adminSettingItem(Material.BIRCH_SIGN, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_SCALE));
+                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_LATERAL));
+                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_VERTICAL));
+                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_DEPTH));
+                inventory.setItem(28, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.SEAT_INFO_SCALE));
+                inventory.setItem(30, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_INFO_LATERAL));
+                inventory.setItem(32, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_INFO_VERTICAL));
+                inventory.setItem(34, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_INFO_DEPTH));
+                inventory.setItem(31, noteItem(Material.BOOK, "座位文字", List.of(
+                    "上排是空位主文字「空位」。",
+                    "下排是座位副标题，如座位号、准备状态、分数。"
                 )));
             }
             case DDZ_TEXT -> {
@@ -412,20 +413,6 @@ public final class HandGuiService {
                     "下排只调加入按钮文字和准备/开始/离开文字。"
                 )));
             }
-            case DDZ_SEAT_TEXT -> {
-                inventory.setItem(10, adminSettingItem(Material.BIRCH_SIGN, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_SCALE));
-                inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_LATERAL));
-                inventory.setItem(14, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_VERTICAL));
-                inventory.setItem(16, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.EMPTY_SEAT_DEPTH));
-                inventory.setItem(28, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.SEAT_INFO_SCALE));
-                inventory.setItem(30, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.SEAT_INFO_LATERAL));
-                inventory.setItem(32, adminSettingItem(Material.SCAFFOLDING, DoudizhuPlugin.AdminSetting.SEAT_INFO_VERTICAL));
-                inventory.setItem(34, adminSettingItem(Material.TARGET, DoudizhuPlugin.AdminSetting.SEAT_INFO_DEPTH));
-                inventory.setItem(31, noteItem(Material.BOOK, "座位文字", List.of(
-                    "上排是空位主文字“空位”。",
-                    "下排是座位副标题，如座位号、准备状态、分数。"
-                )));
-            }
             case DDZ_LABELS -> {
                 inventory.setItem(10, adminSettingItem(Material.OAK_SIGN, DoudizhuPlugin.AdminSetting.CARD_LABEL_HEIGHT));
                 inventory.setItem(12, adminSettingItem(Material.COMPASS, DoudizhuPlugin.AdminSetting.CARD_LABEL_LATERAL));
@@ -433,20 +420,13 @@ public final class HandGuiService {
                 inventory.setItem(28, adminSettingItem(Material.NAME_TAG, DoudizhuPlugin.AdminSetting.LABELS_ENABLED));
                 inventory.setItem(30, adminSettingItem(Material.CHAINMAIL_CHESTPLATE, DoudizhuPlugin.AdminSetting.DUPLICATE_ONLY));
                 inventory.setItem(22, noteItem(Material.BOOK, "牌面标签", List.of(
-                    "这里单独调牌上的数字标签。",
-                    "高度、左右、前后都在这里。"
+                    "调整牌上数字标签的高度、左右和前后位置。"
                 )));
             }
             case DDZ_HITBOX -> {
                 inventory.setItem(10, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_LATERAL));
                 inventory.setItem(11, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_DEPTH));
                 inventory.setItem(12, adminSettingItem(Material.BARRIER, DoudizhuPlugin.AdminSetting.BUTTON_HITBOX_VERTICAL));
-                inventory.setItem(19, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LATERAL));
-                inventory.setItem(20, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_DEPTH));
-                inventory.setItem(21, adminSettingItem(Material.STRUCTURE_VOID, DoudizhuPlugin.AdminSetting.CARD_HITBOX_VERTICAL));
-                inventory.setItem(22, adminSettingItem(Material.HONEYCOMB_BLOCK, DoudizhuPlugin.AdminSetting.CARD_HITBOX_LENGTH));
-                inventory.setItem(23, adminSettingItem(Material.HONEYCOMB, DoudizhuPlugin.AdminSetting.CARD_HITBOX_WIDTH));
-                inventory.setItem(24, adminSettingItem(Material.HONEY_BLOCK, DoudizhuPlugin.AdminSetting.CARD_HITBOX_HEIGHT));
                 inventory.setItem(28, adminSettingItem(Material.MINECART, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_LATERAL));
                 inventory.setItem(29, adminSettingItem(Material.MINECART, DoudizhuPlugin.AdminSetting.CHAIR_HITBOX_VERTICAL));
             }
@@ -454,7 +434,7 @@ public final class HandGuiService {
                 inventory.setItem(10, adminSettingItem(Material.MUSIC_DISC_CAT, DoudizhuPlugin.AdminSetting.BGM_VOLUME));
                 inventory.setItem(11, adminSettingItem(Material.NOTE_BLOCK, DoudizhuPlugin.AdminSetting.EFFECT_VOLUME));
                 inventory.setItem(12, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.TURN_COUNTDOWN_SECONDS));
-                inventory.setItem(13, item(Material.JUKEBOX, "倒计时音效", List.of("进入后可选预设，也支持手输 spec。", plugin.getCountdownSoundSpec())));
+                inventory.setItem(13, item(Material.JUKEBOX, "倒计时音效", List.of("进入后可选预设，也可以手动输入音效名。", plugin.getCountdownSoundSpec())));
                 inventory.setItem(14, item(Material.BELL, "未准备提醒音", List.of("大厅阶段提醒未准备玩家。", plugin.getUnreadyWarningSoundSpec())));
             }
             case DDZ_PLAYER_OPTIONS -> {
@@ -473,12 +453,11 @@ public final class HandGuiService {
                 inventory.setItem(12, adminSettingItem(Material.CLOCK, DoudizhuPlugin.AdminSetting.BOT_DELAY_MAX));
                 inventory.setItem(14, adminSettingItem(Material.BOOKSHELF, DoudizhuPlugin.AdminSetting.HINT_GROUP_LIMIT));
                 inventory.setItem(19, noteItem(Material.BOOK, "行为说明", List.of(
-                    "这一页只管本地机器人行为和提示数量。",
-                    "DeepSeek 链接、模型、人设词请去 AI 配置页。"
+                    "机器人出牌快慢和提示数量。",
+                    "AI 相关设置在「AI 配置」页。"
                 )));
                 inventory.setItem(21, noteItem(Material.COMPARATOR, "当前模式", List.of(
-                    plugin.isBotAiEnabled() ? "外部 AI 可用，失败会回退本地规则。" : "当前主要使用本地 bot 规则。",
-                    "本地 bot 已加入炸弹/王炸保留策略。"
+                    plugin.isBotAiEnabled() ? "AI 出牌已启用，异常时自动切回内置机器人。" : "使用内置机器人出牌，会留炸弹和王炸。"
                 )));
             }
             case DDZ_AI -> {
@@ -497,10 +476,11 @@ public final class HandGuiService {
                 )));
                 inventory.setItem(23, noteItem(Material.BOOKSHELF, "策略说明", List.of(
                     "默认牌风：稳健、保炸、残局再提爆发。",
-                    "全局人设词会同时影响 bot 调试聊天和 DeepSeek 实战决策。"
+                    "全局人设词会同时影响机器人聊天和实战决策。"
                 )));
             }
         }
+        inventory.setItem(4, adminAdjustmentStepItem(player));
         fillAdminChrome(inventory);
         player.openInventory(inventory);
     }
@@ -515,7 +495,8 @@ public final class HandGuiService {
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 选牌音效方案 " + (normalized + 1));
         holder.setInventory(inventory);
         DoudizhuPlugin.OptionProfile profile = plugin.getSelectionSoundProfile(normalized);
-        inventory.setItem(4, noteItem(Material.NOTE_BLOCK, "选牌音效方案 " + (normalized + 1), List.of(
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(31, noteItem(Material.NOTE_BLOCK, "选牌音效方案 " + (normalized + 1), List.of(
             selectionSoundDisplayLabel(profile),
             profile.spec()
         )));
@@ -526,9 +507,9 @@ public final class HandGuiService {
         }
         inventory.setItem(22, noteItem(Material.BOOK, "操作说明", List.of(
             "点击预设会立即应用。",
-            "也可以手动输入 spec。"
+            "也可以手动输入音效名。"
         )));
-        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效 spec。")));
+        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("玩家选项"));
         inventory.setItem(34, closeItem());
         player.openInventory(inventory);
@@ -546,7 +527,8 @@ public final class HandGuiService {
         Inventory inventory = Bukkit.createInventory(holder, PICKER_SIZE, "斗地主 | 动作 | " + kind.label());
         holder.setInventory(inventory);
         List<DoudizhuPlugin.OptionProfile> profiles = plugin.getPlayActionProfiles(kind);
-        inventory.setItem(4, noteItem(actionKindMaterial(kind), kind.label() + " · 动作槽", List.of(
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(13, noteItem(actionKindMaterial(kind), kind.label() + " · 动作槽", List.of(
             "左键进入编辑页。",
             "右键恢复默认。"
         )));
@@ -565,7 +547,8 @@ public final class HandGuiService {
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | " + kind.label() + " 动作 " + (normalized + 1));
         holder.setInventory(inventory);
         DoudizhuPlugin.OptionProfile profile = plugin.getPlayActionProfile(kind, normalized);
-        inventory.setItem(4, noteItem(Material.COMMAND_BLOCK, kind.label() + " · 动作 " + (normalized + 1), List.of(
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(31, noteItem(Material.COMMAND_BLOCK, kind.label() + " · 动作 " + (normalized + 1), List.of(
             profile.label(),
             profile.spec()
         )));
@@ -576,7 +559,7 @@ public final class HandGuiService {
         }
         inventory.setItem(22, noteItem(Material.BOOK, "操作说明", List.of(
             "点击预设会直接覆盖当前动作槽。",
-            "自定义格式：显示名 || CE 语法。"
+            "格式：显示名 || 动作指令。"
         )));
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入动作内容。")));
         inventory.setItem(32, backItem(kind.label() + " 动作槽"));
@@ -588,7 +571,8 @@ public final class HandGuiService {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_COUNTDOWN, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 倒计时音效");
         holder.setInventory(inventory);
-        inventory.setItem(4, noteItem(Material.CLOCK, "当前倒计时音效", List.of(plugin.getCountdownSoundSpec())));
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(31, noteItem(Material.CLOCK, "当前倒计时音效", List.of(plugin.getCountdownSoundSpec())));
         List<SoundPreset> presets = countdownPresets();
         for (int index = 0; index < presets.size() && index < 7; index++) {
             int slot = 10 + index;
@@ -596,9 +580,9 @@ public final class HandGuiService {
         }
         inventory.setItem(22, noteItem(Material.BOOK, "操作说明", List.of(
             "点击预设会直接替换。",
-            "也可以手动输入 spec。"
+            "也可以手动输入音效名。"
         )));
-        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效 spec。")));
+        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("音频设置"));
         inventory.setItem(34, closeItem());
         player.openInventory(inventory);
@@ -608,7 +592,8 @@ public final class HandGuiService {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_UNREADY_WARNING, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 未准备提醒音");
         holder.setInventory(inventory);
-        inventory.setItem(4, noteItem(Material.BELL, "当前未准备提醒音", List.of(plugin.getUnreadyWarningSoundSpec())));
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(31, noteItem(Material.BELL, "当前未准备提醒音", List.of(plugin.getUnreadyWarningSoundSpec())));
         List<SoundPreset> presets = countdownPresets();
         for (int index = 0; index < presets.size() && index < 7; index++) {
             int slot = 10 + index;
@@ -616,9 +601,9 @@ public final class HandGuiService {
         }
         inventory.setItem(22, noteItem(Material.BOOK, "操作说明", List.of(
             "点击预设会直接替换。",
-            "也可以手动输入 spec。"
+            "也可以手动输入音效名。"
         )));
-        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效 spec。")));
+        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("音频设置"));
         inventory.setItem(34, closeItem());
         player.openInventory(inventory);
@@ -628,7 +613,8 @@ public final class HandGuiService {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_PLACEMENT_BLOCKED_WARNING, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 放置阻挡警告音");
         holder.setInventory(inventory);
-        inventory.setItem(4, noteItem(Material.BELL, "当前放置阻挡警告音", List.of(plugin.getPlacementBlockedSoundSpec())));
+        inventory.setItem(4, adminAdjustmentStepItem(player));
+        inventory.setItem(31, noteItem(Material.BELL, "当前放置阻挡警告音", List.of(plugin.getPlacementBlockedSoundSpec())));
         List<SoundPreset> presets = countdownPresets();
         for (int index = 0; index < presets.size() && index < 7; index++) {
             int slot = 10 + index;
@@ -636,9 +622,9 @@ public final class HandGuiService {
         }
         inventory.setItem(22, noteItem(Material.BOOK, "操作说明", List.of(
             "点击预设会直接替换。",
-            "也可以手动输入 spec。"
+            "也可以手动输入音效名。"
         )));
-        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效 spec。")));
+        inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("桌椅设置"));
         inventory.setItem(34, closeItem());
         player.openInventory(inventory);
@@ -689,7 +675,7 @@ public final class HandGuiService {
         player.closeInventory();
         switch (target) {
             case ADMIN_SELECTION_SOUND -> player.sendMessage(component("把音效写给我就行，例如 `音效名 [音量] [选中音高] [取消音高]`。", NamedTextColor.AQUA));
-            case ADMIN_PLAY_ACTION -> player.sendMessage(component("把动作内容贴进来就行，格式是 `显示名 || CE 单行动作语法`。", NamedTextColor.AQUA));
+            case ADMIN_PLAY_ACTION -> player.sendMessage(component("把动作内容贴进来就行，格式是 `显示名 || 动作指令`。", NamedTextColor.AQUA));
             case ADMIN_COUNTDOWN -> player.sendMessage(component("直接输入倒计时音效，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
             case ADMIN_UNREADY_WARNING -> player.sendMessage(component("直接输入未准备提醒音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
             case ADMIN_PLACEMENT_BLOCKED_WARNING -> player.sendMessage(component("直接输入放置阻挡警告音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
@@ -1019,19 +1005,78 @@ public final class HandGuiService {
         };
     }
 
+    private ItemStack adminAdjustmentStepItem(Player player) {
+        String step = hitboxAdjustmentStepLabel(player.getUniqueId());
+        return noteItem(Material.WRITABLE_BOOK, "微调步长 · " + step, List.of(
+            "当前步长 · " + step + "。",
+            "点击循环：0.01 → 0.1 → 1。",
+            "大部分小数设置都用这个步长。",
+            "左键增加，右键减少；Shift 按 10 倍步长。",
+            "例外：手牌叠放间距固定 0.0001。",
+            "例外：椅子旋转、三/多按钮弧度固定 1 度。",
+            "整数设置和方块椅角度不受影响。"
+        ));
+    }
+
     private ItemStack adminSettingItem(Material material, DoudizhuPlugin.AdminSetting setting) {
-        List<String> lore = new java.util.ArrayList<>();
-        lore.add(adminSettingHint(setting));
+        List<Component> lore = new java.util.ArrayList<>();
+        lore.add(MuzTheme.muted(adminSettingHint(setting)));
         if (setting.booleanSetting()) {
-            lore.add("点击切换。");
-        } else if (setting.integerSetting()) {
-            lore.add("左加右减。");
-            lore.add("Shift x10。");
+            lore.add(MuzTheme.muted("点击切换。"));
         } else {
-            lore.add("左加右减。");
-            lore.add("Shift x10。");
+            // 这里原先还会显示一行上下限区间。调整已按用户要求放开、区间不再生效，
+            // 继续显示只会误导，所以整行去掉。
+            lore.add(MuzTheme.row(MuzTheme.field("步长", adminSettingStepLabel(setting)), List.of(
+                MuzTheme.muted("左加右减"),
+                MuzTheme.muted("Shift x10")
+            )));
         }
-        return item(material, setting.label() + " · " + plugin.adminSettingValue(setting), lore);
+        return richItem(material, MuzTheme.accent(setting.label() + " · " + plugin.adminSettingValue(setting)), lore);
+    }
+
+    /**
+     * 一次点击会动多少。
+     *
+     * 整数项永远走自己声明的步长，固定步长项忽略玩家选的精度，
+     * 其余项跟随该玩家在"微调步长"按钮上选的值——所以这里要看是谁在看这个菜单。
+     *
+     * @param setting 设置项
+     * @return 形如 "0.001（固定）" 或 "0.1（跟随微调步长）" 的步长文本
+     */
+    private String adminSettingStepLabel(DoudizhuPlugin.AdminSetting setting) {
+        if (setting.integerSetting()) {
+            return String.valueOf((long) setting.step()) + "（固定）";
+        }
+        // fixedStep() 返回 0 表示这一项没钉死步长，跟随全局，不能直接拿来显示
+        if (setting.hasFixedStep()) {
+            return formatDecimal(setting.fixedStep(), adminSettingDecimals(setting)) + "（固定）";
+        }
+        UUID viewer = adminMenuViewer;
+        String step = viewer == null ? HITBOX_ADJUSTMENT_STEP_LABELS[0] : hitboxAdjustmentStepLabel(viewer);
+        return step + "（跟随微调步长）";
+    }
+
+    /**
+     * 小数位数跟着这一项实际能动的最小量走。
+     * 固定 0.0001 步长的项只显示两位小数的话，区间下限会被抹成 0.00。
+     *
+     * @param setting 设置项
+     * @return 小数位数
+     */
+    private int adminSettingDecimals(DoudizhuPlugin.AdminSetting setting) {
+        // 没钉死步长的项按全局最细的 0.01 算，够显示玩家调得动的最小差别
+        double step = setting.hasFixedStep() ? setting.fixedStep() : 0.01;
+        if (step >= 1.0) {
+            return 0;
+        }
+        if (step >= 0.01) {
+            return 2;
+        }
+        return step >= 0.001 ? 3 : 4;
+    }
+
+    private String formatDecimal(double value, int decimals) {
+        return String.format(java.util.Locale.ROOT, "%." + decimals + "f", value);
     }
 
     private ItemStack toggleItem(Material material, String title, boolean enabled, String note) {
@@ -1173,20 +1218,12 @@ public final class HandGuiService {
         return item;
     }
 
-    private ItemStack loreLineItem(Component line) {
-        ItemStack item = new ItemStack(Material.PAPER);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(MuzTheme.body(" "));
-        meta.lore(List.of(line));
-        item.setItemMeta(meta);
-        return item;
-    }
-
     private ItemStack historyOverviewCard(PlayerHistoryEntry entry) {
         boolean doudizhu = entry.match().gameType().equalsIgnoreCase("DOUDIZHU");
         MatchParticipantRecord self = entry.self();
-        String outcome = self != null && "WIN".equalsIgnoreCase(self.outcome()) ? "胜利" : "失败";
-        NamedTextColor outcomeColor = "胜利".equals(outcome) ? NamedTextColor.GREEN : NamedTextColor.RED;
+        boolean win = self != null && "WIN".equalsIgnoreCase(self.outcome());
+        String outcome = win ? "胜利" : "失败";
+        NamedTextColor outcomeColor = win ? NamedTextColor.GREEN : NamedTextColor.RED;
         return richItem(
             doudizhu ? Material.PAPER : Material.CLOCK,
             component("对局概况", NamedTextColor.YELLOW),
@@ -1276,9 +1313,10 @@ public final class HandGuiService {
     private Component historyTitle(PlayerHistoryEntry entry) {
         boolean doudizhu = entry.match().gameType().equalsIgnoreCase("DOUDIZHU");
         String label = doudizhu ? "斗地主档案" : "德州档案";
-        String outcome = entry.self() != null && "WIN".equalsIgnoreCase(entry.self().outcome()) ? "胜利" : "失败";
+        boolean win = entry.self() != null && "WIN".equalsIgnoreCase(entry.self().outcome());
+        String outcome = win ? "胜利" : "失败";
         String titleGradient = doudizhu ? "<gradient:#f4c27a:#fff1d6>" : "<gradient:#7dcfff:#dbeafe>";
-        String outcomeColor = "胜利".equals(outcome) ? "#86efac" : "#fca5a5";
+        String outcomeColor = win ? "#86efac" : "#fca5a5";
         return MINI.deserialize(titleGradient + "<bold>" + label + "</bold></gradient><dark_gray> | </dark_gray><color:" + outcomeColor + ">" + outcome + "</color>")
             .decoration(TextDecoration.ITALIC, false);
     }
@@ -1301,9 +1339,11 @@ public final class HandGuiService {
             lore.add(themeLine("农民阵营", joinRole(entry, "农民"), NamedTextColor.YELLOW));
         }
         if (self != null) {
+            lore.add(Component.empty());
             lore.add(themeLine("个人盈亏", formatSigned(self.settlementDelta()) + normalizeHistoryUnit(self.unitLabel()), self.settlementDelta() >= 0 ? NamedTextColor.GREEN : NamedTextColor.RED));
         }
-        lore.add(MuzTheme.warning("全桌结算"));
+        lore.add(Component.empty());
+        lore.add(MuzTheme.warm("全桌结算"));
         for (MatchParticipantRecord participant : entry.participants()) {
             NamedTextColor deltaColor = participant.settlementDelta() >= 0 ? NamedTextColor.GREEN : NamedTextColor.RED;
             lore.add(MuzTheme.divider("• ")
@@ -1430,81 +1470,7 @@ public final class HandGuiService {
             case GLOBAL_ANIMATION -> "动画";
             case GLOBAL_HIGHLIGHT -> "预选高亮";
             case GLOBAL_AVATARS -> "头像组件";
-            case GLOBAL_STATUS_AVATARS -> "顶栏头像";
             case GLOBAL_STATUS_NAMES -> "顶栏名字";
-            case GLOBAL_SEAT_AVATARS -> "座位头像";
-            case GLOBAL_SEAT_NAMES -> "座位名字";
-        };
-    }
-
-    private List<String> adminPageSummary(HandInventoryHolder.AdminPage page) {
-        return switch (page) {
-            case HOME -> List.of(
-                "先选要调哪块，再往里点。"
-            );
-            case DDZ_HOME -> List.of(
-                "桌椅、按钮、卡牌、桌面文字、座位文字、机器人与 AI。"
-            );
-            case GLOBAL_HOME -> List.of(
-                "所有牌桌都吃这套显示设置。"
-            );
-            case GLOBAL_ECONOMY -> List.of(
-                "支付、筹码、场次、数据库。"
-            );
-            case DDZ_FURNITURE -> List.of(
-                "外观替换与摆位微调。"
-            );
-            case DDZ_BUTTONS -> List.of(
-                "按钮距离、高度与弧线排布。"
-            );
-            case DDZ_CARDS -> List.of(
-                "卡牌尺寸、间距与整体排布。"
-            );
-            case DDZ_LABELS -> List.of(
-                "牌上方数字标签单独放在这里。"
-            );
-            case DDZ_TEXT -> List.of(
-                "桌面状态、上一手、加入按钮、操作按钮。"
-            );
-            case DDZ_SEAT_TEXT -> List.of(
-                "空位主文字与座位副标题分开调。"
-            );
-            case DDZ_HITBOX -> List.of(
-                "只影响点击体验。"
-            );
-            case DDZ_AUDIO -> List.of(
-                "音量、倒计时、未准备提醒。"
-            );
-            case DDZ_PLAYER_OPTIONS -> List.of(
-                "玩家音效与动作方案。"
-            );
-            case DDZ_BOTS -> List.of(
-                "本地 bot 延迟、提示数量与行为说明。"
-            );
-            case DDZ_AI -> List.of(
-                "DeepSeek 链接、密钥、模型与全局人设词。"
-            );
-            case GLOBAL_ANIMATION -> List.of(
-                "手牌与按钮动画。"
-            );
-            case GLOBAL_HIGHLIGHT -> List.of(
-                "预览色、选中色与默认高亮。"
-            );
-            case GLOBAL_AVATARS -> List.of(
-                "头像与名字拆成独立页面。"
-            );
-            case GLOBAL_STATUS_AVATARS -> List.of(
-                "顶部状态头像位置与缩放。"
-            );
-            case GLOBAL_STATUS_NAMES -> List.of(
-                "顶部状态名字位置与缩放。"
-            );
-            case GLOBAL_SEAT_AVATARS -> List.of(
-                "椅子外侧头像位置与缩放。"
-            );
-            case GLOBAL_SEAT_NAMES -> List.of(
-                "椅子外侧名字位置与缩放。"
-            );
         };
     }
 
@@ -1514,7 +1480,7 @@ public final class HandGuiService {
             case DDZ_HOME, GLOBAL_HOME, GLOBAL_ECONOMY -> HandInventoryHolder.AdminPage.HOME;
             case DDZ_FURNITURE, DDZ_BUTTONS, DDZ_CARDS, DDZ_LABELS, DDZ_TEXT, DDZ_SEAT_TEXT, DDZ_HITBOX, DDZ_AUDIO, DDZ_PLAYER_OPTIONS, DDZ_BOTS, DDZ_AI -> HandInventoryHolder.AdminPage.DDZ_HOME;
             case GLOBAL_ANIMATION, GLOBAL_HIGHLIGHT, GLOBAL_AVATARS -> HandInventoryHolder.AdminPage.GLOBAL_HOME;
-            case GLOBAL_STATUS_AVATARS, GLOBAL_STATUS_NAMES, GLOBAL_SEAT_AVATARS, GLOBAL_SEAT_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
+            case GLOBAL_STATUS_NAMES -> HandInventoryHolder.AdminPage.GLOBAL_AVATARS;
         };
     }
 
@@ -1551,103 +1517,85 @@ public final class HandGuiService {
 
     private String adminSettingHint(DoudizhuPlugin.AdminSetting setting) {
         return switch (setting) {
-            case TABLE_SPAWN_OFFSET_Y -> "整套桌椅一起升降；方块类按整格，家具类高精度。";
-            case BUTTON_DISTANCE -> "桌边按钮离桌子的远近。";
-            case BUTTON_HEIGHT -> "桌边按钮整体高低。";
-            case PLAYER_HEAD_SCALE -> "牌桌座位头像的显示大小。";
-            case PLAYER_HEAD_SHOW_ID -> "点击后在只显示头像、都显示、只显示名字三种模式间循环切换。";
-            case STATUS_AVATAR_SCALE -> "顶部状态头像的显示大小。";
-            case STATUS_AVATAR_LATERAL -> "顶部状态头像左右移动。";
-            case STATUS_AVATAR_VERTICAL -> "顶部状态头像上下移动。";
-            case STATUS_AVATAR_DEPTH -> "顶部状态头像前后移动。";
-            case STATUS_NAME_SCALE -> "顶部状态名字的显示大小。";
-            case STATUS_NAME_LATERAL -> "顶部状态名字左右移动。";
-            case STATUS_NAME_VERTICAL -> "顶部状态名字上下移动。";
-            case STATUS_NAME_DEPTH -> "顶部状态名字前后移动。";
-            case SEAT_AVATAR_SCALE -> "椅子外侧头像的显示大小。";
-            case SEAT_AVATAR_LATERAL -> "椅子外侧头像左右移动。";
-            case SEAT_AVATAR_VERTICAL -> "椅子外侧头像上下移动。";
-            case SEAT_AVATAR_DEPTH -> "椅子外侧头像前后移动。";
-            case SEAT_NAME_SCALE -> "椅子外侧名字的显示大小。";
-            case SEAT_NAME_LATERAL -> "椅子外侧名字左右移动。";
-            case SEAT_NAME_VERTICAL -> "椅子外侧名字上下移动。";
-            case SEAT_NAME_DEPTH -> "椅子外侧名字前后移动。";
-            case EMPTY_SEAT_SCALE -> "椅子旁边“空位”主文字的显示大小。";
-            case EMPTY_SEAT_LATERAL -> "椅子旁边“空位”主文字左右移动。";
-            case EMPTY_SEAT_VERTICAL -> "椅子旁边“空位”主文字上下移动。";
-            case EMPTY_SEAT_DEPTH -> "椅子旁边“空位”主文字前后移动。";
-            case SEAT_INFO_SCALE -> "座位副标题（座位号、准备、分数等）的显示大小。";
-            case SEAT_INFO_LATERAL -> "座位副标题左右移动。";
-            case SEAT_INFO_VERTICAL -> "座位副标题上下移动。";
-            case SEAT_INFO_DEPTH -> "座位副标题前后移动。";
-            case JOIN_LABEL_HEIGHT -> "空位加入文字离按钮多高。";
-            case JOIN_LABEL_SCALE -> "空位加入文字的显示大小。";
-            case ACTION_LABEL_HEIGHT -> "普通按钮文字离按钮多高。";
-            case ACTION_LABEL_SCALE -> "准备、开始、离开等普通按钮文字的显示大小。";
-            case BUTTON_FRONT_BASE_DISTANCE -> "正前方座位那排按钮离桌心多远。";
-            case BUTTON_SIDE_BASE_DISTANCE -> "左右两侧座位那排按钮离桌心多远。";
-            case BUTTON_DISTANCE_FACTOR -> "总按钮距离变化时，额外推开的速度。";
-            case BUTTON_SPACING -> "按钮沿弧线展开时的疏密倍率。";
-            case BUTTON_ARC_SMALL_ANGLE -> "按钮较少时展开成弧线的角度。";
-            case BUTTON_ARC_LARGE_ANGLE -> "按钮较多时展开成弧线的角度。";
-            case BUTTON_ARC_SMALL_RADIUS -> "按钮较少时弧线半径。";
-            case BUTTON_ARC_LARGE_RADIUS -> "按钮较多时弧线半径。";
-            case CHAIR_VISUAL_LATERAL -> "椅子模型左右挪一点。";
-            case CHAIR_VISUAL_VERTICAL -> "椅子模型上下挪一点。";
-            case CHAIR_ROTATION_DEGREES -> "椅子整体朝向；方块类会自动按 90 度步进。";
-            case CHAIR_DISTANCE -> "椅子离桌子的远近；方块类会按一格一格移动。";
-            case STATUS_HEIGHT -> "桌面状态文字的高度。";
-            case PLAY_DETAIL_HEIGHT -> "上一手提示文字的高度。";
-            case PRIVATE_CARD_SCALE -> "手牌整体基础大小。";
-            case PUBLIC_TRICK_CARD_SCALE -> "桌中间预览牌的整体基础大小。";
-            case PRIVATE_CARD_WIDTH_SCALE -> "只改手牌宽度。";
-            case PRIVATE_CARD_HEIGHT_SCALE -> "只改手牌高度。";
-            case PRIVATE_CARD_DEPTH_SCALE -> "只改手牌厚度。";
-            case PUBLIC_CARD_WIDTH_SCALE -> "只改预览牌宽度。";
-            case PUBLIC_CARD_HEIGHT_SCALE -> "只改预览牌高度。";
-            case PUBLIC_CARD_DEPTH_SCALE -> "只改预览牌厚度。";
-            case HOVER_CARD_SCALE -> "看向手牌时的放大倍数。";
-            case HOVER_CARD_LIFT -> "看向手牌时上浮多少。";
-            case HOVER_CARD_INTERPOLATION_TICKS -> "手牌预览动画的过渡时长。";
-            case HOVER_CARD_ANIMATION_TYPE -> "手牌预览动画使用哪种速度曲线。";
-            case HAND_SPACING -> "一排手牌之间的左右间距。";
-            case PUBLIC_TRICK_SPACING -> "桌中间预览牌之间的间距。";
-            case PUBLIC_PREVIEW_ROW_DEPTH_SPACING -> "预览牌多排时前后错开的程度。";
-            case CARD_LABEL_HEIGHT -> "牌上数字标签整体高低。";
-            case CARD_LABEL_LATERAL -> "牌上数字标签左右移动。";
-            case CARD_LABEL_DEPTH -> "牌上数字标签前后移动。";
-            case PUBLIC_TRICK_HEIGHT -> "桌中间预览牌离桌面的高度。";
-            case CARD_DEPTH_OFFSET -> "相邻手牌前后错开多少，减少闪烁。";
-            case GLOBAL_HAND_LATERAL -> "三家的手牌一起左右平移。";
-            case GLOBAL_HAND_VERTICAL -> "三家的手牌一起上下平移。";
-            case GLOBAL_HAND_DEPTH -> "三家的手牌一起朝桌心或远离桌心。";
-            case HOVER_GLOW_ENABLED -> "鼠标指向牌时是否发光。";
-            case HOVER_GLOW_RED -> "预览发光颜色的红色通道。";
-            case HOVER_GLOW_GREEN -> "预览发光颜色的绿色通道。";
-            case HOVER_GLOW_BLUE -> "预览发光颜色的蓝色通道。";
-            case SELECTED_GLOW_ENABLED -> "预选牌是否发光。";
-            case SELECTED_GLOW_RED -> "预选发光颜色的红色通道。";
-            case SELECTED_GLOW_GREEN -> "预选发光颜色的绿色通道。";
-            case SELECTED_GLOW_BLUE -> "预选发光颜色的蓝色通道。";
-            case LABELS_ENABLED -> "牌面数字标签总开关。";
-            case DUPLICATE_ONLY -> "只给重复点数的牌显示标签。";
-            case BUTTON_HITBOX_LATERAL -> "按钮点击范围左右微调。";
-            case BUTTON_HITBOX_DEPTH -> "按钮点击范围前后微调。";
-            case BUTTON_HITBOX_VERTICAL -> "按钮点击范围上下微调。";
-            case CARD_HITBOX_LATERAL -> "手牌点击范围左右微调。";
-            case CARD_HITBOX_DEPTH -> "手牌点击范围前后微调。";
-            case CARD_HITBOX_VERTICAL -> "手牌点击范围上下微调。";
-            case CARD_HITBOX_LENGTH -> "手牌点击范围前后长度。";
-            case CARD_HITBOX_WIDTH -> "手牌点击范围左右宽度。";
-            case CARD_HITBOX_HEIGHT -> "手牌点击范围高度。";
-            case CHAIR_HITBOX_LATERAL -> "椅子点击范围左右微调。";
-            case CHAIR_HITBOX_VERTICAL -> "椅子点击范围上下微调。";
-            case BGM_VOLUME -> "背景音乐音量。";
-            case EFFECT_VOLUME -> "出牌和提示音量。";
-            case TURN_COUNTDOWN_SECONDS -> "一回合最多等多久。";
-            case BOT_DELAY_MIN -> "机器人最短思考时间。";
-            case BOT_DELAY_MAX -> "机器人最长思考时间。";
-            case HINT_GROUP_LIMIT -> "提示按钮最多轮播多少组建议。";
+            case TABLE_SPAWN_OFFSET_Y -> "整套桌椅一起升降；方块做的桌子只能一格一格动。";
+            // 它只是增量源：增量系数为 0 或本项 ≤1.10 时调了不动，得提醒依赖关系。
+            case BUTTON_DISTANCE -> "按钮离桌多远，要配合下面的增量系数大于 0。";
+            case BUTTON_HEIGHT -> "桌边那圈按钮整体抬高或压低。";
+            case STATUS_NAME_SCALE -> "桌子上方那个名字有多大，看不清时调大。";
+            case STATUS_NAME_LATERAL -> "桌子上方那个名字左右挪，没对准桌心时用。";
+            case STATUS_NAME_VERTICAL -> "桌子上方那个名字上下挪，和状态字挤住时用。";
+            case STATUS_NAME_DEPTH -> "桌子上方那个名字前后挪，贴太近时往后推。";
+            // 下面四项的菜单入口连同「座位名字」整页已一起移除，这些文案不再可达；
+            // case 保留仅为满足本方法的 exhaustive switch，删掉会编译失败。
+            case SEAT_NAME_SCALE -> "此项已失效，请改用「空位主文字大小」。";
+            case SEAT_NAME_LATERAL -> "此项已失效，请改用「空位主文字左右偏移」。";
+            case SEAT_NAME_VERTICAL -> "此项已失效，请改用「空位主文字上下偏移」。";
+            case SEAT_NAME_DEPTH -> "此项已失效，请改用「空位主文字前后偏移」。";
+            case EMPTY_SEAT_SCALE -> "椅子外侧大字有多大，空位和入座都看这项。";
+            case EMPTY_SEAT_LATERAL -> "椅子外侧大字左右挪，空位和入座都看这项。";
+            case EMPTY_SEAT_VERTICAL -> "椅子外侧大字上下挪，空位和入座都看这项。";
+            case EMPTY_SEAT_DEPTH -> "椅子外侧大字前后挪，空位和入座都看这项。";
+            case SEAT_INFO_SCALE -> "座位号、准备、分数那行小字有多大。";
+            case SEAT_INFO_LATERAL -> "座位号那行小字左右挪。";
+            case SEAT_INFO_VERTICAL -> "座位号那行小字上下挪，和大字重叠时用。";
+            case SEAT_INFO_DEPTH -> "座位号那行小字前后挪，看着不同面时用。";
+            case JOIN_LABEL_HEIGHT -> "空位上「加入」两个字离按钮多高。";
+            case JOIN_LABEL_SCALE -> "空位上「加入」两个字有多大。";
+            case ACTION_LABEL_HEIGHT -> "准备、开始这类按钮上的字离按钮多高。";
+            case ACTION_LABEL_SCALE -> "准备、开始、离开这些按钮上的字有多大。";
+            // 这两项在 actionBase 里被取平均后三边共用，所以不能说成"只管前座/只管侧座"。
+            case BUTTON_FRONT_BASE_DISTANCE -> "和侧座那项一起决定三排按钮离桌多远。";
+            case BUTTON_SIDE_BASE_DISTANCE -> "和前座那项一起决定三排按钮离桌多远。";
+            case BUTTON_DISTANCE_FACTOR -> "调大后「按钮离桌距离」推开得更明显。";
+            case BUTTON_SPACING -> "调大后同一排按钮之间散得更开。";
+            case BUTTON_ARC_SMALL_ANGLE -> "按钮少时，那排按钮弯得多厉害。";
+            case BUTTON_ARC_LARGE_ANGLE -> "按钮多时，那排按钮弯得多厉害。";
+            case BUTTON_ARC_SMALL_RADIUS -> "按钮少时，那排按钮张得多开。";
+            case BUTTON_ARC_LARGE_RADIUS -> "按钮多时，那排按钮张得多开。";
+            case CHAIR_VISUAL_LATERAL -> "椅子左右挪一点，没对齐座位时用。";
+            case CHAIR_VISUAL_VERTICAL -> "椅子上下挪一点，陷进地里时往上抬。";
+            case CHAIR_ROTATION_DEGREES -> "椅子朝哪边；方块椅子只能转到 90 度整方向。";
+            case CHAIR_DISTANCE -> "椅子离桌子多远；方块椅子只能一格一格动。";
+            case STATUS_HEIGHT -> "桌子上方那段状态文字挂多高。";
+            case PLAY_DETAIL_HEIGHT -> "「上一手」提示文字挂多高。";
+            case PRIVATE_CARD_SCALE -> "自己手牌整体有多大，看不清时调大。";
+            case PRIVATE_CARD_WIDTH_SCALE -> "只把手牌拉宽或压窄。";
+            case PRIVATE_CARD_HEIGHT_SCALE -> "只把手牌拉高或压扁。";
+            case PRIVATE_CARD_DEPTH_SCALE -> "只把手牌加厚或削薄。";
+            case HOVER_CARD_SCALE -> "看向某张手牌时，它的长宽放大多少倍（厚度不变）。";
+            case HOVER_CARD_LIFT -> "看向某张手牌时，它往上浮多高。";
+            case HOVER_CARD_INTERPOLATION_TICKS -> "牌浮起落下花多久，调大后更慢更柔和。";
+            case HOVER_CARD_ANIMATION_TYPE -> "牌浮出的手感：匀速、缓出、缓入缓出、回弹。";
+            case HAND_SPACING -> "同一排手牌之间挤得多紧。";
+            case CARD_LABEL_HEIGHT -> "牌上的数字整体抬高，挡住牌面时往上挪。";
+            case CARD_LABEL_LATERAL -> "牌上的数字左右挪，没对准牌面时用。";
+            case CARD_LABEL_DEPTH -> "牌上的数字前后挪，看着陷进牌里时用。";
+            case CARD_DEPTH_OFFSET -> "相邻的牌前后错开多少，牌面闪烁时调大。";
+            case GLOBAL_HAND_LATERAL -> "三家手牌一起左右平移。";
+            case GLOBAL_HAND_VERTICAL -> "三家手牌一起上下平移。";
+            case GLOBAL_HAND_DEPTH -> "三家手牌一起朝桌心推进或朝自己拉近。";
+            case HOVER_GLOW_ENABLED -> "看向某张手牌时，它要不要亮起来。";
+            case HOVER_GLOW_RED -> "调大后看向手牌时的光晕更偏红。";
+            case HOVER_GLOW_GREEN -> "调大后看向手牌时的光晕更偏绿。";
+            case HOVER_GLOW_BLUE -> "调大后看向手牌时的光晕更偏蓝。";
+            case SELECTED_GLOW_ENABLED -> "已经挑好的牌要不要亮起来。";
+            case SELECTED_GLOW_RED -> "调大后挑好的牌光晕更偏红。";
+            case SELECTED_GLOW_GREEN -> "调大后挑好的牌光晕更偏绿。";
+            case SELECTED_GLOW_BLUE -> "调大后挑好的牌光晕更偏蓝。";
+            case LABELS_ENABLED -> "牌面上要不要标数字，看不清牌时开。";
+            case DUPLICATE_ONLY -> "只给点数相同的牌标数字，其余不标。";
+            case BUTTON_HITBOX_LATERAL -> "按钮点不中时，把可点区域左右挪。";
+            case BUTTON_HITBOX_DEPTH -> "按钮点不中时，把可点区域前后挪。";
+            case BUTTON_HITBOX_VERTICAL -> "按钮点不中时，把可点区域上下挪。";
+            case CHAIR_HITBOX_LATERAL -> "椅子上「加入」点不中时，左右挪一挪。";
+            case CHAIR_HITBOX_VERTICAL -> "椅子上「加入」点不中时，上下挪一挪。";
+            case BGM_VOLUME -> "牌桌背景音乐多响，调到 0 完全关闭。";
+            case EFFECT_VOLUME -> "出牌、选牌这些声音多响，0 是静音。";
+            // 超时默认是替他"出牌"（出不出来才过牌），且 0 等于关掉倒计时，两点都得说清。
+            case TURN_COUNTDOWN_SECONDS -> "一回合最多等多少秒，超时替他出牌；0 不限时。";
+            case BOT_DELAY_MIN -> "机器人最快多久出牌，20 约等于 1 秒。";
+            case BOT_DELAY_MAX -> "机器人最慢多久出牌，调大后它更沉稳。";
+            case HINT_GROUP_LIMIT -> "点提示最多能轮着看多少种出法。";
         };
     }
 

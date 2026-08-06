@@ -53,16 +53,60 @@ class RetiredRenderKeysTest {
     }
 
     @Test
-    void cardHitboxSizeStaysConfigurable() {
-        // 牌的判定框仍然要能手调，用户是靠它把碰撞箱调吻合的。
+    void cardHitboxAndHoverOffsetAreRetired() {
+        // 手牌判定改为射线与牌平面解析求交，牌身上再没有交互箱实体，
+        // 这两组尺寸/偏移键连读取点都没有了，留着只会误导玩家去调无效项。
+        // 悬停向后偏移同理必须清掉：沿法向平移会让交点跟着悬停漂移，
+        // 玩家若从旧配置里继承这个值，抖动会带着一份"看起来是我调坏的"错觉回来。
         Set<String> retired = new HashSet<>(Arrays.asList(DoudizhuPlugin.RETIRED_RENDER_KEYS));
 
-        for (String kept : List.of(
+        for (String gone : List.of(
             "render.card-hitbox.length",
             "render.card-hitbox.width",
-            "render.card-hitbox.height"
+            "render.card-hitbox.height",
+            "render.card-hitbox",
+            "render.card-hitbox-offset.lateral",
+            "render.card-hitbox-offset.depth",
+            "render.card-hitbox-offset.vertical",
+            "render.card-hitbox-offset",
+            "render.card-hover.backward-offset"
         )) {
-            assertFalse(retired.contains(kept), kept + " 必须保持可配置");
+            assertTrue(retired.contains(gone), gone + " 应当退役");
+        }
+    }
+
+    /**
+     * 悬停反馈这两项必须活着：突出效果全靠它们，删掉等于悬停毫无反馈。
+     */
+    @Test
+    void hoverScaleAndLiftSurvive() {
+        Set<String> retired = new HashSet<>(Arrays.asList(DoudizhuPlugin.RETIRED_RENDER_KEYS));
+
+        assertFalse(retired.contains("render.card-hover.scale"), "悬停放大是唯一的突出手段，不能删");
+        assertFalse(retired.contains("render.card-hover.lift"), "悬停上移不能删");
+    }
+
+    /**
+     * 父节点必须排在自己的子键之后：清理是按顺序执行的，
+     * 先删父节点会让后面的子键路径失效，留下空 section。
+     */
+    @Test
+    void parentSectionsAreRetiredAfterTheirChildren() {
+        List<String> retired = Arrays.asList(DoudizhuPlugin.RETIRED_RENDER_KEYS);
+
+        for (String parent : List.of(
+            "render.card-hitbox", "render.card-hitbox-offset", "render.current-play-head")) {
+            int parentAt = retired.indexOf(parent);
+            assertTrue(parentAt >= 0, parent + " 应当在退役表里");
+            for (int i = 0; i < retired.size(); i++) {
+                String key = retired.get(i);
+                if (key.startsWith(parent + ".")) {
+                    assertTrue(
+                        i < parentAt,
+                        "子键 " + key + " 排在父节点 " + parent + " 之后，父节点先删会让它清不掉"
+                    );
+                }
+            }
         }
     }
 

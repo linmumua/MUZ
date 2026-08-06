@@ -18,13 +18,11 @@ import java.util.HashSet;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -57,6 +55,7 @@ public final class GameTable {
     private final List<RecentTrickEntry> recentTrickEntries = new ArrayList<>();
     private final TableMusicCoordinator musicCoordinator;
     private final TableEffectCoordinator effectCoordinator;
+    private final TrickHudService trickHud;
     private final TimedOutPlayCoordinator timedOutPlayCoordinator;
     private final BotAiCoordinator botAiCoordinator;
     private final RoundSettlementCoordinator roundSettlementCoordinator;
@@ -74,6 +73,8 @@ public final class GameTable {
     private List<UUID> tieBreakOrder = List.of();
     private final Map<UUID, Integer> tieBreakBids = new LinkedHashMap<>();
     private List<UUID> doublingOrder = List.of();
+    // 明牌的玩家：本局内手牌对所有人公开，直到这一局结束。
+    private final Set<UUID> revealedHandPlayers = new HashSet<>();
     private final Map<UUID, Integer> farmerBoostChoices = new LinkedHashMap<>();
     private Integer landlordBoostFactor;
     private int bombMultiplier = 1;
@@ -86,8 +87,6 @@ public final class GameTable {
     private long lastLobbyWarningSoundAt;
     private long lobbyUiResumeAtMillis;
     private long delayedUnreadyReminderAtMillis;
-    private String lastRandomEffectKey;
-    private int lastRandomEffectStreak;
     private boolean debugAutoLoop;
     private String lastActionText = "等待加入";
     private Component lastActionComponent = Component.text("等待加入", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false);
@@ -110,6 +109,11 @@ public final class GameTable {
             random,
             () -> seats,
             this::onlinePlayer
+        );
+        this.trickHud = new TrickHudService(
+            plugin,
+            plugin.getCraftEngineOffsetService(),
+            plugin.getPlayerHeadRenderer()
         );
         this.timedOutPlayCoordinator = new TimedOutPlayCoordinator(new TimedOutPlayCoordinator.Support() {
             @Override
@@ -653,7 +657,6 @@ public final class GameTable {
         ));
         announceAction("叫分顺序", MuzTheme.field("叫分顺序", orderedPlayersComponent(bidOrder)));
         playRoundMusic();
-        openHandsForAll();
         promptBidTurn();
         refreshPhysicalTable();
         runBotActionIfNeeded();
@@ -673,6 +676,34 @@ public final class GameTable {
 
         UUID playerId = player.getUniqueId();
         processBidChoice(playerId, points);
+    }
+
+    /**
+     * 叫分阶段选择明牌：这一局把自己的手牌对所有人公开。
+     * 只在自己的叫分回合可用，且一局内只能明一次；明牌不改变叫分流程和倍率。
+     */
+    public void revealHand(Player player) {
+        requireAtTable(player);
+        ensurePhase(GamePhase.BIDDING, "只有叫地主阶段可以明牌。");
+        requireCurrentTurn(player);
+        UUID playerId = player.getUniqueId();
+        if (!revealedHandPlayers.add(playerId)) {
+            throw new IllegalStateException("你这一局已经明牌了。");
+        }
+        announceAction(
+            displayName(playerId) + " 明牌",
+            actorUpdate(playerId, MuzTheme.accent("明牌"), "手牌本局公开")
+        );
+        playEffectAll(PackSounds.mingPai());
+        refreshPhysicalTable();
+    }
+
+    /**
+     * 这个玩家是否已经明牌。
+     * PhysicalTableManager 用它决定手牌是渲染成正面公开还是背面。
+     */
+    public boolean isHandRevealed(UUID playerId) {
+        return playerId != null && revealedHandPlayers.contains(playerId);
     }
 
     public void chooseDouble(Player player, boolean doubled) {
@@ -959,6 +990,7 @@ public final class GameTable {
         debugAutoLoop = false;
         plugin.getHandGuiService().closeHands(this);
         stopMusicAll();
+        trickHud.hideAll();
         detachAllSeatsForForceClose(reason);
         clearTableStateForForceClose();
     }
@@ -1011,6 +1043,7 @@ public final class GameTable {
         bidRound = 1;
         tieBreakOrder = List.of();
         doublingOrder = List.of();
+        revealedHandPlayers.clear();
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
@@ -1075,7 +1108,6 @@ public final class GameTable {
             playRandomEffectAll(List.of(priorTriggerSound, PackSounds.landlordConfirmed()));
         }
         broadcastActionBar(MuzTheme.field("当前倍率", liveMultiplierComponent()));
-        openHandsForAll();
         startDoublingPhase();
         refreshPhysicalTable();
         runBotActionIfNeeded();
@@ -1121,6 +1153,7 @@ public final class GameTable {
 
     private void resetRound() {
         stopMusicAll();
+        trickHud.hideAll();
         resetRoundStateForLobby();
         plugin.getHandGuiService().closeHands(this);
         refreshPhysicalTable();
@@ -1161,6 +1194,7 @@ public final class GameTable {
         highestBidder = null;
         highestBid = 0;
         bidRound = 1;
+        revealedHandPlayers.clear();
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
@@ -1195,6 +1229,7 @@ public final class GameTable {
         highestBidder = null;
         highestBid = 0;
         doublingOrder = List.of();
+        revealedHandPlayers.clear();
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
@@ -1212,7 +1247,8 @@ public final class GameTable {
         plugin.scheduler().runLater(2L, () -> {
             try {
                 startRound(plugin.getServer().getConsoleSender());
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException e) {
+                plugin.getLogger().warning("debug 自动循环启动失败: " + e.getMessage());
             }
         });
     }
@@ -1237,10 +1273,9 @@ public final class GameTable {
         botActionEpoch++;
         armTurnCountdown();
         tickActionBar();
-        Player player = onlinePlayer(currentTurn);
-        if (player != null) {
-            plugin.getPhysicalTableManager().refreshPrivateHand(this, player.getUniqueId());
-        }
+        // 【不要在这里补一次 refreshPrivateHand】：上面的 refreshPhysicalTable() 已经刷过手牌，
+        // 而 renderPrivateHand 自己从不写签名表，直接调等于绕过签名闸门无条件整手重建。
+        // 每个 bot 回合也走这条链，一轮三家下来真人手牌会被重建 4~6 次 —— 实机就是「别人出牌时我的牌也在闪」。
         updateMusicState();
     }
 
@@ -1280,21 +1315,9 @@ public final class GameTable {
         promptPlayTurn();
     }
 
-    private void openHandsForAll() {
-        for (UUID seat : seats) {
-            if (!isBot(seat)) {
-                plugin.getPhysicalTableManager().refreshPrivateHand(this, seat);
-            }
-        }
-    }
-
-    private void refreshHands() {
-        for (UUID seat : seats) {
-            if (!isBot(seat)) {
-                plugin.getPhysicalTableManager().refreshPrivateHand(this, seat);
-            }
-        }
-    }
+    // openHandsForAll() / refreshHands() 已删除：它们做的事就是逐个座位直接调
+    // refreshPrivateHand，绕开签名闸门无条件整手重建（闪烁根因）。四个调用点后面本来就都紧跟
+    // refreshPhysicalTable()，删掉后手牌照旧会刷新，只是变成一次而不是两次。
 
     private void skipIfNoResponse() {
         while (shouldAutoPassCurrentTurn()) {
@@ -1399,6 +1422,20 @@ public final class GameTable {
         return plugin.playerIdentityComponent(playerId, displayName(playerId), fallbackColor);
     }
 
+    /**
+     * 组合经验条正上方的当前出牌身份栏，固定为“当前出牌 · 玩家名”。
+     */
+    private Component currentPlayActionBarIdentity(UUID playerId) {
+        Component label = MuzTheme.orange("当前出牌");
+        String fallbackName = displayName(playerId);
+        if (isBot(playerId)) {
+            return label.append(MuzTheme.divider(" · "))
+                .append(MuzTheme.named(fallbackName, NamedTextColor.YELLOW));
+        }
+        Component name = plugin.playerNameComponent(playerId, fallbackName, NamedTextColor.YELLOW);
+        return TableStatusViews.currentPlayIdentity(name);
+    }
+
     private Component senderIdentity(CommandSender sender, NamedTextColor fallbackColor) {
         if (sender instanceof Player player) {
             return identity(player.getUniqueId(), fallbackColor);
@@ -1414,33 +1451,6 @@ public final class GameTable {
             }
         }
         return result.decoration(TextDecoration.ITALIC, false);
-    }
-
-    private Component chatOutcomeLine(List<UUID> winners, List<UUID> losers) {
-        return MuzTheme.field(
-            "胜负",
-            MuzTheme.success("胜方")
-                .append(MuzTheme.divider(" · "))
-                .append(playerListComponent(winners, NamedTextColor.WHITE))
-                .append(MuzTheme.divider(" · "))
-                .append(MuzTheme.danger("负方"))
-                .append(MuzTheme.divider(" · "))
-                .append(playerListComponent(losers, NamedTextColor.WHITE))
-        );
-    }
-
-    private Component playerListComponent(List<UUID> players, NamedTextColor color) {
-        if (players == null || players.isEmpty()) {
-            return text("无", color);
-        }
-        Component line = Component.empty();
-        for (int index = 0; index < players.size(); index++) {
-            if (index > 0) {
-                line = append(line, text("、", color));
-            }
-            line = append(line, identity(players.get(index), color));
-        }
-        return line;
     }
 
     private Player onlinePlayer(UUID playerId) {
@@ -1564,12 +1574,79 @@ public final class GameTable {
     }
 
     private void broadcastPersistentActionBar(int remainingSeconds) {
-        for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
+        for (UUID playerId : seats) {
+            Player player = Bukkit.getPlayer(playerId);
             if (player != null) {
-                player.sendActionBar(buildPersistentActionBar(player.getUniqueId(), remainingSeconds));
+                player.sendActionBar(buildPersistentActionBar(playerId, remainingSeconds));
+                sendTrickHud(player);
             }
         }
+    }
+
+    /**
+     * 刷新出牌 HUD：上排是桌上最后打出的那手牌，下排是「上一位 / 当前该出牌的人 / 下一位」三连头像。
+     *
+     * <p>【正中间那个大头像取 {@code currentTurn}，不是 {@code leadPlayer}】：这条 HUD 的用途是
+     * 「现在该谁了」，所以中间必须是待行动的人；上排的牌才是【已经打出】的那手（属于 leadPlayer）。
+     * 两者本来就不是同一个人，这也是三连头像布局的意义——当前这位在中间，前后两位在两侧。
+     *
+     * <p>【常显】：桌上没牌时只有上排空着，下排头像照旧。一轮打完就整条收起来会让 HUD 闪一下，
+     * 所以这里不再因为 {@code currentTrickCards.isEmpty()} 而 hide。
+     */
+    private void sendTrickHud(Player viewer) {
+        if (phase != GamePhase.PLAYING || currentTurn == null) {
+            // 不在出牌阶段、或者压根没有待行动的人：这条 HUD 没有意义，收起来。
+            trickHud.hide(viewer);
+            return;
+        }
+        List<TrickHudService.Seat> trio = trickHudSeats();
+        trickHud.render(viewer, trio.get(0), trio.get(1), trio.get(2), currentTrickCards);
+    }
+
+    /**
+     * 头像行那三个槽位取谁：{@code [上一位, 当前该出牌的人, 下一位]}，恒定三个元素。
+     *
+     * <p>【中间那个取 {@code currentTurn} 而不是 {@code leadPlayer}】：这条 HUD 回答的是
+     * 「现在该谁了」。两者在真实对局里通常只差一位，混用的话看着像「HUD 慢了一步」，
+     * 而所有排版几何测试都会照旧全绿 —— 所以这件事由 GameTableTrickHudSeatsTest 钉住。
+     *
+     * <p>包成一个方法而不是三次调用：这样单测能绕过 Bukkit 直接验三个槽位取谁
+     * （只依赖 seats / currentTurn 两个字段）。
+     */
+    List<TrickHudService.Seat> trickHudSeats() {
+        return List.of(
+            trickHudSeat(neighbourSeat(currentTurn, -1)),
+            trickHudSeat(currentTurn),
+            trickHudSeat(neighbourSeat(currentTurn, 1))
+        );
+    }
+
+    /** 把座位上的玩家包成 HUD 需要的槽；取不到人就返回空槽（排版那边空槽照样占宽度）。 */
+    private TrickHudService.Seat trickHudSeat(UUID playerId) {
+        if (playerId == null) {
+            return TrickHudService.Seat.EMPTY;
+        }
+        return new TrickHudService.Seat(playerId, isBot(playerId), getRole(playerId));
+    }
+
+    /**
+     * 以某个座位为基准前后找人：{@code step = -1} 是上一位，{@code +1} 是下一位。
+     *
+     * <p>不复用 {@link #nextSeat(UUID)}：那个方法只能往前走一位，要拿「上一位」得绕两圈，
+     * 绕圈在人数不足三人时会绕回自己身上，HUD 会出现同一个人占两个槽。
+     *
+     * <p>【人数不足三人直接返回 null】：宁可两侧留空也不能让同一个人重复出现——
+     * 三连头像的语义是三个不同的座位，重复会让人以为轮次算错了。
+     */
+    private UUID neighbourSeat(UUID from, int step) {
+        int size = seats.size();
+        int index = seats.indexOf(from);
+        if (index < 0 || size < PLAYER_COUNT) {
+            return null;
+        }
+        // 【必须 + size】：step 为负时 (index + step) 可能是负数，Java 的 % 会返回负数，
+        // 直接拿去索引就是 IndexOutOfBounds。加一个 size 把它抬回非负区间再取模。
+        return seats.get((index + step + size) % size);
     }
 
     private Component buildPersistentActionBar(UUID viewerId, int remainingSeconds) {
@@ -1582,6 +1659,7 @@ public final class GameTable {
             remainingSeconds,
             currentTurn == null ? 0 : getSelection(currentTurn).size(),
             playerId -> identity(playerId, NamedTextColor.YELLOW),
+            this::currentPlayActionBarIdentity,
             buildLobbyActionBar(viewerId),
             currentTurnTimeoutSeconds()
         );
@@ -1810,16 +1888,6 @@ public final class GameTable {
         }
         return line.append(MuzTheme.divider(" · "))
             .append(MuzTheme.multiplierToken(pairMultiplierSummary(false, false)));
-    }
-
-    private Component resolvedMultiplierComponent(boolean landlordWin) {
-        Component line = liveMultiplierComponent();
-        if (hasSpring(landlordWin)) {
-            line = line.append(MuzTheme.divider(" · "))
-                .append(MuzTheme.warning(springLabel(landlordWin)).append(MuzTheme.space()).append(MuzTheme.multiplierToken("x2")));
-        }
-        return line.append(MuzTheme.divider(" · "))
-            .append(MuzTheme.hotMetric("结算", MuzTheme.multiplierToken(pairMultiplierSummary(true, landlordWin))));
     }
 
     private RoundSettlementView settlementView(RoundSettlementCoordinator.RoundSettlement settlement) {
@@ -2086,7 +2154,6 @@ public final class GameTable {
 
     private void restartBidPhaseAfterRedeal() {
         dealFreshRound();
-        openHandsForAll();
         promptBidTurn();
         refreshAndRunBot();
     }
@@ -2368,7 +2435,6 @@ public final class GameTable {
             return;
         }
         promptPlayTurn();
-        refreshHands();
         refreshPhysicalTable();
         runBotActionIfNeeded();
     }
@@ -2410,7 +2476,23 @@ public final class GameTable {
 
     private SimpleBotBrain.PlayContext botPlayContext(UUID playerId) {
         List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
-        return new SimpleBotBrain.PlayContext(canLeadCurrentTrick(playerId), hand.size(), minOpponentHandCount(playerId));
+        return new SimpleBotBrain.PlayContext(
+            canLeadCurrentTrick(playerId),
+            hand.size(),
+            minOpponentHandCount(playerId),
+            isTeammateLead(playerId)
+        );
+    }
+
+    /**
+     * 当前这一手是不是队友领出的。
+     * bot 靠它决定要不要让牌：压自己人只会白送控牌。
+     */
+    private boolean isTeammateLead(UUID playerId) {
+        if (leadPlayer == null || playerId == null || Objects.equals(leadPlayer, playerId) || landlord == null) {
+            return false;
+        }
+        return !isOpponentSeat(playerId, leadPlayer);
     }
 
     private int minOpponentHandCount(UUID playerId) {

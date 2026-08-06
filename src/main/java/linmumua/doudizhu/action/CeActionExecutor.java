@@ -18,7 +18,6 @@ public final class CeActionExecutor {
     private static final String ACCENT = "#8FD4FF";
     private static final String WARM = "#F1D398";
     private static final String MUTED = "#9AA8B6";
-    private static final String SUCCESS = "#8ED8A7";
     private static final String DANGER = "#F2A1A8";
 
     private CeActionExecutor() {

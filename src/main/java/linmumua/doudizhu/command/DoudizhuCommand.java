@@ -6,6 +6,7 @@ import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.ui.MuzTheme;
+import linmumua.doudizhu.world.PhysicalTableManager;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -262,9 +263,34 @@ public final class DoudizhuCommand implements TabExecutor {
                     if (!sender.hasPermission("muz.admin")) {
                         throw new IllegalStateException("这个命令需要管理员权限。");
                     }
-                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox> ...");
+                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox|show|trace> ...");
                     if (args[1].equalsIgnoreCase("bot")) {
                         handleDebugBot(sender, args);
+                        return true;
+                    }
+                    if (args[1].equalsIgnoreCase("show")) {
+                        Player viewer = requirePlayer(sender);
+                        boolean enabled = plugin.getPhysicalTableManager().togglePickDebug(viewer);
+                        sender.sendMessage(enabled
+                            ? message("已开启手牌可点范围显示。白=牌本体(发光轮廓)，"
+                                + "青/黄=未选中/已选中的理论包络，红=实际生效的判定范围。"
+                                + "红框比白框高出的那截，就是可点区比牌面大出来的量。",
+                                NamedTextColor.GREEN)
+                            : message("已关闭手牌可点范围显示。", NamedTextColor.YELLOW));
+                        return true;
+                    }
+                    if (args[1].equalsIgnoreCase("trace")) {
+                        Player viewer = requirePlayer(sender);
+                        boolean enabled = plugin.getPhysicalTableManager().toggleHandCardTrace(viewer);
+                        sender.sendMessage(enabled
+                            ? message("已开启手牌点击链路追踪。每次点牌会在聊天栏输出 [trace] 一行，"
+                                + "按方法名和关键值定位断点。只发给你自己，控制台不写。"
+                                + "同一份内容（纯文本、带时间戳）也会写进 "
+                                + PhysicalTableManager.TRACE_LOG_RELATIVE_PATH + "，可直接取文件排查。",
+                                NamedTextColor.GREEN)
+                            : message("已关闭手牌点击链路追踪。已写入的内容都已落盘，见 "
+                                + PhysicalTableManager.TRACE_LOG_RELATIVE_PATH + "。",
+                                NamedTextColor.YELLOW));
                         return true;
                     }
                     if (args[1].equalsIgnoreCase("hitbox")) {
@@ -337,7 +363,7 @@ public final class DoudizhuCommand implements TabExecutor {
             return filter(List.of("remove"), args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("debug")) {
-            return filter(List.of("add", "remove", "bot"), args[1]);
+            return filter(List.of("add", "remove", "bot", "hitbox", "show", "trace"), args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("debug") && args[1].equalsIgnoreCase("remove")) {
             return filter(List.of("1", "5", "10", "20", "50", "all"), args[2]);
@@ -501,6 +527,11 @@ public final class DoudizhuCommand implements TabExecutor {
         if (!rays.isEmpty()) {
             sender.sendMessage(message("玩家站位射线先命中谁：", NamedTextColor.GOLD));
             rays.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
+        }
+        List<String> arbitration = plugin.getPhysicalTableManager().describeHandCardArbitration(args[2]);
+        if (!arbitration.isEmpty()) {
+            sender.sendMessage(message("手牌带上谁会抢走点击：", NamedTextColor.GOLD));
+            arbitration.forEach(line -> sender.sendMessage(message("  " + line, NamedTextColor.GRAY)));
         }
         List<String> decisions = plugin.getPhysicalTableManager().describeChairSeatDecisions(args[2]);
         if (!decisions.isEmpty()) {
@@ -701,10 +732,6 @@ public final class DoudizhuCommand implements TabExecutor {
             index++;
         }
         return String.valueOf(index);
-    }
-
-    private boolean existingNameExists(List<String> existing, String candidate) {
-        return existing.stream().anyMatch(name -> name.equalsIgnoreCase(candidate));
     }
 
     private CreateRequest parseCreateRequest(String[] args) {

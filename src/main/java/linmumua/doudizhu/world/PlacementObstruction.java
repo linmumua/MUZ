@@ -57,6 +57,7 @@ public final class PlacementObstruction {
      * @param radiusXz 水平半径
      * @param minYOffset 相对中心的最低高度
      * @param maxYOffset 相对中心的最高高度
+     * @param surfaceY 支撑面世界 Y 坐标，扫描下界不会低于它；不需要钳位时传 Double.NEGATIVE_INFINITY
      * @return 无阻挡时返回 null，否则返回带原因与被挡方块的结果
      */
     public static PlacementObstruction detect(
@@ -64,9 +65,10 @@ public final class PlacementObstruction {
         Location center,
         double radiusXz,
         double minYOffset,
-        double maxYOffset
+        double maxYOffset,
+        double surfaceY
     ) {
-        List<Location> blocked = collectBlockingBlocks(center, radiusXz, minYOffset, maxYOffset);
+        List<Location> blocked = collectBlockingBlocks(center, radiusXz, minYOffset, maxYOffset, surfaceY);
         if (blocked.isEmpty()) {
             return null;
         }
@@ -79,20 +81,29 @@ public final class PlacementObstruction {
      * @param radiusXz 水平半径
      * @param minYOffset 相对中心的最低高度
      * @param maxYOffset 相对中心的最高高度
+     * @param surfaceY 支撑面世界 Y 坐标，扫描下界不会低于它；不需要钳位时传 Double.NEGATIVE_INFINITY
      * @return 被挡方块的整格坐标列表，无阻挡时为空列表
      */
     public static List<Location> collectBlockingBlocks(
         Location center,
         double radiusXz,
         double minYOffset,
-        double maxYOffset
+        double maxYOffset,
+        double surfaceY
     ) {
         List<Location> blocked = new ArrayList<>();
         if (center == null || center.getWorld() == null) {
             return blocked;
         }
         World world = center.getWorld();
-        BoundingBox area = scanArea(center.getX(), center.getY(), center.getZ(), radiusXz, minYOffset, maxYOffset);
+        BoundingBox area = scanArea(
+            center.getX(),
+            center.getY(),
+            center.getZ(),
+            radiusXz,
+            clampedMinYOffset(center.getY(), minYOffset, surfaceY),
+            maxYOffset
+        );
         int minX = firstBlockIndex(area.getMinX());
         int maxX = lastBlockIndex(area.getMaxX());
         int minY = firstBlockIndex(area.getMinY());
@@ -114,12 +125,29 @@ public final class PlacementObstruction {
     }
 
     /**
-     * 计算检测区域覆盖的首个方块下标，包级可见以便单元测试校验边界
+     * 把扫描下界钳到支撑面，包级可见以便单元测试直接校验钳位契约。
+     *
+     * 桌椅是**放在**支撑方块上的，支撑面及其下方的空间属于地板自己，不是障碍物。
+     * 原来下界固定为中心下方 0.10 格，桌椅贴地时这 0.10 格会伸进脚下的地板方块，
+     * 于是玩家在平地上放桌反被自己站的地板判成阻挡。
+     * @param centerY 检测区域中心的世界 Y 坐标
+     * @param minYOffset 相对中心的最低高度
+     * @param surfaceY 支撑面世界 Y 坐标；传 Double.NEGATIVE_INFINITY 表示不钳位
+     * @return 钳位后的最低高度偏移，对应的世界坐标不会低于 surfaceY
+     */
+    static double clampedMinYOffset(double centerY, double minYOffset, double surfaceY) {
+        return Math.max(minYOffset, surfaceY - centerY);
+    }
+
+    /**
+     * 计算检测区域覆盖的首个方块下标，包级可见以便单元测试校验边界。
+     * 与 lastBlockIndex 对称地留出 epsilon：下界正好落在整格边界（如支撑面 65.0）时，
+     * 浮点误差可能把它算成 64.999999 而多扫下面一格，把支撑方块重新拖进阻挡判定。
      * @param min 区域某一轴的最小世界坐标
      * @return 需要扫描的首个方块下标
      */
     static int firstBlockIndex(double min) {
-        return (int) Math.floor(min);
+        return (int) Math.floor(min + 1.0E-7);
     }
 
     /**

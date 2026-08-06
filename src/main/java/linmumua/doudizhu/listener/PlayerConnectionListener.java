@@ -81,15 +81,6 @@ public final class PlayerConnectionListener implements Listener {
         return builder.toString();
     }
 
-    private void scheduleViewerSync(org.bukkit.entity.Player player, long delayTicks) {
-        plugin.scheduler().runLater(delayTicks, () -> {
-            if (!player.isOnline() || plugin.isShuttingDown()) {
-                return;
-            }
-            plugin.getPhysicalTableManager().syncViewer(player);
-        });
-    }
-
     private void scheduleViewerWarmup(org.bukkit.entity.Player player, String reason) {
         long[] delays = {5L, 30L, 80L, 160L, 320L};
         for (long delay : delays) {

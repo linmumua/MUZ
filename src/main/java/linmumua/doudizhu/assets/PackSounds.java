@@ -2,7 +2,6 @@ package linmumua.doudizhu.assets;
 
 import linmumua.doudizhu.model.CardPattern;
 import linmumua.doudizhu.model.CardRank;
-import linmumua.doudizhu.model.PatternType;
 import java.util.List;
 import java.util.Random;
 

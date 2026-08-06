@@ -49,6 +49,21 @@ class ButtonHitboxSpacingTest {
         assertTrue(gap > widest, "BIDDING 相邻按钮判定框重叠：间距=" + gap + " 框宽=" + widest);
     }
 
+    /**
+     * 叫分阶段多出"明牌"后是 5 个按钮，弧线上的间距会被压缩。
+     * 这里锁住压缩后仍不重叠，否则玩家想点"叫3分"会误触"明牌"。
+     */
+    @Test
+    void biddingButtonsWithRevealDoNotOverlap() {
+        double gap = minimumGap(new double[] {-0.96, -0.48, 0.0, 0.48, 0.96}, ARC_ANGLE_LARGE, ARC_RADIUS_LARGE);
+        float widest = Math.max(
+            PhysicalTableManager.resolveHitboxWidth("叫1分", ACTION_LABEL_SCALE, true),
+            PhysicalTableManager.resolveHitboxWidth("明牌", ACTION_LABEL_SCALE, true)
+        );
+
+        assertTrue(gap > widest, "BIDDING 五按钮判定框重叠：间距=" + gap + " 框宽=" + widest);
+    }
+
     @Test
     void doublingButtonsDoNotReceiveArtificialExtraWidth() {
         double gap = minimumGap(new double[] {-0.40, 0.40}, ARC_ANGLE_SMALL, ARC_RADIUS_SMALL);

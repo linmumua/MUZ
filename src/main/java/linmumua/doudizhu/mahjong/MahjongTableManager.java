@@ -486,20 +486,7 @@ public final class MahjongTableManager implements Listener {
     }
 
     private double sightDistance(Location eye, org.bukkit.util.Vector direction, Location center, double radius, double maxDistance) {
-        if (eye == null || center == null || eye.getWorld() == null || center.getWorld() == null) {
-            return -1.0;
-        }
-        if (!eye.getWorld().equals(center.getWorld())) {
-            return -1.0;
-        }
-        org.bukkit.util.Vector offset = center.toVector().subtract(eye.toVector());
-        double projection = offset.dot(direction);
-        if (projection < 0.0 || projection > maxDistance) {
-            return -1.0;
-        }
-        org.bukkit.util.Vector closest = eye.toVector().add(direction.clone().multiply(projection));
-        double radiusSquared = radius * radius;
-        return closest.distanceSquared(center.toVector()) <= radiusSquared ? projection : -1.0;
+        return linmumua.doudizhu.world.TableEntityGeometry.sightDistance(eye, direction, center, radius, maxDistance);
     }
 
     private Component buildCenterText(MahjongTableSession table) {
@@ -562,10 +549,7 @@ public final class MahjongTableManager implements Listener {
     }
 
     private void protect(Entity entity) {
-        entity.setInvulnerable(true);
-        entity.setPersistent(false);
-        entity.setGravity(false);
-        entity.addScoreboardTag(PROTECTED_ENTITY_TAG);
+        linmumua.doudizhu.world.TableEntityGeometry.protectEntity(entity, PROTECTED_ENTITY_TAG);
     }
 
     private ItemStack tableVisualItem() {
