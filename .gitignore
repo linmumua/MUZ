@@ -6,3 +6,11 @@ bin/
 *.iml
 *.jar
 
+# 本地工作目录，不进仓库
+backup/
+betterhud/
+reference/
+tools/
+模型/
+.narrafork/
+
