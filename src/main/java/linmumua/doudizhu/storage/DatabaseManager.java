@@ -23,9 +23,22 @@ public final class DatabaseManager {
     private static final int READ_RETRY_COUNT = 2;
     private static final int SQLITE_BUSY_TIMEOUT_MILLIS = 5000;
     private final DoudizhuPlugin plugin;
-    private SqlConfig config;
-    private boolean initialized;
-    private String status = "尚未连接";
+    /**
+     * 这三个字段全部 {@code volatile}：主线程在 {@link #initialize()} / {@link #close()}
+     * 里写，异步写库线程要读。
+     *
+     * <p>【为什么现在必须加】：写操作下沉到 {@link #runWrite} 的异步线程之后，
+     * 异步体会经 {@link #openConnection()} 读 {@code config}，也会读 {@code initialized}。
+     * 没有 volatile，JMM 不保证异步线程看得到主线程刚写入的值——可能读到
+     * {@code initialized == true} 却配 {@code config == null}，直接 NPE；
+     * 或者关服后仍看到旧的 true 而去开一条已经该关掉的连接。
+     *
+     * <p>{@code status} 也一并标上：它被 {@code /muz status} 从命令线程读，
+     * 而命令线程与主线程在 Paper 上并不总是同一个。
+     */
+    private volatile SqlConfig config;
+    private volatile boolean initialized;
+    private volatile String status = "尚未连接";
 
     public DatabaseManager(DoudizhuPlugin plugin) {
         this.plugin = plugin;
@@ -72,10 +85,50 @@ public final class DatabaseManager {
         initialized = false;
     }
 
+    /**
+     * 把一次写库丢到异步线程，关服时退化成同步。
+     *
+     * <p>【为什么必须有同步回退】：Bukkit 在插件 disable 之后再调 runTaskAsynchronously
+     * 会抛 IllegalPluginAccessException；而且已排队未执行的异步任务会被直接取消——
+     * 关服那一刻提交的写库就丢了。所以关服路径上宁可阻塞主线程也要把数据落下去，
+     * 反正那时已经不在乎卡顿了。
+     *
+     * <p>【为什么写操作可以 fire-and-forget】：upsertTable / deleteTable / insertMatch
+     * 三个方法的返回值在所有调用点都被丢弃（insertMatch 虽然返回 matchId，但
+     * DoudizhuPlugin:864 没有接），没有任何调用方依赖"写完了"这个时刻，
+     * 因此不需要回调，也不会引入时序问题。
+     *
+     * @param what 失败时写进日志的操作名
+     */
+    private void runWrite(String what, SqlWrite write) {
+        Runnable body = () -> {
+            try {
+                write.run();
+            } catch (SQLException exception) {
+                // 异步线程里的异常不会自动进控制台，必须自己记，否则数据静默丢失。
+                plugin.getLogger().warning(what + "失败: " + exception.getMessage());
+            }
+        };
+        if (plugin.isShuttingDown() || !plugin.isEnabled()) {
+            body.run();
+            return;
+        }
+        plugin.scheduler().runAsync(body);
+    }
+
+    /** 允许抛 SQLException 的写库动作，交给 {@link #runWrite} 统一兜异常与选线程。 */
+    private interface SqlWrite {
+        void run() throws SQLException;
+    }
+
     public void upsertTable(PersistedTableRecord record) {
         if (!initialized || record == null) {
             return;
         }
+        runWrite("保存牌桌持久化数据", () -> upsertTableSync(record));
+    }
+
+    private void upsertTableSync(PersistedTableRecord record) throws SQLException {
         String sql = """
             INSERT INTO persisted_tables
             (game_type, table_name, room_level, world_name, x, y, z, yaw, max_players, owner_uuid, owner_name, updated_at)
@@ -104,8 +157,6 @@ public final class DatabaseManager {
                 insert.executeUpdate();
             }
             connection.commit();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("保存牌桌持久化数据失败: " + exception.getMessage());
         }
     }
 
@@ -113,13 +164,15 @@ public final class DatabaseManager {
         if (!initialized || tableName == null || gameType == null) {
             return;
         }
+        runWrite("删除牌桌持久化数据", () -> deleteTableSync(gameType, tableName));
+    }
+
+    private void deleteTableSync(String gameType, String tableName) throws SQLException {
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("DELETE FROM persisted_tables WHERE game_type = ? AND table_name = ?")) {
             statement.setString(1, gameType);
             statement.setString(2, tableName);
             statement.executeUpdate();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("删除牌桌持久化数据失败: " + exception.getMessage());
         }
     }
 
@@ -155,10 +208,22 @@ public final class DatabaseManager {
         });
     }
 
-    public long insertMatch(MatchRecord match, List<MatchParticipantRecord> participants) {
+    /**
+     * 写入一局战绩。
+     *
+     * <p>【为什么返回 void 而不是 matchId】：这个方法改成异步之后，matchId 要到异步线程
+     * 才拿得到，同步返回一个值只能是假的。原先唯一的调用方（DoudizhuPlugin:864）本来
+     * 也没接返回值，所以直接把签名收成 void，避免留一个"永远返回 -1"的骗人接口。
+     * 将来真需要 matchId，应该加一个带回调的重载，而不是把这个改回同步。
+     */
+    public void insertMatch(MatchRecord match, List<MatchParticipantRecord> participants) {
         if (!initialized || match == null) {
-            return -1L;
+            return;
         }
+        runWrite("写入战绩", () -> insertMatchSync(match, participants));
+    }
+
+    private void insertMatchSync(MatchRecord match, List<MatchParticipantRecord> participants) throws SQLException {
         String sql = """
             INSERT INTO match_records
             (game_type, table_name, room_level, outcome_label, occurred_at, world_name, x, y, z)
@@ -186,10 +251,6 @@ public final class DatabaseManager {
                 insertParticipants(connection, matchId, participants);
             }
             connection.commit();
-            return matchId;
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("写入战绩失败: " + exception.getMessage());
-            return -1L;
         }
     }
 
@@ -508,7 +569,7 @@ public final class DatabaseManager {
         private static SqlConfig fromConfig(DoudizhuPlugin plugin, MuzYamlConfig configuration) {
             String type = configuration.getString("storage.sql.type", "sqlite").trim().toLowerCase(Locale.ROOT);
             SqlType sqlType = "mysql".equals(type) ? SqlType.MYSQL : SqlType.SQLITE;
-            File sqliteFile = new File(plugin.getDataFolder(), configuration.getString("storage.sql.sqlite.file", "storage/mumu-data.db"));
+            File sqliteFile = new File(plugin.getDataFolder(), configuration.getString("storage.sql.sqlite.file", "storage/data.db"));
             return new SqlConfig(
                 sqlType,
                 sqliteFile,

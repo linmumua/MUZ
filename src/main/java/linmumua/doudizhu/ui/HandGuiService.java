@@ -490,7 +490,7 @@ public final class HandGuiService {
     }
 
     public void openAdminSelectionSoundEditor(Player player, int profileIndex) {
-        int normalized = Math.max(0, Math.min(3, profileIndex));
+        int normalized = Math.clamp(profileIndex, 0, 3);
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_SELECTION_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_SELECTION_SOUND, normalized);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 选牌音效方案 " + (normalized + 1));
         holder.setInventory(inventory);
@@ -542,7 +542,7 @@ public final class HandGuiService {
     }
 
     public void openAdminPlayActionEditor(Player player, DoudizhuPlugin.PlayActionKind kind, int profileIndex) {
-        int normalized = Math.max(0, Math.min(3, profileIndex));
+        int normalized = Math.clamp(profileIndex, 0, 3);
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_PLAY_ACTION_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_PLAY_ACTION, kind, normalized);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | " + kind.label() + " 动作 " + (normalized + 1));
         holder.setInventory(inventory);
@@ -921,7 +921,7 @@ public final class HandGuiService {
     }
 
     private int clampRgb(int value) {
-        return Math.max(0, Math.min(255, value));
+        return Math.clamp(value, 0, 255);
     }
 
     private DoudizhuPlugin.OptionProfile parseProfileInput(String rawInput, boolean soundProfile) {

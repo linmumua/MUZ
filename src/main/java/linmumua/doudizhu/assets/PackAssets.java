@@ -104,6 +104,191 @@ public final class PackAssets {
     public static final String CARD_GLYPH_FONT = "minecraft:muz_cards";
     public static final String AVATAR_PIXEL_FONT = "minecraft:muz_avatar";
     public static final String BOT_AVATAR_FONT = "minecraft:muz_bot_avatar";
+    public static final String AVATAR_CROWN_FONT = "minecraft:muz_avatar_crown";
+
+    /**
+     * 记牌行字形族的基础字体名。
+     *
+     * <p>一档 50 个码位，从 {@link #COUNTER_GLYPH_CODEPOINT_START}（{@code 0xE900}）起，
+     * 共 201 档。一张字体从 0xE900 起能装 {@code (0xFFFD - 0xE900 + 1) / 50 = 117} 档，
+     * 201 档切成 2 张（{@code muz_counter}、{@code muz_counter_2}），末码位 {@code 0xFFD9}，
+     * 名字规则同其他族。
+     */
+    public static final String COUNTER_GLYPH_FONT = "minecraft:muz_counter";
+
+    /**
+     * 记牌行字形族的码位起点。
+     *
+     * <p>与构建期 {@code counterGlyphCodepointStart = 0xE900} 保持一致；
+     * {@link #counterGlyphFont} 和 {@link #counterGlyphChar} 用它做偏移基准。
+     */
+    public static final int COUNTER_GLYPH_CODEPOINT_START = 0xE900;
+
+    /**
+     * 底部物品栏 HUD 字形族的字体名与码位。
+     *
+     * <p>单张静态字形（无偏移档），用于在 ActionBar 中渲染 5 个物品槽背景，
+     * 通过负 ascent 把贴图压到屏幕底部物品栏区域显示。
+     *
+     * <p>必须与 build.gradle.kts 里的 {@code hotbarHudFont} 和 {@code hotbarHudCodepoint}
+     * 保持一致。选 {@code 0xEF00} 是因为 PUA 区 0xE000-0xF8FF 里前段被牌面、头像、
+     * 记牌器占据，后段预留给 CraftEngine 内置配置，{@code 0xEF00} 处于空隙且不与
+     * 任何已知字形冲突。
+     */
+    public static final String HOTBAR_HUD_FONT = "minecraft:muz_hotbar";
+
+    /** 底部物品栏字形码位（对应贴图文件 {@code muz:font/hotbar_slots.png}）。 */
+    public static final int HOTBAR_HUD_CODEPOINT = 0xEF00;
+
+    /** PLAYING 阶段中央显示的彩色调试槽数；必须与构建期绘图常量一致。 */
+    public static final int HOTBAR_HUD_SLOT_COUNT = 5;
+
+    /**
+     * 底部物品栏遮罩字形的贴图宽度，固定为原版 9 槽 hotbar 的 182px。
+     *
+     * <p>中央 5 槽占 108px（5 × 20px + 4 × 2px），左右各 37px 为不透明深色遮罩。
+     * 该遮罩只由 PLAYING 阶段 ActionBar 推送，不修改 minecraft 原版 hotbar sprite。
+     */
+    public static final int HOTBAR_HUD_GLYPH_WIDTH = 182;
+
+    /** 底部物品栏遮罩字形的原生高度；CraftEngine {@code height} 必须恒等于此值以保持 1:1。 */
+    public static final int HOTBAR_HUD_GLYPH_HEIGHT = 22;
+
+    /**
+     * 底部物品栏字形的光标前进量（183px）。
+     *
+     * <p>Minecraft 位图字形在 182px 渲染宽度之外额外加 1 像素字间距（与牌面字形同理），
+     * 所以前进量 = 贴图宽 + 1。{@link HotbarHudService} 用 CraftEngine 负空格把这个
+     * 前进量抵消，使文本有效宽度 = 叠加消息宽度，客户端按叠加消息居中。
+     */
+    public static final int HOTBAR_HUD_GLYPH_ADVANCE = HOTBAR_HUD_GLYPH_WIDTH + 1;
+
+    /**
+     * 调试覆盖层的底部物品栏字形码位。
+     *
+     * <p>与 {@link #HOTBAR_HUD_CODEPOINT}（0xEF00）【同字体、同贴图】，唯一差别是
+     * ascent 的来源：
+     * <ul>
+     *   <li>0xEF00 的 ascent 由 build.gradle.kts 烘焙成字面量 -128，进了 jar 就固定；</li>
+     *   <li>0xEF01 的 ascent 由 {@code HotbarDebugOverlayWriter} 在运行期写出，
+     *       等于 {@code -128 - hotbar-hud.offset-y}，所以可以连续调整。</li>
+     * </ul>
+     *
+     * <p>【为什么两个码位都要保留】：生产环境不能依赖运行期写出的文件（本类的契约是
+     * 「插件侧靠枚举复算，不读资源包」），所以必须有一个纯 bundle 的兜底码位；
+     * 而连续可拖的 ascent 又只能来自运行期生成的 YAML。两者职责不重叠，
+     * 共用同一张 {@code muz:font/hotbar_slots.png} 与同一个字体族，已是最小形态。
+     *
+     * <p>【必须与 {@code HotbarDebugOverlayWriter} 生成侧严格对齐】：那边写
+     * {@code char: \uef01}、{@code font: minecraft:muz_hotbar}、{@code height: 22}，
+     * 与这里的码位、{@link #HOTBAR_HUD_FONT}、贴图原生高一一对应。
+     * 任意一侧改了另一侧不改，游戏内就是豆腐块或位置突变。
+     */
+    public static final int HOTBAR_HUD_DEBUG_CODEPOINT = 0xEF01;
+
+    /**
+     * 取底部物品栏字形的 MiniMessage 片段（已包含字体标签）。
+     *
+     * <p>返回 {@code <font:minecraft:muz_hotbar>\uef00</font>}，可直接拼入
+     * MiniMessage 字符串中，由 {@link HotbarHudService} 负责后续合成。
+     */
+    public static String hotbarHudGlyphText() {
+        return "<font:" + HOTBAR_HUD_FONT + ">"
+            + new String(Character.toChars(HOTBAR_HUD_CODEPOINT))
+            + "</font>";
+    }
+
+    /**
+     * 取调试覆盖层字形的 MiniMessage 片段（已包含字体标签）。
+     *
+     * <p>返回 {@code <font:minecraft:muz_hotbar>\uef01</font>}。只有在 Debug Web
+     * 生成过覆盖层资源、且 CraftEngine 重新打包下发之后，客户端才认得这个码位；
+     * 覆盖层缺失时客户端会显示豆腐块，所以调用方必须先确认覆盖层就绪
+     * （{@link HotbarHudService} 用 Debug Web 的接管状态做这个判断）。
+     */
+    public static String hotbarHudDebugGlyphText() {
+        return "<font:" + HOTBAR_HUD_FONT + ">"
+            + new String(Character.toChars(HOTBAR_HUD_DEBUG_CODEPOINT))
+            + "</font>";
+    }
+
+    /**
+     * 王冠族的码位起点。
+     *
+     * <p>用 {@code 0xE000}（PUA 最起头）不怕和牌族的 {@code 0xE100} 撞：各族有独立字体，
+     * 码位空间互不相干。起点越低单张字体能装的档越多 —— 王冠一档只占 30 个码位，
+     * 从 0xE000 起一张字体就能装下全部 201 档，不用切分。
+     */
+    public static final int AVATAR_CROWN_CODEPOINT_START = 0xE000;
+
+    /**
+     * 一张字体能装几档。
+     *
+     * <p>【容量按各族自己的起点算】：每张切出来的字体都从该族的 {@code codepointStart}
+     * 重新起算，能装的档数是 {@code (MAX_GLYPH_CODEPOINT - codepointStart + 1) / 每档码位数}。
+     * 牌族从 0xE100 起是 144 档/张，头像族从 0xE800 起是 40 档/张。
+     * 若按 PUA 起点 0xE000 的容量算，装满一张就会冲出 BMP，4 位 unicode 转义会错位。
+     *
+     * <p>【切分单位是「档」不是「条」】：同一档内的 55 张牌必须落在同一张字体里，
+     * 否则一行 HUD 里的牌会分散在两张字体上，得套两层 {@code <font>} 标签才画得完。
+     */
+    private static int tiersPerFont(int glyphsPerTier, int codepointStart) {
+        return (PackTiers.MAX_GLYPH_CODEPOINT - codepointStart + 1) / glyphsPerTier;
+    }
+
+    /** 该档在其所属字体内的起始码位。与构建期的 {@code tierFontSlot} 是同一个算式。 */
+    private static int tierCodepointBase(int tier, int glyphsPerTier, int codepointStart) {
+        int tierInFont = tier % tiersPerFont(glyphsPerTier, codepointStart);
+        return codepointStart + tierInFont * glyphsPerTier;
+    }
+
+    /**
+     * 该档落在第几张字体上。字体名规则：第 0 张沿用原名，之后带 {@code _2} / {@code _3} 后缀。
+     *
+     * <p>与构建期的 {@code fontNameOf} 必须逐字一致，否则 {@code <font>} 标签指向一张
+     * 不存在的字体，整段变豆腐块。
+     */
+    private static String fontNameOf(String baseFont, int tier, int glyphsPerTier, int codepointStart) {
+        int fontIndex = tier / tiersPerFont(glyphsPerTier, codepointStart);
+        return fontIndex == 0 ? baseFont : baseFont + "_" + (fontIndex + 1);
+    }
+
+    /**
+     * 牌面字形在这一档该用哪张字体。
+     *
+     * <p>档位放开后牌族有 1025 档、56375 条，一张字体装不下（144 档/张），切成 8 张。
+     * 调用方【必须用这个方法取字体名】，不能再写死 {@link #CARD_GLYPH_FONT} ——
+     * 那只是第 0 张的名字，深档的牌在别的字体上。
+     */
+    public static String cardGlyphFont(int heightTier, int downOffsetTier) {
+        int tier = heightTier * cardGlyphDownOffsetTierCount() + downOffsetTier;
+        return fontNameOf(CARD_GLYPH_FONT, tier, CARD_GLYPH_INDEX.size(), CARD_GLYPH_CODEPOINT_START);
+    }
+
+    /** 头像字形在这一档该用哪张字体。头像族 201 档、40 档/张，切成 6 张。 */
+    public static String avatarPixelFont(int downOffsetTier) {
+        return fontNameOf(AVATAR_PIXEL_FONT, downOffsetTier, avatarGlyphsPerTier(), AVATAR_PIXEL_CODEPOINT_START);
+    }
+
+    /** 王冠字形的字体。一档只占 30 个码位，201 档单张字体装得下，恒定返回基名。 */
+    public static String avatarCrownFont(int downOffsetTier) {
+        return fontNameOf(AVATAR_CROWN_FONT, downOffsetTier, crownGlyphsPerTier(), AVATAR_CROWN_CODEPOINT_START);
+    }
+
+    /**
+     * 记牌行字形在这一档该用哪张字体。
+     *
+     * <p>记牌族复用【头像的偏移档表】（{@link #avatarDownOffsetAt}）—— 记牌行和头像行
+     * 在同一片 HUD 上按同一套锚点下沉，共用一张表才不会上下错开。
+     *
+     * <p>一档 50 个码位、117 档/张，201 档切成 2 张。调用方【必须用这个方法取字体名】，
+     * 不能写死 {@link #COUNTER_GLYPH_FONT} —— 那只是第 0 张的名字。
+     */
+    public static String counterGlyphFont(int downOffsetTier) {
+        return fontNameOf(
+            COUNTER_GLYPH_FONT, downOffsetTier,
+            PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START);
+    }
 
     public static final int CARD_GLYPH_CODEPOINT_START = 0xE100;
 
@@ -131,14 +316,25 @@ public final class PackAssets {
      * 写在资源包的 images.yml 里，是构建期固化的整数，运行时改不了。所以每一档都得在
      * 构建期预生成一整套 55 个字形，config 只能在这些档里挑一个。
      *
-     * <p>索引 0 必须是 53（即 {@link #CARD_GLYPH_WIDTH} 对应的 1:1 原始像素）：默认档的
-     * 码位由此落在 {@link #CARD_GLYPH_CODEPOINT_START} 起的第一段，和「没有档位」的旧版
-     * 完全一致，老资源包与现有断言都不用跟着挪。
+     * <p>【表的顺序不承载语义】：默认牌面高是显式常量 {@link #DEFAULT_CARD_HEIGHT}，
+     * 不再取「索引 0」。早先索引 0 兼任默认值，档位改成按范围生成后索引 0 会变成区间端点
+     * （降序时是 56），默认牌面高会静默改掉 —— 所以把默认值从表里解耦了。
      *
-     * <p>全部不超过 53 是有意的：牌贴图本身就是 35x53，放大只会得到插值模糊的牌，
-     * 而且满手 20 张放大后会横出屏幕。
+     * <p>表由构建期按 {@code 32..56} 生成（降序），见 {@link PackTiers#CARD_HEIGHT_TIERS}。
+     * 上限给到 56 而不是停在贴图原生的 53：放大确有插值模糊，但服主要不要放大是他的事，
+     * 不该由这里替他决定。
      */
-    private static final int[] CARD_GLYPH_HEIGHT_TIERS = {53, 48, 42, 37, 32};
+    private static final int[] CARD_GLYPH_HEIGHT_TIERS = PackTiers.CARD_HEIGHT_TIERS;
+
+    /**
+     * 牌面高的默认值，{@code config.yml} 读不到 {@code card-height} 时用它。
+     *
+     * <p>53 是牌贴图正面的原生像素高（35x53），1:1 不插值。这个值【必须落在
+     * {@link #CARD_GLYPH_HEIGHT_TIERS} 里】，否则默认配置一启动就要被吸附成别的高度。
+     * 当前构建参数（32..56 步长 1）覆盖了它；若把 {@code muzCardHeightStep} 调成偶数步长，
+     * 53 就会落到网格外 —— 那时这个常量也要跟着改。
+     */
+    public static final int DEFAULT_CARD_HEIGHT = 53;
 
     /**
      * 牌面字形的向下偏移档：把牌从 BossBar 那一行往屏幕下方推多少像素。
@@ -147,50 +343,34 @@ public final class PackAssets {
      * ascent 减小就行，能复用同一张贴图，向上则要求 height 跟着涨（Minecraft 限制
      * ascent 不得大于 height），那等于把牌拉伸，不是纯位移。
      *
-     * <p>索引 0 必须是 0，理由同缩放档：默认档码位保持不变。
+     * <p>索引 0 必须是 0：不带档位的那些重载走的就是档 0（桌边座位牌、Title），
+     * 它们不能跟着 HUD 往下沉。构建期按 {@code 0..80} 步长 2 生成，首项天然是 0。
      */
-    private static final int[] CARD_GLYPH_DOWN_OFFSET_TIERS = {
-        0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 50, 52
-    };
+    private static final int[] CARD_GLYPH_DOWN_OFFSET_TIERS = PackTiers.CARD_DOWN_OFFSET_TIERS;
 
     /**
      * 头像行（与跟着头像走的 bot 兜底图标）自己的向下偏移档，与牌那张表【完全独立】。
      *
      * <p>为什么必须是两张表而不是共用一张：两行 HUD 里头像行永远比牌行深一整个头像字形盒
-     * （见 {@link #avatarRowDownOffset}），牌行的取值区间是 0..52、头像行是 40..300，
-     * 两个区间几乎不重叠。共用一张表时每一档都要无差别生成三族字形（牌 275 + 头像 70 +
-     * bot 3），于是牌永远用不到深档、头像永远用不到浅档，约一半条目是纯废条目。
-     * 拆开之后各族只生成自己够用的档，images.yml 反而变小。
+     * （见 {@link #avatarRowDownOffset}），牌行区间是 0..80、头像行要到 400，
+     * 两个区间差得远。共用一张表时每一档都要无差别生成四族字形，牌永远用不到深档，
+     * 约一半条目是纯废条目。拆开之后各族只生成自己够用的档。
      *
      * <p>索引 0 必须是 0，和牌表同理：{@link #avatarPixelChar(int, int)} 与
      * {@link #botAvatarChar(PlayerRole)} 这两个不带档位的重载走的就是档 0，
      * 桌边座位牌和 Title 用的是它们 —— 那些地方不能跟着 HUD 一起往下沉。
      *
-     * <p>为什么步长取 10：头像盒高恒等于 {@code 10 * avatar-scale}，scale 每加一档盒高就多 10。
-     * 步长取 10 时，同一个头像位置能被多组 (offset-down, avatar-scale) 命中，
-     * 覆盖率比等分成别的步长高得多。
+     * <p>构建期按 {@code 0..400} 步长 2 生成（见 {@link PackTiers#AVATAR_DOWN_OFFSET_TIERS}）。
+     * 上限 400 覆盖最坏组合：牌行最深 80 加最大头像盒高 192（{@code 12 * 16}）是 272，留了余量。
+     * 步长 2 而不是 1 是条目数的折中 —— 吸附误差最多 1 像素，肉眼看不出；步长 1 会让
+     * 头像族条目数翻倍。想要精确到 1 像素就用 {@code -PmuzAvatarOffsetStep=1} 重新构建。
      *
-     * <p>下限 40 来自「不重叠」：牌行合法区间 0..52、scale 合法区间 4..10（盒高 40..100），
-     * 两者相加的最小可用值就是 40，比它更浅的档任何组合都用不到。
-     *
-     * <p>上限 300 是【纯观感取值，不是技术极限】：字形几何是 {@code ascent = height - offset}，
-     * Minecraft 只要求 {@code ascent <= height}，而 ascent 允许为负，所以往下理论上没有硬上限。
-     * 这个上限被抬过两次 —— 先是 150（只覆盖到「两行紧贴」），再是 200，服主两次都很快顶到头。
-     * 300 能在默认 scale=6 下把头像行压到牌行下方约 190 像素，留了足够余量；
-     * 每档的代价是 70 条 images.yml 条目（{@code (10-4+1) * 10}）加 3 条 bot 图标条目。
-     *
-     * <p>真正的天花板是【码位空间】而不是几何：头像族从 {@code 0xE800} 起、每档 70 个码位，
-     * 28 档占到 {@code 0xEFA7}，PUA 到 {@code 0xF8FF} 为止还剩两千多个位置。
-     * 三族各有独立字体（{@code muz_avatar} / {@code muz_cards} / {@code muz_bot_avatar}），
-     * 所以头像族的码位区间和牌族重叠也无害 —— 各自一套空间。
-     *
-     * <p>这张表必须与 build.gradle.kts 的 {@code avatarDownOffsetTiers} 逐项一致，
-     * 否则头像与 bot 图标的码位会整体平移，玩家看到的是错位或豆腐块。
+     * <p>浅档里有一部分【任何组合都必然与牌行重叠】：不重叠下限是
+     * {@code offset-down + 12 * avatar-scale}，scale 最小是 2，所以 {@code 0..22}
+     * 那 12 档配上去一定会报重叠警告。仍然生成它们是因为「不该由这里替服主决定」，
+     * 代价只有 2196 条（占 2.4%）。
      */
-    private static final int[] AVATAR_DOWN_OFFSET_TIERS = {
-        0, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150,
-        160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300
-    };
+    private static final int[] AVATAR_DOWN_OFFSET_TIERS = PackTiers.AVATAR_DOWN_OFFSET_TIERS;
 
     /** 牌贴图文件名 -> 字形下标。键包含 54 张牌加牌背，共 55 个。 */
     private static final Map<String, Integer> CARD_GLYPH_INDEX = buildCardGlyphIndex();
@@ -268,32 +448,106 @@ public final class PackAssets {
      * <p>「两行」不是真的换行，是靠字形 ascent 把整个字形盒沉到基线下方（BossBar 标题只有一行）。
      * 头像行要正好落在牌行下方，就得比牌行再深一整个头像字形盒的高度。
      *
-     * <p>【必须用 {@link #AVATAR_OUTLINED_PIXELS}(10) 而不是 {@link #AVATAR_HEAD_PIXELS}(8)】：
-     * 字形盒高由构建期的 {@code (avatarOutlinedPixels - row) * scale} 决定，描边那两行永远参与
-     * 字形度量。运行期关掉 avatar-outline 只是不画描边像素，盒子照样占 10 行的位置。
-     * 按 8 算会少让 2*scale 像素，两行直接压在一起。
+     * <p>【必须用 {@link #AVATAR_ROW_TOTAL_PIXELS}(12) 而不是 8 或 10】：
+     * 字形盒高由构建期的 {@code (行数 - row) * scale} 决定，描边那两行永远参与字形度量
+     * （运行期关掉 avatar-outline 只是不画描边像素，盒子照样占位），而王冠还要再往上
+     * 凸出 2 行。按 10 算会漏掉王冠那 {@code 2 * scale} 像素 —— 地主的王冠会压进牌行；
+     * 按 8 算连描边都漏，两行直接压在一起。
      *
      * <p>返回的是【需要的像素量】，不是档位。头像行档位现在由 config 的
      * {@code trick-hud.avatar-offset-down} 直接给（查 {@link #avatarDownOffsetTierOf}），
      * 这个算式的用途变成两件事：给那个键推默认值，以及判断服主配出来的两行会不会重叠。
      */
     public static int avatarRowDownOffset(int cardDownOffset, int avatarScale) {
-        return cardDownOffset + AVATAR_OUTLINED_PIXELS * avatarScale;
+        return cardDownOffset + AVATAR_ROW_TOTAL_PIXELS * avatarScale;
     }
 
-    /** 档位取值列表，供 config 越界时把「合法值有哪些」直接写进警告里。 */
-    public static String cardGlyphHeightTierList() {
-        return join(CARD_GLYPH_HEIGHT_TIERS);
+    /**
+     * 把任意整数吸附到最近的档位，返回那一档的【档序号】。
+     *
+     * <p>为什么需要吸附而不是拒绝：偏移量做不到运行期任意取值（每个值都得有预生成字形），
+     * 但服主没有义务背下几百个合法值。放开范围后档位很密（步长 2），就近吸附的误差最多
+     * 1 像素，肉眼看不出来 —— 与其为 111 报一条「合法值是 0,2,4,...」的天书警告，
+     * 不如静默用 110 或 112。
+     *
+     * <p>越界的处理【不同于范围内】：范围内静默吸附，越界要警告 —— 服主配 500 想要的
+     * 显然不是 400，钳到边界必须让他知道。越界判定由调用方做（比较 {@code value} 与
+     * 表的首末项），这个方法只负责找最近的。
+     *
+     * <p>【并列时取档位值较小的那一档】，例如步长 2 下的 111 取 110。这里显式比较档位值
+     * 而不是靠遍历顺序：{@link #CARD_GLYPH_HEIGHT_TIERS} 是降序、两张偏移表是升序，
+     * 靠「先遇到的赢」会让同一条规则在降序表上变成「取较大」。步长为 1 时并列不可能发生，
+     * 但 {@code muzCardHeightStep} 是对外可调的构建参数，步长变 2 后 55 就会并列。
+     */
+    private static int nearestTier(int[] tiers, int value) {
+        int best = 0;
+        int bestDistance = Math.abs(tiers[0] - value);
+        for (int index = 1; index < tiers.length; index++) {
+            int distance = Math.abs(tiers[index] - value);
+            if (distance < bestDistance || (distance == bestDistance && tiers[index] < tiers[best])) {
+                best = index;
+                bestDistance = distance;
+            }
+        }
+        return best;
     }
 
-    /** 同上，牌行向下偏移档。 */
-    public static String cardGlyphDownOffsetTierList() {
-        return join(CARD_GLYPH_DOWN_OFFSET_TIERS);
+    /** 把 {@code card-height} 吸附到最近的牌面高档，返回档序号。 */
+    public static int nearestCardGlyphHeightTier(int height) {
+        return nearestTier(CARD_GLYPH_HEIGHT_TIERS, height);
     }
 
-    /** 同上，头像行向下偏移档。 */
-    public static String avatarDownOffsetTierList() {
-        return join(AVATAR_DOWN_OFFSET_TIERS);
+    /** 把 {@code offset-down} 吸附到最近的牌行偏移档，返回档序号。 */
+    public static int nearestCardGlyphDownOffsetTier(int downOffset) {
+        return nearestTier(CARD_GLYPH_DOWN_OFFSET_TIERS, downOffset);
+    }
+
+    /** 把 {@code avatar-offset-down} 吸附到最近的头像行偏移档，返回档序号。 */
+    public static int nearestAvatarDownOffsetTier(int downOffset) {
+        return nearestTier(AVATAR_DOWN_OFFSET_TIERS, downOffset);
+    }
+
+    /** 牌面高的合法区间，警告文案用。 */
+    public static int cardGlyphHeightMin() {
+        return min(CARD_GLYPH_HEIGHT_TIERS);
+    }
+
+    public static int cardGlyphHeightMax() {
+        return max(CARD_GLYPH_HEIGHT_TIERS);
+    }
+
+    /** 牌行偏移的合法区间。 */
+    public static int cardGlyphDownOffsetMin() {
+        return min(CARD_GLYPH_DOWN_OFFSET_TIERS);
+    }
+
+    public static int cardGlyphDownOffsetMax() {
+        return max(CARD_GLYPH_DOWN_OFFSET_TIERS);
+    }
+
+    /** 头像行偏移的合法区间。 */
+    public static int avatarDownOffsetMin() {
+        return min(AVATAR_DOWN_OFFSET_TIERS);
+    }
+
+    public static int avatarDownOffsetMax() {
+        return max(AVATAR_DOWN_OFFSET_TIERS);
+    }
+
+    private static int min(int[] values) {
+        int result = values[0];
+        for (int value : values) {
+            result = Math.min(result, value);
+        }
+        return result;
+    }
+
+    private static int max(int[] values) {
+        int result = values[0];
+        for (int value : values) {
+            result = Math.max(result, value);
+        }
+        return result;
     }
 
     private static int indexOf(int[] values, int value) {
@@ -496,7 +750,7 @@ public final class PackAssets {
         cardGlyphDownOffsetAt(downOffsetTier);
         int tier = heightTier * cardGlyphDownOffsetTierCount() + downOffsetTier;
         return new String(Character.toChars(
-            CARD_GLYPH_CODEPOINT_START + tier * CARD_GLYPH_INDEX.size() + index));
+            tierCodepointBase(tier, CARD_GLYPH_INDEX.size(), CARD_GLYPH_CODEPOINT_START) + index));
     }
 
     /**
@@ -521,9 +775,14 @@ public final class PackAssets {
      */
     public static final int AVATAR_PIXEL_CODEPOINT_START = 0xE800;
 
-    /** 头像放大倍数的可选范围，资源包只预生成了这个区间内的方块字形。 */
-    public static final int AVATAR_PIXEL_MIN_SCALE = 4;
-    public static final int AVATAR_PIXEL_MAX_SCALE = 10;
+    /**
+     * 头像放大倍数的可选范围，资源包只预生成了这个区间内的方块字形。
+     *
+     * <p>与偏移档不同，scale 是【连续整数】不需要吸附：2..16 每个值都有字形。
+     * 所以校验它只是范围检查（越界钳到边界），不存在「就近吸附」。
+     */
+    public static final int AVATAR_PIXEL_MIN_SCALE = PackTiers.AVATAR_MIN_SCALE;
+    public static final int AVATAR_PIXEL_MAX_SCALE = PackTiers.AVATAR_MAX_SCALE;
 
     /** 皮肤头部是 8x8 像素，头像就是 8 行 x 8 列个方块。 */
     public static final int AVATAR_HEAD_PIXELS = 8;
@@ -535,6 +794,25 @@ public final class PackAssets {
      * 这个值就是生成与校验的上界。
      */
     public static final int AVATAR_OUTLINED_PIXELS = AVATAR_HEAD_PIXELS + 2;
+
+    /**
+     * 王冠占几行，画在头像盒【上方】。
+     *
+     * <p>王冠不再盖住头像顶部两行，而是向上凸出：底边锚点与头像完全相同，主体落在
+     * 头像 row 0 之上。这样地主的脸不会被王冠遮掉，而且王冠与描边不再互斥
+     * （先戴冠再描边，描边会连王冠一起勾出轮廓）。
+     */
+    public static final int AVATAR_CROWN_PIXELS = 2;
+
+    /**
+     * 头像行整体占多高（含凸出的王冠），单位是「像素格」。
+     *
+     * <p>【不重叠判定必须用这个，不能用 {@link #AVATAR_OUTLINED_PIXELS}】：王冠比头像盒
+     * 顶还高 {@code 2 * scale}，按 10 算会漏报，地主的王冠会压进牌行且不报警。
+     * {@link #AVATAR_OUTLINED_PIXELS} 的语义不变，仍是「描边后头像本身多少行」，
+     * 生成字形与校验行号还用它。
+     */
+    public static final int AVATAR_ROW_TOTAL_PIXELS = AVATAR_OUTLINED_PIXELS + AVATAR_CROWN_PIXELS;
 
     /**
      * 取头像第 {@code row} 行用的方块字形字符。
@@ -576,15 +854,107 @@ public final class PackAssets {
         }
         // 同时承担偏移档的越界校验，查的是头像自己那张表。
         avatarDownOffsetAt(downOffsetTier);
-        int perTier = (AVATAR_PIXEL_MAX_SCALE - AVATAR_PIXEL_MIN_SCALE + 1) * AVATAR_OUTLINED_PIXELS;
         int index = (scale - AVATAR_PIXEL_MIN_SCALE) * AVATAR_OUTLINED_PIXELS + row;
         return new String(Character.toChars(
-            AVATAR_PIXEL_CODEPOINT_START + downOffsetTier * perTier + index));
+            tierCodepointBase(downOffsetTier, avatarGlyphsPerTier(), AVATAR_PIXEL_CODEPOINT_START) + index));
     }
 
     /** 头像方块字形在 images.yml 里的条目名，构建侧与插件侧必须算出同一个。 */
     public static String avatarPixelAssetName(int scale, int row, int downOffsetTier) {
         return "avatar_px_" + scale + "_" + row + "_d" + avatarDownOffsetAt(downOffsetTier);
+    }
+
+    /** 头像族一档占几个码位：每个 scale 一整列描边行。 */
+    private static int avatarGlyphsPerTier() {
+        return (AVATAR_PIXEL_MAX_SCALE - AVATAR_PIXEL_MIN_SCALE + 1) * AVATAR_OUTLINED_PIXELS;
+    }
+
+    /** 王冠族一档占几个码位。 */
+    private static int crownGlyphsPerTier() {
+        return (AVATAR_PIXEL_MAX_SCALE - AVATAR_PIXEL_MIN_SCALE + 1) * AVATAR_CROWN_PIXELS;
+    }
+
+    /**
+     * 取王冠第 {@code row} 行的字形字符（row 0 是最上面那行）。
+     *
+     * <p>王冠是独立字形家族，底边锚点与头像相同但主体落在头像盒【上方】：
+     * 资源包里王冠第 row 行的贴图高是 {@code (12 - row) * scale}，取
+     * {@code ascent = height - offset} 后白块落在锚点上方 {@code (11-row)*scale ..
+     * (12-row)*scale}，正好接在头像 row 0（{@code 9*scale .. 10*scale}）之上。
+     *
+     * <p>贴图纯白，颜色由调用方套 {@code <color>} 给 —— 金色王冠和黑色描边共用这些字形。
+     */
+    public static String avatarCrownChar(int scale, int row, int downOffsetTier) {
+        if (scale < AVATAR_PIXEL_MIN_SCALE || scale > AVATAR_PIXEL_MAX_SCALE) {
+            throw new IllegalArgumentException(
+                "王冠倍数超出资源包预生成范围（" + AVATAR_PIXEL_MIN_SCALE + ".."
+                    + AVATAR_PIXEL_MAX_SCALE + "）：" + scale);
+        }
+        if (row < 0 || row >= AVATAR_CROWN_PIXELS) {
+            throw new IllegalArgumentException("王冠行号越界（0.." + (AVATAR_CROWN_PIXELS - 1) + "）：" + row);
+        }
+        avatarDownOffsetAt(downOffsetTier);
+        int index = (scale - AVATAR_PIXEL_MIN_SCALE) * AVATAR_CROWN_PIXELS + row;
+        return new String(Character.toChars(
+            tierCodepointBase(downOffsetTier, crownGlyphsPerTier(), AVATAR_CROWN_CODEPOINT_START) + index));
+    }
+
+    /** 王冠字形在 images.yml 里的条目名。 */
+    public static String avatarCrownAssetName(int scale, int row, int downOffsetTier) {
+        return "avatar_crown_" + scale + "_" + row + "_d" + avatarDownOffsetAt(downOffsetTier);
+    }
+
+    /**
+     * 记牌行点数字形字符（默认档，不下移）。
+     *
+     * <p>返回的是裸字符，调用方需套 {@code <font:} {@link #counterGlyphFont}(0) {@code >} 标签。
+     *
+     * @param rank 牌的点数
+     * @param dim  {@code true} 表示已出完（暗版），{@code false} 表示亮版
+     */
+    public static String counterRankChar(CardRank rank, boolean dim) {
+        return counterRankChar(rank, dim, 0);
+    }
+
+    /**
+     * 记牌行点数字形字符（指定向下偏移档）。
+     *
+     * <p>下标布局：亮版 = {@code rank.ordinal()}，暗版 = {@code rank.ordinal() + RANK}。
+     * 复用头像偏移档表（{@link #avatarDownOffsetAt}），记牌行与头像行按同一套锚点下沉。
+     */
+    public static String counterRankChar(CardRank rank, boolean dim, int downOffsetTier) {
+        int index = rank.ordinal() + (dim ? PackTiers.COUNTER_RANK_GLYPHS : 0);
+        avatarDownOffsetAt(downOffsetTier); // 越界校验
+        return new String(Character.toChars(
+            tierCodepointBase(downOffsetTier, PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START)
+                + index));
+    }
+
+    /**
+     * 记牌行数字字形字符（默认档，不下移）。
+     *
+     * @param digit 0~9
+     * @param dim   {@code true} 表示暗版
+     */
+    public static String counterDigitChar(int digit, boolean dim) {
+        return counterDigitChar(digit, dim, 0);
+    }
+
+    /**
+     * 记牌行数字字形字符（指定向下偏移档）。
+     *
+     * <p>下标布局：亮数字起点 = {@code 2 * RANK}，暗数字再加 {@code DIGIT}。
+     */
+    public static String counterDigitChar(int digit, boolean dim, int downOffsetTier) {
+        if (digit < 0 || digit > 9) {
+            throw new IllegalArgumentException("数字字形下标越界（0..9）：" + digit);
+        }
+        int base = 2 * PackTiers.COUNTER_RANK_GLYPHS;
+        int index = base + (dim ? PackTiers.COUNTER_DIGIT_GLYPHS : 0) + digit;
+        avatarDownOffsetAt(downOffsetTier); // 越界校验
+        return new String(Character.toChars(
+            tierCodepointBase(downOffsetTier, PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START)
+                + index));
     }
 
     /**

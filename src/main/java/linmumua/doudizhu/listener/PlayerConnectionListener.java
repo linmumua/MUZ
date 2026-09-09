@@ -45,11 +45,16 @@ public final class PlayerConnectionListener implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 离线，当前对局已重置。");
+        // hover/选中/调试面板那几张按玩家分组的 map 同理：tick() 只遍历在线玩家，
+        // 离线的 key 永远轮不到清理，不在这里显式清就会无上限累积。
+        plugin.getPhysicalTableManager().clearPlayerCaches(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
     public void onKick(PlayerKickEvent event) {
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 被移出服务器，当前对局已重置。");
+        // 被踢和自己退出是同一种离线，缓存清理不能只做一边。
+        plugin.getPhysicalTableManager().clearPlayerCaches(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
@@ -68,7 +73,7 @@ public final class PlayerConnectionListener implements Listener {
 
     private String buildProgressBar(double progress) {
         int width = 16;
-        double clamped = Math.max(0.0, Math.min(1.0, progress));
+        double clamped = Math.clamp(progress, 0.0, 1.0);
         int filled = (int) Math.round(clamped * width);
         StringBuilder builder = new StringBuilder();
         builder.append('[');

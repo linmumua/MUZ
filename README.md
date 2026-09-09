@@ -13,7 +13,7 @@
 - 四带二、四带两对、顺子、连对
 - 飞机、飞机带单翼、飞机带双翼
 - 炸弹、王炸与基础倍数结算
-- 无牌可压时自动跳过
+- 真人跟牌无牌可压时保留当前回合等待 20 tick；期间可点击现有「不要」立即跳过，未操作才自动不要；等待期间其他玩家的 ActionBar 与倒计时仍正常更新，机器人仍立即处理
 - 对局中离线/踢出自动重置
 - 自动生成 CraftEngine bundle，可导出到 `CraftEngine/resources/doudizhupaper`
 - 提供一套默认关闭的第三方 AI gateway，可按 DeepSeek 或其他 OpenAI 兼容接口接入
@@ -35,26 +35,49 @@
 - `/muz labels`（兼容旧命令，等同 `/muz settings`）
 - `/muz status`
 - `/muz forceend`
+- `/muz debug web` — 查看 Debug Web 面板运行状态与本机访问地址（需 `muz.admin`）
+- `/muz debug web start` — 手动启动 Debug Web 面板（需 `debug.web-ui.enabled: true`；只监听回环地址）
+- `/muz debug web stop` — 停止 Debug Web 面板
+- `/muz give debug` — 发放个人 HUD 调试棒；未进牌桌时可显示与 Debug Web 对照的游戏内 Trick HUD。右键循环牌行、头像行、记牌行，Shift+右键隐藏。
+
+正式 Trick HUD 由 `TrickHudService` / `TrickHudView` 在出牌阶段按配置和玩家级调试棒行覆盖渲染；Debug Web 只负责回环地址上的 HUD 参数预览与运行期配置。`/muz give debug` 的调试棒只影响持有者个人，不写入运行期正式配置；`/muz debug show|stick|hud` 继续移除。
+
+## Debug Web HUD 配置页
+
+- 开启 `debug.web-ui.enabled: true` 后，仅可从服务端本机访问 `http://127.0.0.1:<port>` / `http://localhost:<port>`。
+- 页面可编辑字段共 19 个：`trick-hud.enabled`、`trick-hud.avatar-scale`、`trick-hud.avatar-gap`、`trick-hud.card-step`、`trick-hud.card-height`、`trick-hud.offset-down`、`trick-hud.avatar-offset-down`、`trick-hud.offset-x`、`trick-hud.card-offset-x`、`trick-hud.avatar-offset-x`、`trick-hud.avatar-outline.enabled`、`trick-hud.avatar-outline.color`、`trick-hud.counter.enabled`、`trick-hud.counter.gap`、`trick-hud.counter.hide-exhausted`、`trick-hud.counter.offset-x`、`hotbar-hud.enabled`、`hotbar-hud.offset-x`、`hotbar-hud.offset-y`。
+- 牌高、牌行下移、头像行下移等档位字段按当前资源包的合法档位白名单校验，非法值会拒绝保存而不是静默改写。
+- 页面右侧的预览按 Minecraft 像素坐标系绘制，屏幕基准几何固定为 `640×360`，BossBar baseline=20，ActionBar bottom=360。行宽与字形前进量由服务端 `DebugHudConfigController.currentGeometry()` 汇总 `PackAssets`、`PlayerHeadRenderer`、`HotbarDebugOverlayWriter` 后下发（`cards` / `avatars` / `counters` 三个数组 + hotbar 六项），前端**只消费这份 `PreviewGeometry`**，不再由 JS 复算字形表；居中用**整数 MC 像素**执行（`baseLeft=floor((screenWidth-W)/2)`，行内 `floor((W-行宽)/2)`），牌/头像走 `top = bossBarBaselineY - ascent` 公式，hotbar 走 `actionBarBottomY - hotbarHeight + ascentDelta`。画出 BossBar 轨道、屏幕中线、屏幕底边作参照物；GUI 缩放可在页面上切换（2/3/4，默认 3）。
+- **预览各层可鼠标拖动**：牌行、头像行、记牌行、hotbar 拖动时只更新页面里的待提交偏移值（档位字段会吸附到最近的合法档）。页面提供 `snapToggle` Minecraft 风格吸附开关，默认开启；它只改变当前页面拖动行为，不混入 19 个 HUD patch，阈值按实际 layer 几何使用 Minecraft 像素。中心线与 Alt 首次有效位移锁轴状态保留。牌行来自 `geometry.cards` 按 `height` 查档，头像行来自 `geometry.avatars` 按 `scale` 查档并根据描边开关选 `plainAdvance` / `outlinedAdvance`；记牌器只共享水平 advance（每格 `advance` 逐格累加），垂直沿用现有普通 MiniMessage 预览语义。拖动期间只更新当前层的 CSS `transform`，不重建预览 DOM；松手后才完整刷新。拖动只标记未保存，需点「保存并应用」才写回 `config.yml`。
+- 「保存并应用」只写回本次提交的白名单键；保存链路仍严格按“异步写入 `config.yml` 与当前 hotbar overlay YAML → 主线程执行 `ce reload pack` → 主线程应用 `applyHudRuntimeStateFromWeb()` → 返回成功并发布 Snapshot”执行。空 patch 不触发资源流程，配置或资源写入失败不会报成功。两个 overlay YAML 使用临时文件后原子替换，协调器每次提交在主线程重新解析 CraftEngine 路径，关闭后拒绝新任务并使排队任务失效。
+- Web 保存与 Web 磁盘重载共用单线程队列和插件提供的 HUD 配置锁：Web 自身不会让两次请求乱序，也不会把 `config.yml` 写盘放回主线程。该锁是清晰的 Web 快照边界，不等同于全局配置事务；旧的管理菜单或其他非 Web 配置入口若并发改写共享 `MuzYamlConfig`，仍需后续统一配置层才能完全消除竞态。
+- 当前没有独立的 Trick HUD 运行期 CE 字形资源，Trick HUD 通过运行时配置与玩家级调试棒行覆盖应用；Debug Web 不会臆造 Trick HUD 字形资源。运行期 CE overlay 目前只有 hotbar 覆盖层，客户端必须重新下载资源包才能看到 `offset-y` 的变化。
+- 「重新读取配置」同样通过 HUD 专用异步重载链路，不调用完整 `reloadVisualState`，不会重建物理牌桌；它会丢弃网页里尚未保存的改动。
+- `DebugWebServerTest` 已验证下发 geometry schema、15 格记牌器 fixture、资源 API 对齐、旧几何魔数已移除，以及拖动期间不重建预览 DOM、松手后再刷新。
+- Hotbar 由 `hotbar-hud.enabled`、牌桌阶段与座位状态共同控制：**仅向处于 `GamePhase.PLAYING` 正式出牌阶段的牌桌在线真人座位显示**。出牌阶段推送 182×22 不透明遮罩，完整盖住原版 9 槽背景，并在中央显示红/橙/黄/绿/蓝 5 个调试槽；`hotbar-hud.offset-x` 走运行期负空格，`hotbar-hud.offset-y` 走覆盖层 ascent。`LOBBY`、`BIDDING`、`DOUBLING`、结算、离桌、停服及不在牌桌的普通玩家始终保持或恢复原版 9 槽物品栏。所有非 `PLAYING` 阶段的对局提示走普通 ActionBar。资源包不会覆盖 `minecraft` 原版 `hotbar.png` / `hotbar_selection.png`，插件启动导出 bundle 时还会清除旧版本遗留的这两张全局透明贴图，因此不会继续影响普通物品栏。
+- Hotbar 两个偏移的生效方式不同：`offset-x` 走负空格**运行期即时生效**；`offset-y` 要写成资源包字形的 ascent，会自动触发 `ce reload pack` 重建客户端资源包，**客户端需重新下载资源包才能看到**，因此纵向调整不是即时的。`hotbar-hud.glyph-ascent`、`hotbar-hud.slot-count` 仍是纯文档键，运行期不读；当前遮罩固定为 182×22、advance 为 183。若现有 `plugins/CraftEngine/generated/resource_pack.zip` 仍残留旧版全局 hotbar 条目，先安全备份并移走该 ZIP，再执行 `ce reload pack`，最后检查 ZIP 条目。
+- 不要通过运行期配置修改构建期 hotbar 字形参数：`glyph-ascent`、`slot-count` 运行期不读取；当前遮罩固定为 182×22、advance 为 183，尺寸、码位与 advance 必须同步修改 `build.gradle.kts` 和 `PackAssets`。要调垂直位置请用 `offset-y`。
 
 ## 构建
 
+构建目标由 `MuzTarget` 表驱动，用 `-PmuzTarget=<id>` 选择，默认 `paper-26.2`：
+
 ```powershell
-./gradlew.bat build
+./gradlew.bat build -PmuzTarget=paper-26.1.2
 ```
 
-产物位于：
+可选目标：`paper-1.21.11`、`paper-26.1.2`、`paper-26.2`。
 
-- `build/libs/MUZ-1.6.18.jar`
-- `build/libs/MUZ-1.6.18-dev.jar`
-- `build/distributions/MUZ-resourcepack-1.6.18.zip`
-- `build/distributions/MUZ-craftengine-1.6.18.zip`
-- `build/release/MUZ-1.6.18.jar`
-- `build/release/MUZ-1.6.18-resourcepack.zip`
-- `build/release/MUZ-1.6.18-craftengine.zip`
+产物位于 `build/<targetId>/`（**不是** `build/`），以 `paper-26.1.2` 为例：
 
-推荐把重映射后的 `MUZ-1.6.18.jar` 放进服务端 `plugins/`。
-如果你不用 CraftEngine，就给客户端下发 `MUZ-1.6.18-resourcepack.zip`。
-如果你使用 CraftEngine，可以直接用 `MUZ-1.6.18-craftengine.zip`，或者让插件在检测到 CraftEngine 后自动把 bundle 导出到其数据目录。
+- `build/paper-26.1.2/libs/MUZ-1.10.11-paper-26.1.2.jar`
+- `build/paper-26.1.2/libs/MUZ-1.10.11-sources.jar`
+- `build/paper-26.1.2/distributions/MUZ-resourcepack-1.10.11.zip`
+- `build/paper-26.1.2/distributions/MUZ-craftengine-1.10.11.zip`
+
+推荐把与服务端版本对应的 `MUZ-1.10.11-<targetId>.jar` 放进服务端 `plugins/`。
+如果你不用 CraftEngine，就给客户端下发 `MUZ-resourcepack-1.10.11.zip`。
+如果你使用 CraftEngine，可以直接用 `MUZ-craftengine-1.10.11.zip`，或者让插件在检测到 CraftEngine 后自动把 bundle 导出到其数据目录。
 
 ## 说明
 

@@ -54,7 +54,7 @@ public interface AiChatGateway {
                 throw new IllegalArgumentException("messages 不能为空");
             }
             modelOverride = normalizeOptional(modelOverride);
-            temperature = temperature == null ? null : Math.max(0.0, Math.min(2.0, temperature));
+            temperature = temperature == null ? null : Math.clamp(temperature, 0.0, 2.0);
             maxTokens = maxTokens == null ? null : Math.max(0, maxTokens);
         }
 
@@ -114,7 +114,7 @@ public interface AiChatGateway {
             }
             connectTimeoutMs = Math.max(1000, connectTimeoutMs);
             requestTimeoutMs = Math.max(1000, requestTimeoutMs);
-            temperature = Math.max(0.0, Math.min(2.0, temperature));
+            temperature = Math.clamp(temperature, 0.0, 2.0);
             maxTokens = Math.max(0, maxTokens);
             systemPrompt = normalizeOptional(systemPrompt);
         }

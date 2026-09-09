@@ -54,6 +54,7 @@ public final class CraftEngineBundleExporter {
         List<String> entries = List.of();
         int copiedEntries = 0;
         try (InputStream stream = plugin.getResource(BUNDLE_INDEX)) {
+            cleanupLegacyGlobalHotbarSprites(targetRoot);
             if (stream == null) {
                 plugin.getLogger().warning("CraftEngine bundle index is missing, skipping bundle export.");
                 return BundleExportResult.failed("bundle 索引缺失", 0, 0);
@@ -198,6 +199,16 @@ public final class CraftEngineBundleExporter {
             Files.createDirectories(Objects.requireNonNull(targetPath.getParent()));
             Files.copy(resource, targetPath, StandardCopyOption.REPLACE_EXISTING);
         }
+    }
+
+    /**
+     * 删除旧版本遗留的全局 hotbar 覆盖。它们位于 minecraft 命名空间，会影响所有玩家，
+     * 所以即使 bundle 指纹已是最新也必须在提前返回前清理。
+     */
+    static void cleanupLegacyGlobalHotbarSprites(Path targetRoot) throws IOException {
+        Path spriteRoot = targetRoot.resolve("resourcepack/assets/minecraft/textures/gui/sprites/hud");
+        Files.deleteIfExists(spriteRoot.resolve("hotbar.png"));
+        Files.deleteIfExists(spriteRoot.resolve("hotbar_selection.png"));
     }
 
     private void cleanupStaleFiles(Path targetRoot, List<String> bundledEntries) throws IOException {

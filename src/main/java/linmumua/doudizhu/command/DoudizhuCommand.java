@@ -1,6 +1,7 @@
 package linmumua.doudizhu.command;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.debug.DebugWebServer;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
@@ -42,6 +43,12 @@ public final class DoudizhuCommand implements TabExecutor {
             String sub = args[0].toLowerCase(Locale.ROOT);
             switch (sub) {
                 case "create" -> {
+                    // create 会在世界里实打实摆出一张牌桌（一堆 Display Entity + 持久化记录），
+                    // 而 muz.command 是 default: true，全员可用。这里不设门等于放开让任何玩家刷实体，
+                    // 所以跟 set / remove 一样按 muz.admin 收口。
+                    if (!sender.hasPermission("muz.admin")) {
+                        throw new IllegalStateException("这个命令需要管理员权限。");
+                    }
                     Player player = requirePlayer(sender);
                     CreateRequest request = parseCreateRequest(args);
                     plugin.getPhysicalTableManager().placeNewTable(player, request.id(), request.level());
@@ -116,6 +123,22 @@ public final class DoudizhuCommand implements TabExecutor {
                     if (!sender.hasPermission("muz.admin")) {
                         throw new IllegalStateException("这个命令需要管理员权限。");
                     }
+                    // 【为什么用参数个数消歧，而不是直接把 counter/debug 当第二参的关键字】：
+                    // 第二参原本是玩家名，一旦无条件当关键字解析，服上真有人叫 counter 或 debug 就再也
+                    // 拿不到放桌器。放桌器语法恒为 /muz give <玩家> doudizhu ...（至少 3 参），
+                    // 自发物品语法恒为 2 参，靠个数分流两边都不会被遮蔽。
+                    if (args.length == 2 && isSelfGiveToken(args[1])) {
+                        Player self = requirePlayer(sender);
+                        if (args[1].equalsIgnoreCase("debug")) {
+                            giveOrDrop(self, plugin.createHudDebugStickItem());
+                            sender.sendMessage(message("已把 HUD 调试棒放进你的背包。", NamedTextColor.GREEN));
+                        } else {
+                            giveOrDrop(self, plugin.createCounterItem());
+                            sender.sendMessage(message("已把记牌器放进你的背包，带在身上就生效。", NamedTextColor.GREEN));
+                        }
+                        return true;
+                    }
+                    requireArgs(args, 3, "/muz give <玩家> doudizhu [档位] [id]，或 /muz give <counter|debug>");
                     Player target = Bukkit.getPlayerExact(args[1]);
                     if (target == null) {
                         throw new IllegalArgumentException("目标玩家必须在线。");
@@ -136,11 +159,7 @@ public final class DoudizhuCommand implements TabExecutor {
                             tableId = validateNumericId(args[3]);
                         }
                     }
-                    ItemStack placer = plugin.createDoudizhuTablePlacerItem(tableId, level);
-                    java.util.HashMap<Integer, ItemStack> rejected = target.getInventory().addItem(placer);
-                    if (!rejected.isEmpty()) {
-                        rejected.values().forEach(item -> target.getWorld().dropItemNaturally(target.getLocation(), item));
-                    }
+                    giveOrDrop(target, plugin.createDoudizhuTablePlacerItem(tableId, level));
                 }
                 case "history" -> {
                     UUID targetId;
@@ -263,20 +282,9 @@ public final class DoudizhuCommand implements TabExecutor {
                     if (!sender.hasPermission("muz.admin")) {
                         throw new IllegalStateException("这个命令需要管理员权限。");
                     }
-                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox|show|trace> ...");
+                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox|trace|web> ...");
                     if (args[1].equalsIgnoreCase("bot")) {
                         handleDebugBot(sender, args);
-                        return true;
-                    }
-                    if (args[1].equalsIgnoreCase("show")) {
-                        Player viewer = requirePlayer(sender);
-                        boolean enabled = plugin.getPhysicalTableManager().togglePickDebug(viewer);
-                        sender.sendMessage(enabled
-                            ? message("已开启手牌可点范围显示。白=牌本体(发光轮廓)，"
-                                + "青/黄=未选中/已选中的理论包络，红=实际生效的判定范围。"
-                                + "红框比白框高出的那截，就是可点区比牌面大出来的量。",
-                                NamedTextColor.GREEN)
-                            : message("已关闭手牌可点范围显示。", NamedTextColor.YELLOW));
                         return true;
                     }
                     if (args[1].equalsIgnoreCase("trace")) {
@@ -295,6 +303,10 @@ public final class DoudizhuCommand implements TabExecutor {
                     }
                     if (args[1].equalsIgnoreCase("hitbox")) {
                         handleDebugHitbox(sender, args);
+                        return true;
+                    }
+                    if (args[1].equalsIgnoreCase("web")) {
+                        handleDebugWeb(sender, args);
                         return true;
                     }
                     Player player = requirePlayer(sender);
@@ -321,7 +333,7 @@ public final class DoudizhuCommand implements TabExecutor {
                         int removed = removeDebugTables(player, args.length >= 3 ? args[2] : "1");
                         sender.sendMessage(message("已经移除了 " + removed + " 张观察桌。", NamedTextColor.YELLOW));
                     } else {
-                        throw new IllegalArgumentException("用法: /muz debug <add|remove|bot> ...");
+                        throw new IllegalArgumentException("用法: /muz debug <add|remove|bot|hitbox|trace|web> ...");
                     }
                 }
                 default -> help(sender);
@@ -342,7 +354,9 @@ public final class DoudizhuCommand implements TabExecutor {
             return filter(options, args[0]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("give")) {
-            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[1]);
+            List<String> options = new ArrayList<>(List.of("counter", "debug"));
+            options.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+            return filter(options, args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("give")) {
             return filter(List.of("doudizhu"), args[2]);
@@ -363,7 +377,7 @@ public final class DoudizhuCommand implements TabExecutor {
             return filter(List.of("remove"), args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("debug")) {
-            return filter(List.of("add", "remove", "bot", "hitbox", "show", "trace"), args[1]);
+            return filter(List.of("add", "remove", "bot", "hitbox", "trace", "web"), args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("debug") && args[1].equalsIgnoreCase("remove")) {
             return filter(List.of("1", "5", "10", "20", "50", "all"), args[2]);
@@ -421,6 +435,9 @@ public final class DoudizhuCommand implements TabExecutor {
             names.addAll(plugin.getTableManager().getTables().stream().map(GameTable::getName).toList());
             return filter(names, args[2]);
         }
+        if (args.length == 3 && args[0].equalsIgnoreCase("debug") && args[1].equalsIgnoreCase("web")) {
+            return filter(List.of("start", "stop"), args[2]);
+        }
         if (args.length == 2 && args[0].equalsIgnoreCase("remove")) {
             List<String> names = new ArrayList<>();
             names.addAll(plugin.getTableManager().getTables().stream().map(GameTable::getName).toList());
@@ -450,6 +467,8 @@ public final class DoudizhuCommand implements TabExecutor {
             lines.add("/muz debug add [数量] - 在你附近生成会自己打牌的观察桌");
             lines.add("/muz debug remove [1-50|all] - 移除最近的观察桌，或全部移除");
             lines.add("/muz debug bot 信息 [bot数字id] [消息] - 查看 bot 信息，或直接和 bot 聊天测试 DeepSeek");
+            lines.add("/muz give counter - 给自己一个记牌器，带在身上就显示记牌行");
+            lines.add("/muz give debug - 给自己一个 HUD 调试棒");
         }
         sender.sendMessage(message("MUZ 常用命令", NamedTextColor.GOLD));
         lines.forEach(line -> sender.sendMessage(message(line, NamedTextColor.GRAY)));
@@ -557,6 +576,62 @@ public final class DoudizhuCommand implements TabExecutor {
             ));
         }
     }
+    /**
+     * /muz debug web [start|stop]
+     * 不带子参数 → 显示当前状态与访问地址；start → 启动；stop → 停止。
+     */
+    private void handleDebugWeb(CommandSender sender, String[] args) {
+        DebugWebServer ws = plugin.getDebugWebServer();
+        // 仅显示状态
+        if (args.length < 3) {
+            if (ws == null || !ws.isRunning()) {
+                sender.sendMessage(message(
+                    "Debug Web 面板未运行。" +
+                    "（config.yml 里 debug.web-ui.enabled=true 后 /muz reload 再试）",
+                    NamedTextColor.YELLOW));
+            } else {
+                int port = ws.getPort();
+                sender.sendMessage(message(
+                    "Debug Web 面板运行中，端口 " + port
+                        + "，访问 http://localhost:" + port,
+                    NamedTextColor.GREEN));
+            }
+            return;
+        }
+        String sub = args[2].toLowerCase(Locale.ROOT);
+        switch (sub) {
+            case "start" -> {
+                if (ws == null) {
+                    sender.sendMessage(message(
+                        "debug.web-ui.enabled=false，Web 面板未启用。" +
+                        "修改 config.yml 后执行 /muz reload 再试。",
+                        NamedTextColor.RED));
+                    return;
+                }
+                if (ws.isRunning()) {
+                    sender.sendMessage(message(
+                        "Debug Web 面板已在运行，端口 " + ws.getPort() + "。",
+                        NamedTextColor.YELLOW));
+                    return;
+                }
+                int port = plugin.yamlConfig().getInt("debug.web-ui.port", 2000);
+                ws.start(port);
+                sender.sendMessage(ws.isRunning()
+                    ? message("Debug Web 面板已启动，访问 http://localhost:" + port, NamedTextColor.GREEN)
+                    : message("Debug Web 面板启动失败，见控制台日志（端口可能被占用）。", NamedTextColor.RED));
+            }
+            case "stop" -> {
+                if (ws == null || !ws.isRunning()) {
+                    sender.sendMessage(message("Debug Web 面板当前未运行。", NamedTextColor.YELLOW));
+                    return;
+                }
+                ws.stop();
+                sender.sendMessage(message("Debug Web 面板已停止。", NamedTextColor.YELLOW));
+            }
+            default -> throw new IllegalArgumentException("用法: /muz debug web [start|stop]");
+        }
+    }
+
     private void handleDebugBot(CommandSender sender, String[] args) {
         if (args.length < 3 || (!args[2].equalsIgnoreCase("info") && !args[2].equalsIgnoreCase("信息"))) {
             throw new IllegalArgumentException("用法: /muz debug bot 信息 [bot数字id] [消息]");
@@ -770,6 +845,20 @@ public final class DoudizhuCommand implements TabExecutor {
             return Integer.parseInt(token.trim());
         } catch (NumberFormatException ignored) {
             return -1;
+        }
+    }
+
+    /** give 的第二参是「发给自己的物品」关键字，而不是玩家名。 */
+    private boolean isSelfGiveToken(String token) {
+        String normalized = token == null ? "" : token.toLowerCase(Locale.ROOT);
+        return normalized.equals("counter") || normalized.equals("debug");
+    }
+
+    /** 背包塞不下就掉在脚边，别让物品凭空消失。 */
+    private void giveOrDrop(Player target, ItemStack item) {
+        java.util.HashMap<Integer, ItemStack> rejected = target.getInventory().addItem(item);
+        if (!rejected.isEmpty()) {
+            rejected.values().forEach(leftover -> target.getWorld().dropItemNaturally(target.getLocation(), leftover));
         }
     }
 

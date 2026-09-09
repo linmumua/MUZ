@@ -216,8 +216,8 @@ public final class PlayerHeadRenderer {
      * 与 {@link PackAssets#AVATAR_HEAD_PIXELS} 一致 —— 王冠要盖在 8 列宽的脸上方，
      * 窄了看着偏，宽了会超出矩阵被截掉。
      *
-     * <p>只有 2 行：王冠是【盖】在头顶那两行头发上的（见 {@link #withCrown}），
-     * 行数一多就会吃掉五官。
+     * <p>只有 2 行：王冠画在头像盒【上方】那两行（见 {@link #crownMiniMessage}），
+     * 资源包里王冠字形家族就是按 2 行预生成的，行数一多就没有对应字形。
      *
      * <p>图案【必须左右对称】：不对称会让王冠看着偏向一边，而头像是并排摆的，一眼就看出来。
      * 这里中间两列连在一起，读起来仍是三个尖 —— 山字形的中峰本来就该比两侧宽。
@@ -231,42 +231,68 @@ public final class PlayerHeadRenderer {
     private static final int CROWN_ARGB = 0xFFFFD24A;
 
     /**
-     * 给头像戴一顶王冠：把王冠【盖在头顶那两行】上，矩阵尺寸不变。
+     * 生成王冠那两行的 MiniMessage 片段，画在头像盒【上方】。
      *
-     * <p>【为什么是盖上去，而不是往上加两行】：加两行会把脸整体挤下去两像素，戴冠的地主那一槽
-     * 就比另外两个人低一截 —— 三个头像并排时一眼看出没对齐（服主报的就是这个）。
-     * 而且行数一变，宽度、槽内居中、盒高全都要跟着分叉。
+     * <p>【为什么王冠是独立字形家族，不是改头像矩阵】：先前两版都在动那个 8x8 矩阵 ——
+     * 往上加两行会把脸整体挤下去，戴冠的地主那一槽比另外两人低一截（三头像并排时一眼看出）；
+     * 盖在头顶两行则会遮掉头发。现在王冠有自己的字形家族（12 行高、只用最上面 2 行），
+     * 底边锚点与头像完全相同，主体落在头像 row 0 之上 —— 真正的「向上凸出」。
+     * 脸的矩阵一个像素都不动。
      *
-     * <p>盖在头顶是零几何改动：行数、宽度、脸的位置全部和不戴冠的头像一致，
-     * 代价只是头顶那两行头发被王冠遮住 —— 王冠本来就该压在头发上，这反而是对的。
+     * <p>【与描边互不干扰】：描边只作用于脸的矩阵（{@link #withOutline} 把 8x8 撑成 10x10），
+     * 王冠在自己的家族里，两者不再互斥也不叠加。王冠自己没有描边 —— 它是纯色标识，
+     * 描边的用途是让脸在任何背景上都有轮廓，王冠不需要。
      *
-     * <p>【与描边可以同时开】：这个方法不改尺寸，所以要先戴冠、再
-     * {@link #withOutline} —— 那样描边会连王冠一起勾出轮廓。反过来先描边也能工作，
-     * 只是王冠自己没有描边。两者不再像「加两行」那版一样互斥。
+     * <p>渲染顺序是【先画王冠、再画脸】：王冠画完把光标拉回行首，脸从原位开始画，
+     * 于是两者水平对齐、底边同锚。反过来也能画，但那样得记住脸走了多远再退回去，
+     * 多一处容易算歪的地方。
      *
-     * <p>王冠只覆盖前 {@code CROWN_SHAPE.length} 行，下面 6 行是真正的五官，一个像素都不动 ——
-     * 盖住脸就等于用身份标识毁了头像。
-     *
-     * @param head 头部像素方阵，通常是 8x8；返回同样尺寸的新矩阵，不改动入参
+     * @param faceWidthPixels 脸的像素宽度（含描边），用来让王冠水平居中；
+     *                        8 列的王冠画在 10 列的脸上时要右移 1 个像素格
+     * @param scale           放大倍数
+     * @param downOffsetTier  头像行的向下偏移档
+     * @param offsetProvider  给定像素数返回一段水平偏移文本
      */
-    public static int[][] withCrown(int[][] head) {
-        int size = head.length;
-        int[][] out = new int[size][];
-        for (int row = 0; row < size; row++) {
-            out[row] = head[row].clone();
-        }
-        // 图案按当前矩阵宽度水平居中：8 列的脸上 offset 是 0，描边后的 10 列上是 1。
-        int crownOffset = (size - CROWN_SHAPE[0].length()) / 2;
-        for (int row = 0; row < CROWN_SHAPE.length && row < size; row++) {
+    public static String crownMiniMessage(
+        int faceWidthPixels, int scale, int downOffsetTier, IntFunction<String> offsetProvider) {
+        int crownColumns = CROWN_SHAPE[0].length();
+        // 王冠 8 列、脸可能 10 列（描边后），居中要留出左边那半。单位是【像素格】不是像素。
+        int leadingCells = (faceWidthPixels - crownColumns) / 2;
+        StringBuilder builder = new StringBuilder();
+        builder.append("<font:").append(PackAssets.avatarCrownFont(downOffsetTier)).append('>');
+        int pending = 0;
+        for (int row = 0; row < CROWN_SHAPE.length; row++) {
+            String glyph = PackAssets.avatarCrownChar(scale, row, downOffsetTier);
             String pattern = CROWN_SHAPE[row];
-            for (int col = 0; col < pattern.length(); col++) {
-                int target = col + crownOffset;
-                if (pattern.charAt(col) != ' ' && target >= 0 && target < size) {
-                    out[row][target] = CROWN_ARGB;
+            // 每行都从行首起算：先跳过居中留白，再逐列画。
+            pending += leadingCells * scale;
+            for (int col = 0; col < crownColumns; col++) {
+                if (pattern.charAt(col) == ' ') {
+                    // 透明列不画，但要占满列距，否则右边的冠尖会左移。
+                    pending += scale;
+                    continue;
                 }
+                if (pending != 0) {
+                    builder.append(offsetProvider.apply(pending));
+                    pending = 0;
+                }
+                builder.append("<color:#")
+                    .append(String.format("%06x", CROWN_ARGB & 0xFFFFFF))
+                    .append('>')
+                    .append(glyph)
+                    .append("</color>");
+                pending -= GLYPH_TRAILING_SPACING;
             }
+            // 画完一行退回行首：已经走过的是「居中留白 + 整行列距」。
+            pending -= (leadingCells + crownColumns) * scale;
         }
-        return out;
+        // 王冠画完必须【净位移为零】：接下来脸要从原位开始画，
+        // 差一个像素就会让戴冠的头像比不戴冠的横向错开。
+        if (pending != 0) {
+            builder.append(offsetProvider.apply(pending));
+        }
+        builder.append("</font>");
+        return builder.toString();
     }
 
     /**
@@ -320,7 +346,8 @@ public final class PlayerHeadRenderer {
      *
      * @param scale           放大倍数，需在资源包预生成的范围内（见 {@link PackAssets#AVATAR_PIXEL_MIN_SCALE}）
      * @param downOffsetTier  向下偏移档，必须和同一行的牌用同一档，否则头像与牌上下错开
-     * @param crowned         是否戴王冠（地主）。与描边互斥，见 {@link #withCrown}
+     * @param crowned         是否戴王冠（地主）。走独立字形家族画在脸上方，
+     *                        与描边【互不干扰】，见 {@link #crownMiniMessage}
      * @return 头像的 MiniMessage 文本；皮肤还没就绪或不可用时返回 {@code null}
      */
     public String miniMessageFor(Player player, int scale, int downOffsetTier, boolean crowned) {
@@ -378,16 +405,13 @@ public final class PlayerHeadRenderer {
                     BufferedImage skin = downloadSkin(skinUrl);
                     if (skin != null) {
                         int[][] head = extractHead(skin);
-                        // 【顺序要紧：先戴冠，再描边】。withCrown 不改尺寸（只盖头顶两行），
-                        // 所以两者可以同时开 —— 先戴冠能让描边把王冠一起勾出轮廓；
-                        // 反过来先描边，王冠自己就没有边。
-                        if (crowned) {
-                            head = withCrown(head);
-                        }
+                        // 【描边只作用于脸】：王冠现在是独立字形家族，画在脸上方，
+                        // 不参与这个矩阵。两者互不干扰，不再有先后顺序的讲究。
                         if (outlineArgb != 0) {
                             head = withOutline(head, outlineArgb);
                         }
-                        cache.put(key, renderMiniMessage(head, scale, offsetService::offset, downOffsetTier));
+                        cache.put(key, renderMiniMessage(
+                            head, scale, offsetService::offset, downOffsetTier, crowned));
                     }
                 } catch (Exception exception) {
                     plugin.getLogger().warning("Failed to render player head: " + exception.getMessage());
@@ -428,15 +452,30 @@ public final class PlayerHeadRenderer {
 
     public static String renderMiniMessage(
         int[][] head, int scale, IntFunction<String> offsetProvider, int downOffsetTier) {
+        return renderMiniMessage(head, scale, offsetProvider, downOffsetTier, false);
+    }
+
+    /**
+     * @param crowned 是否在脸上方画一顶王冠（地主）。王冠走【独立字形家族】，
+     *                与 {@code head} 矩阵无关，也不受描边影响
+     */
+    public static String renderMiniMessage(
+        int[][] head, int scale, IntFunction<String> offsetProvider, int downOffsetTier, boolean crowned) {
         // 行数取实际矩阵边长而不是 AVATAR_HEAD_PIXELS：加了描边就是 10x10。
         int rows = head.length;
         // 【列距是 scale，不是 scale + 1】：字形前进 scale + GLYPH_TRAILING_SPACING，
         // 多出来的那 1 像素必须逐个抵掉，否则每两列之间露一道透明缝（见该常量的说明）。
         int rowWidth = rows * scale;
         StringBuilder builder = new StringBuilder();
-        // 方块字形挂在自己的字体上（见 PackAssets.AVATAR_PIXEL_FONT），必须套标签才有字形。
+        // 【王冠先画】：它是独立字形家族、独立字体，画完净位移为零，脸从原位继续。
+        // 放在头像 <font> 标签外面，因为两族在不同字体上，一个标签包不住。
+        if (crowned) {
+            builder.append(crownMiniMessage(rows, scale, downOffsetTier, offsetProvider));
+        }
+        // 方块字形挂在自己的字体上，必须套标签才有字形。字体名【随档位变】——
+        // 头像族有 201 档、40 档/张，深档在 muz_avatar_2..6 上，写死基名会让深档变豆腐块。
         // 整个头像包一次：8x8 放大后有上百个方块，逐个包标签会把这段文本撑到离谱。
-        builder.append("<font:").append(PackAssets.AVATAR_PIXEL_FONT).append('>');
+        builder.append("<font:").append(PackAssets.avatarPixelFont(downOffsetTier)).append('>');
         // 待输出的水平偏移，攒着不立刻写。攒的意义是把三种偏移合成一段再输出：
         // 字间距抵消（-1）、透明像素占位（+scale）、换行回退（-rowWidth）。
         // 一段 CE 偏移片段光是 <font:minecraft:default></font> 这层包装就要 31 个字符，

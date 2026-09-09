@@ -11,6 +11,9 @@ import linmumua.doudizhu.compat.VaultEconomyBridge;
 import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.debug.DebugWebServer;
+import linmumua.doudizhu.game.HotbarHudService;
+import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.game.TableManager;
 import linmumua.doudizhu.listener.CraftEngineLifecycleListener;
 import linmumua.doudizhu.listener.HandGuiListener;
@@ -141,9 +144,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private NamespacedKey tableRemoverKey;
     private NamespacedKey tableRemoverModeKey;
     private NamespacedKey tableRemoverIdKey;
+    private NamespacedKey counterItemKey;
+    private NamespacedKey hudDebugStickKey;
     private CraftEngineBundleExporter craftEngineBundleExporter;
     private CraftEngineFurnitureService craftEngineFurnitureService;
     private CraftEngineOffsetService craftEngineOffsetService;
+    private HotbarHudService hotbarHudService;
+    /** Debug Web 调试面板；仅 debug.web-ui.enabled=true 时非 null。 */
+    private DebugWebServer debugWebServer;
     private PlayerHeadRenderer playerHeadRenderer;
     private VaultEconomyBridge vaultEconomyBridge;
     private AiChatGateway aiChatGateway;
@@ -266,6 +274,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private final Map<UUID, Integer> playerSelectedGlowColorSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerChipBalances = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerHandOffsets> playerHandOffsets = new ConcurrentHashMap<>();
+
+    /** HUD 调试棒给单个玩家临时覆盖的三行可见组合；不存在时默认三行全开。 */
+    private final Map<UUID, Integer> hudRowOverrides = new ConcurrentHashMap<>();
+    private volatile TrickHudPreview trickHudPreview;
+
     private final List<OptionProfile> selectionSoundProfiles = new ArrayList<>();
     private final List<OptionProfile> playActionProfiles = new ArrayList<>();
     private final EnumMap<PlayActionKind, List<OptionProfile>> playActionProfilesByKind = new EnumMap<>(PlayActionKind.class);
@@ -295,6 +308,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
             scheduler = new MuzScheduler(this);
         }
         return scheduler;
+    }
+
+    /**
+     * Debug Web HUD 配置的串行边界。Web 写盘在线程池中执行，主线程应用运行态时也持有同一把锁；
+     * 这只能保证 Web 自身的保存/重载顺序，不能替代其它旧配置入口的全局配置事务。
+     */
+    private final Object hudWebConfigLock = new Object();
+
+    /** Debug Web HUD 专用配置锁；仅供 HUD Web 协调器与运行态应用入口使用。 */
+    public Object hudWebConfigLock() {
+        return hudWebConfigLock;
     }
 
     public MuzYamlConfig yamlConfig() {
@@ -340,11 +364,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
-    private void mergeDefaultYamlConfig() {
+    private boolean mergeDefaultYamlConfig() {
         try (java.io.InputStream stream = getResource("config.yml")) {
-            yamlConfig().mergeMissingFrom(stream);
+            return yamlConfig().mergeMissingFrom(stream);
         } catch (IOException exception) {
             getLogger().warning("合并默认 config.yml 失败: " + exception.getMessage());
+            return false;
         }
     }
 
@@ -372,13 +397,23 @@ public final class DoudizhuPlugin extends JavaPlugin {
         tableRemoverKey = new NamespacedKey(this, "table-remover");
         tableRemoverModeKey = new NamespacedKey(this, "table-remover-mode");
         tableRemoverIdKey = new NamespacedKey(this, "table-remover-id");
+        counterItemKey = new NamespacedKey(this, "counter-item");
+        hudDebugStickKey = new NamespacedKey(this, "hud-debug-stick");
         handGuiService = new HandGuiService(this);
         tableManager = new TableManager(this);
         databaseManager = new DatabaseManager(this);
         craftEngineBundleExporter = new CraftEngineBundleExporter(this);
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
         craftEngineOffsetService = new CraftEngineOffsetService(this);
+        hotbarHudService = new HotbarHudService(this, craftEngineOffsetService);
+        syncHotbarHudRuntime(yamlConfig().getBoolean("debug.web-ui.enabled", false));
+        // Debug Web 调试面板：仅在 debug.web-ui.enabled=true 时启动，生产环境默认关闭。
+        // 面板启用时只切换到可拖动 ascent 字形，PLAYING 阶段的 hotbar 推送仍继续；
+        // 面板关闭时恢复 bundle 固定 ascent，并按当前 hotbar-hud.enabled 同步任务。
+        syncDebugWebServerRuntime();
         playerHeadRenderer = new PlayerHeadRenderer(this, craftEngineOffsetService);
+        // 预览复用正式 TrickHudService，但不挂到任何牌桌；它只服务 HUD 调试棒和配置对照。
+        trickHudPreview = new TrickHudPreview(this);
         vaultEconomyBridge = new VaultEconomyBridge(this);
         physicalTableManager = new PhysicalTableManager(this);
         initializePersistence();
@@ -404,6 +439,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
     @Override
     public void onDisable() {
         shuttingDown = true;
+        // Debug Web 面板先停，避免关闭过程中仍有请求进来
+        if (debugWebServer != null) {
+            debugWebServer.close();
+        }
+        if (hotbarHudService != null) {
+            hotbarHudService.stop();
+        }
+        TrickHudPreview preview = trickHudPreview;
+        if (preview != null) {
+            preview.hideAll();
+        }
+        hudRowOverrides.clear();
         savePlayerSettings();
         logShutdownDiagnostics();
         if (placeholderExpansion != null && placeholderExpansion.isRegistered()) {
@@ -422,6 +469,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public TableManager getTableManager() {
         return tableManager;
+    }
+
+    public HotbarHudService getHotbarHudService() {
+        return hotbarHudService;
+    }
+
+    /** Debug Web 调试面板实例；debug.web-ui.enabled=false 时返回 null。 */
+    public DebugWebServer getDebugWebServer() {
+        return debugWebServer;
     }
 
     public void ensurePlaceholderHookReady() {
@@ -1152,13 +1208,32 @@ public final class DoudizhuPlugin extends JavaPlugin {
             }
             return settlementResult(level, amount, 0.0, response.balance, false);
         }
+        // 【为什么先读余额再算 actual，而不是直接 withdraw(amount)】：本项目允许「余额不够
+        // 就扣光、差额记欠账」（debt 会落到 match_participants.debt_after）。直接扣全额的话，
+        // Vault 会因余额不足整笔失败，玩家反而一分不扣——那是另一套语义，会破坏欠账功能。
+        //
+        // 代价是读与扣之间存在竞态：另一路交易在这两步之间动了余额，actual 就是过期值。
+        // 下面用 withdraw 的真实返回值收口：Vault 因余额不足拒绝时不再抛异常，而是回退成
+        // 「按最新余额重扣一次」，把竞态窗口压到一次重试内。
         double balance = Math.max(0.0, vaultEconomyBridge.balance(player));
         double actual = Math.min(balance, amount);
         double postBalance = balance;
         if (actual > 0.0) {
             EconomyResponse response = vaultEconomyBridge.withdraw(player, actual);
             if (!response.transactionSuccess()) {
-                throw new IllegalStateException("Vault 扣款失败: " + safeEconomyError(response.errorMessage));
+                // 竞态重试：余额被并发改小时，按最新余额再扣一次。只重试一次——
+                // 无限重试会在 Vault 持续报错时把结算线程卡死。
+                double latest = Math.max(0.0, vaultEconomyBridge.balance(player));
+                double retryAmount = Math.min(latest, amount);
+                if (retryAmount <= 0.0) {
+                    // 余额已被扣空，这笔全额记欠账，不抛异常
+                    return settlementResult(level, 0.0, amount, latest, false);
+                }
+                response = vaultEconomyBridge.withdraw(player, retryAmount);
+                if (!response.transactionSuccess()) {
+                    throw new IllegalStateException("Vault 扣款失败: " + safeEconomyError(response.errorMessage));
+                }
+                actual = retryAmount;
             }
             postBalance = response.balance;
         }
@@ -1188,6 +1263,34 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public double doudizhuCurrencyPerPoint(TableLevel level) {
         return vaultDoudizhuCurrencyPerPoint * roomMultiplier(level);
+    }
+
+    /**
+     * 结算抛异常时的兜底快照：把这一笔记成全额欠账。
+     *
+     * <p>【为什么需要它】：{@link #settleDoudizhuCurrency} 在 Vault 拒绝交易时抛异常，
+     * 而一局有三个人。调用方（RoundSettlementCoordinator）必须能接住异常继续处理其余人，
+     * 但又不能给失败者塞一个「delta=0、无欠账」的假成功快照——那样账面上看不出这人没结算。
+     *
+     * <p>取值口径：{@code delta} 记 0（钱确实没动），{@code debt} 记这笔应结金额的全额，
+     * 余额取当前真实值。赢家结算失败也记 debt，表示「这笔该给的没给出去」。
+     *
+     * @param scoreDelta 原始分差，正数是该拿钱，负数是该扣钱
+     */
+    public SettlementResult failedSettlement(TableLevel level, UUID playerId, int scoreDelta) {
+        boolean chipMode = isChipPaymentEnabled();
+        double owed = chipMode
+            ? Math.abs(Math.round(scoreDelta * roomMultiplier(level)))
+            : Math.abs(scoreDelta) * doudizhuCurrencyPerPoint(level);
+        double balance = 0.0;
+        try {
+            SettlementResult current = currentRoomStatus(level, playerId);
+            balance = current.postBalance();
+        } catch (RuntimeException ignored) {
+            // 连查余额都失败时余额按 0 记：这里已经在异常兜底路径上，
+            // 再抛一次会把整局结算重新带崩，那正是这个方法要避免的事。
+        }
+        return new SettlementResult(0.0, owed, balance, true, true, chipMode ? "筹码" : "金币");
     }
 
     private SettlementResult settlementResult(TableLevel level, double delta, double debt, double postBalance, boolean chipMode) {
@@ -1502,7 +1605,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private int clampGlowColorIndex(int index) {
-        return Math.max(0, Math.min(GLOW_COLOR_OPTIONS.size() - 1, index));
+        return Math.clamp(index, 0, GLOW_COLOR_OPTIONS.size() - 1);
     }
 
     private Color resolveGlowColor(int index, boolean previewColor) {
@@ -1791,9 +1894,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public Color hoverGlowColor() {
         return Color.fromRGB(
-            Math.max(0, Math.min(255, hoverGlowRed)),
-            Math.max(0, Math.min(255, hoverGlowGreen)),
-            Math.max(0, Math.min(255, hoverGlowBlue))
+            Math.clamp(hoverGlowRed, 0, 255),
+            Math.clamp(hoverGlowGreen, 0, 255),
+            Math.clamp(hoverGlowBlue, 0, 255)
         );
     }
 
@@ -1803,9 +1906,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public Color selectedGlowColor() {
         return Color.fromRGB(
-            Math.max(0, Math.min(255, selectedGlowRed)),
-            Math.max(0, Math.min(255, selectedGlowGreen)),
-            Math.max(0, Math.min(255, selectedGlowBlue))
+            Math.clamp(selectedGlowRed, 0, 255),
+            Math.clamp(selectedGlowGreen, 0, 255),
+            Math.clamp(selectedGlowBlue, 0, 255)
         );
     }
 
@@ -2208,6 +2311,33 @@ public final class DoudizhuPlugin extends JavaPlugin {
         reloadVisualState(true, ReloadFeedback.create(this, initiator));
     }
 
+    /**
+     * Web 编辑器保存配置后调用的最小重载入口；只串起现有运行时同步，不承载表单解析逻辑。
+     */
+    public void reloadVisualStateFromWebEditor() {
+        reloadVisualState(false, ReloadFeedback.silent());
+    }
+
+    /** 轻量同步 HUD 运行态：Trick HUD 重读设置，Hotbar HUD 按配置与 Debug Web 占用状态启停。 */
+    public void reloadHudRuntimeState() {
+        reloadTrickHudSettings();
+        syncHotbarHudRuntime(isDebugWebServerRunning());
+    }
+
+    /**
+     * Debug Web 专用 HUD 应用入口：只刷新 HUD 服务，不重载完整视觉状态或重建牌桌。
+     *
+     * <p>调用方必须已经完成异步 config.yml/overlay 写盘；这里仅在主线程读取共享配置并应用运行态。
+     * 与 Web coordinator 共用配置锁，避免主线程 reload 或管理菜单在 Web 写盘期间观察到半提交状态。
+     * 该锁只覆盖 Web 专用边界，旧的非 Web 配置入口仍可能在自身事务外修改配置。
+     */
+    public void applyHudRuntimeStateFromWeb() {
+        synchronized (hudWebConfigLock) {
+            reloadTrickHudSettings();
+            syncHotbarHudRuntime(isDebugWebServerRunning());
+        }
+    }
+
     public void scheduleAutomaticReloadSeries(String reason, long... delayTicks) {
         if (shuttingDown) {
             return;
@@ -2323,6 +2453,161 @@ public final class DoudizhuPlugin extends JavaPlugin {
         meta.getPersistentDataContainer().set(tableRemoverIdKey, PersistentDataType.STRING, normalizedId);
         item.setItemMeta(meta);
         return item;
+    }
+
+    /**
+     * 记牌器物品：拿在手上才显示 HUD 的记牌器行（第三行）。
+     *
+     * <p>【为什么做成物品而不是纯配置】：config 的 {@code trick-hud.counter.enabled} 是
+     * 服务器级开关，决定这功能"存不存在"；这件物品是玩家级开关，决定"这一局我要不要看"。
+     * 记牌降低难度，同桌里想看和不想看的人得能各自作数，不能靠一个全局开关一刀切。
+     */
+    public ItemStack createCounterItem() {
+        ItemStack item = new ItemStack(Material.PAPER);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(MuzTheme.accent("MUZ 记牌器"));
+        meta.lore(List.of(
+            MuzTheme.muted("带在身上时，HUD 底部显示每个点数还剩几张。"),
+            MuzTheme.muted("放在背包任意位置都生效，不影响同桌其他人。"),
+            MuzTheme.muted("想临时关闭时移出背包即可。")
+        ));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        meta.getPersistentDataContainer().set(counterItemKey, PersistentDataType.STRING, "counter");
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    public boolean isCounterItem(ItemStack itemStack) {
+        return hasStringMarker(itemStack, counterItemKey, "counter");
+    }
+
+    /** HUD 调试棒：右键循环三行可见组合，Shift+右键由调用方设置为全关。 */
+    public ItemStack createHudDebugStickItem() {
+        ItemStack item = new ItemStack(Material.BLAZE_ROD);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(MuzTheme.warning("MUZ HUD 调试棒"));
+        meta.lore(List.of(
+            MuzTheme.muted("右键 · 循环牌行/头像行/记牌行的 7 种可见组合"),
+            MuzTheme.muted("Shift+右键 · 三行全关"),
+            MuzTheme.muted("只改你自己看到的 HUD，不写配置文件。")
+        ));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        meta.getPersistentDataContainer().set(hudDebugStickKey, PersistentDataType.STRING, "hud");
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    public static final int HUD_ROW_CARD = 1;
+    public static final int HUD_ROW_AVATAR = 2;
+    public static final int HUD_ROW_COUNTER = 4;
+    private static final int HUD_ROWS_ALL = HUD_ROW_CARD | HUD_ROW_AVATAR | HUD_ROW_COUNTER;
+
+    public int cycleHudRowOverride(UUID playerId) {
+        int next = nextHudRows(hudRowOverrides.getOrDefault(playerId, HUD_ROWS_ALL));
+        setHudRowOverride(playerId, next);
+        return next;
+    }
+
+    public static int nextHudRows(int current) {
+        return current % 7 + 1;
+    }
+
+    public void setHudRowOverride(UUID playerId, int rows) {
+        if (playerId == null) {
+            return;
+        }
+        hudRowOverrides.put(playerId, rows & HUD_ROWS_ALL);
+    }
+
+    public void hideAllHudRows(UUID playerId) {
+        setHudRowOverride(playerId, 0);
+    }
+
+    public int hudRowOverride(UUID playerId) {
+        return hudRowOverrides.getOrDefault(playerId, HUD_ROWS_ALL);
+    }
+
+    public void clearHudRowOverride(UUID playerId) {
+        if (playerId != null) {
+            hudRowOverrides.remove(playerId);
+        }
+    }
+
+    public TrickHudPreview trickHudPreview() {
+        TrickHudPreview local = trickHudPreview;
+        if (local == null) {
+            synchronized (this) {
+                local = trickHudPreview;
+                if (local == null) {
+                    local = new TrickHudPreview(this);
+                    trickHudPreview = local;
+                }
+            }
+        }
+        return local;
+    }
+
+    /** 显示当前玩家的 HUD 调试预览；实际绘制仍复用正式 TrickHudService。 */
+    public void showHudDebugPreview(Player player) {
+        if (player != null) {
+            trickHudPreview().show(player);
+        }
+    }
+
+    /** 把调试棒的位掩码转换为玩家可读的行名称。 */
+    public static String describeHudRows(int rows) {
+        if ((rows & HUD_ROWS_ALL) == 0) {
+            return "无";
+        }
+        List<String> names = new ArrayList<>(3);
+        if ((rows & HUD_ROW_CARD) != 0) {
+            names.add("牌行");
+        }
+        if ((rows & HUD_ROW_AVATAR) != 0) {
+            names.add("头像行");
+        }
+        if ((rows & HUD_ROW_COUNTER) != 0) {
+            names.add("记牌行");
+        }
+        return String.join("、", names);
+    }
+
+    public boolean isHudDebugStick(ItemStack itemStack) {
+        return hasStringMarker(itemStack, hudDebugStickKey, "hud");
+    }
+
+    /**
+     * 这名玩家背包里是否有记牌器。
+     *
+     * <p>【为什么不看主手】：打牌要右键选牌、左键出牌，主手被占住就没法顺手操作。
+     * 只要拿到过这件物品就一直生效，想临时关闭时移出背包即可。
+     *
+     * <p>遍历整个背包（含副手与盔甲位）：getStorageContents 漏掉副手，
+     * 玩家把记牌器换到副手会莫名失效。
+     */
+    public boolean hasCounterItem(Player player) {
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (isCounterItem(item)) {
+                return true;
+            }
+        }
+        return isCounterItem(player.getInventory().getItemInOffHand());
+    }
+
+    private boolean hasStringMarker(ItemStack itemStack, NamespacedKey key, String expected) {
+        if (itemStack == null || itemStack.getType().isAir() || !itemStack.hasItemMeta()) {
+            return false;
+        }
+        String marker = itemStack.getItemMeta().getPersistentDataContainer().get(key, PersistentDataType.STRING);
+        return expected.equalsIgnoreCase(marker);
+    }
+
+    public NamespacedKey getCounterItemKey() {
+        return counterItemKey;
+    }
+
+    public NamespacedKey getHudDebugStickKey() {
+        return hudDebugStickKey;
     }
 
     public boolean isTablePlacer(ItemStack itemStack) {
@@ -2727,7 +3012,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hoverCardScale = (float) cfgDouble("render.card-hover.scale", 1.08);
         hoverCardLift = cfgDouble("render.card-hover.lift", 0.06);
         cardHoverInterpolationTicks = Math.max(1, yamlConfig().getInt("render.card-hover.interpolation-ticks", 6));
-        cardHoverAnimationTypeIndex = Math.max(0, Math.min(AnimationCurve.values().length - 1, yamlConfig().getInt("render.card-hover.animation-type", 1)));
+        cardHoverAnimationTypeIndex = Math.clamp(yamlConfig().getInt("render.card-hover.animation-type", 1), 0, AnimationCurve.values().length - 1);
         // 新桌椅模型是按成品尺寸导出的（桌 2.5x2.5 格、椅 0.875x1.56 格），所以默认不再放大。
         // 旧模型只有 0.875 格，当年默认值 2.25 / 1.35 是为了把它撑到可用大小；
         // 换模型后若继续沿用旧默认值，桌子会变成 5.6 格宽，椅子会被埋进桌子里。
@@ -2881,8 +3166,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private void ensureConfigIntegrity() {
-        mergeDefaultYamlConfig();
-        boolean changed = false;
+        boolean changed = mergeDefaultYamlConfig();
         changed |= migrateLegacyFurnitureConfig(FurnitureType.TABLE);
         changed |= migrateLegacyFurnitureConfig(FurnitureType.CHAIR);
         changed |= migrateLegacyRenderConfig();
@@ -3090,7 +3374,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
         ensureConfigIntegrity();
         loadRenderSettings();
         loadAiSettings();
-        reloadTrickHudSettings();
+        reloadHudRuntimeState();
+        syncDebugWebServerRuntime();
+        // 【偏移服务也要重解析】：它的 initialised 只置一次，解析失败后永不重试。
+        // 若 CraftEngine 曾因资源包配置错误而没就绪，整条 HUD 会被 render 直接 hide；
+        // 不在这里重置的话，服主修好配置执行 /muz reload 依然什么都看不到，只能重启。
+        if (craftEngineOffsetService != null) {
+            craftEngineOffsetService.invalidate();
+        }
         feedback.update(stageProgress(1, totalStages), "刷新界面资源", "PlaceholderAPI / 渲染缓存");
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
@@ -3120,6 +3411,70 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     /**
+     * 同步 Debug Web 调试面板运行态。
+     *
+     * <p>【Debug Web 调试面板重载】：enabled/port 可能在 reload 之间被用户修改，
+     * 因此必须在每次 reloadVisualState 里同步字段与运行状态：
+     *   enabled=true 且未运行 → 按当前 port 创建并启动；之前启动失败的实例也会重试
+     *   enabled=true 且 port 改变 → 停掉旧端口并按新端口重启
+     *   enabled=false 且 debugWebServer!=null → 停止并置 null
+     */
+    private void syncDebugWebServerRuntime() {
+        boolean webUiEnabled = yamlConfig().getBoolean("debug.web-ui.enabled", false);
+        int configuredPort = yamlConfig().getInt("debug.web-ui.port", 2000);
+        if (!webUiEnabled) {
+            if (debugWebServer != null) {
+                debugWebServer.close();
+                debugWebServer = null;
+            }
+            syncHotbarHudRuntime(false);
+            return;
+        }
+        if (debugWebServer != null && debugWebServer.isRunning() && debugWebServer.getPort() != configuredPort) {
+            debugWebServer.close();
+            debugWebServer = null;
+        }
+        if (debugWebServer == null) {
+            debugWebServer = createDebugWebServer();
+        }
+        if (!debugWebServer.isRunning()) {
+            debugWebServer.start(configuredPort);
+        }
+        if (debugWebServer.isRunning()) {
+            syncHotbarHudRuntime(true);
+        } else {
+            syncHotbarHudRuntime(false);
+        }
+    }
+
+    private DebugWebServer createDebugWebServer() {
+        return new DebugWebServer(this, this::suspendHotbarHudForDebugWeb, this::resumeHotbarHudAfterDebugWeb);
+    }
+
+    private void suspendHotbarHudForDebugWeb() {
+        syncHotbarHudRuntime(true);
+    }
+
+    private void resumeHotbarHudAfterDebugWeb() {
+        syncHotbarHudRuntime(false);
+    }
+
+    private boolean isDebugWebServerRunning() {
+        return debugWebServer != null && debugWebServer.isRunning();
+    }
+
+    private void syncHotbarHudRuntime(boolean debugWebOverride) {
+        if (hotbarHudService == null) {
+            return;
+        }
+        boolean hotbarHudEnabled = !shuttingDown && yamlConfig().getBoolean("hotbar-hud.enabled", false);
+        // 水平偏移走 CE 负空格，重读即生效；垂直偏移不在这里处理，它必须落到
+        // 资源包字形的 ascent 上（见 HotbarDebugOverlayWriter）。
+        hotbarHudService.setOffsetX(yamlConfig().getInt("hotbar-hud.offset-x", 0));
+        hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride);
+    }
+
+    /**
      * 把 trick-hud 的新配置推给每张桌的 HUD 服务。
      *
      * <p>【为什么不能靠重建牌桌顺带解决】：{@code rebuildAllTables()} 重建的是牌桌实体
@@ -3127,6 +3482,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
      * final 字段，重建实体不会让它重读 config。
      */
     private void reloadTrickHudSettings() {
+        TrickHudPreview preview = trickHudPreview;
+        if (preview != null) {
+            preview.reloadSettings();
+        }
         if (tableManager == null) {
             return;
         }
@@ -3241,12 +3600,20 @@ public final class DoudizhuPlugin extends JavaPlugin {
             yamlConfig().set("room-levels.default-create-level", "low");
             changed = true;
         }
+        if (!yamlConfig().contains("debug.web-ui.enabled")) {
+            yamlConfig().set("debug.web-ui.enabled", false);
+            changed = true;
+        }
+        if (!yamlConfig().contains("debug.web-ui.port")) {
+            yamlConfig().set("debug.web-ui.port", 2000);
+            changed = true;
+        }
         if (!yamlConfig().contains("storage.sql.type")) {
             yamlConfig().set("storage.sql.type", "sqlite");
             changed = true;
         }
         if (!yamlConfig().contains("storage.sql.sqlite.file")) {
-            yamlConfig().set("storage.sql.sqlite.file", "storage/mumu-data.db");
+            yamlConfig().set("storage.sql.sqlite.file", "storage/data.db");
             changed = true;
         }
         if (!yamlConfig().contains("storage.sql.mysql.host")) {
@@ -3920,9 +4287,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return fallback;
         }
         try {
-            int red = Math.max(0, Math.min(255, Integer.parseInt(parts[0])));
-            int green = Math.max(0, Math.min(255, Integer.parseInt(parts[1])));
-            int blue = Math.max(0, Math.min(255, Integer.parseInt(parts[2])));
+            int red = Math.clamp(Integer.parseInt(parts[0]), 0, 255);
+            int green = Math.clamp(Integer.parseInt(parts[1]), 0, 255);
+            int blue = Math.clamp(Integer.parseInt(parts[2]), 0, 255);
             return Color.fromRGB(red, green, blue);
         } catch (NumberFormatException exception) {
             return fallback;
@@ -4175,7 +4542,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private int clampProfileIndex(int index) {
-        return Math.max(0, Math.min(PLAYER_OPTION_PROFILE_COUNT - 1, index));
+        return Math.clamp(index, 0, PLAYER_OPTION_PROFILE_COUNT - 1);
     }
 
     private OptionProfile optionProfile(String label, String spec, boolean soundProfile) {
@@ -4613,7 +4980,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
         public static AnimationCurve fromIndex(int index) {
             AnimationCurve[] values = values();
-            int normalized = Math.max(0, Math.min(values.length - 1, index));
+            int normalized = Math.clamp(index, 0, values.length - 1);
             return values[normalized];
         }
     }
@@ -4837,7 +5204,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return 0.0;
         }
         double base = (double) stageIndex / (double) totalStages;
-        return Math.max(0.05, Math.min(0.95, base + 0.02));
+        return Math.clamp(base + 0.02, 0.05, 0.95);
     }
 
     private double stageProgress(int stageIndex, int totalStages, int currentStep, int totalSteps) {
@@ -4846,8 +5213,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         double perStage = 1.0 / (double) totalStages;
         double base = stageIndex * perStage;
-        double withinStage = Math.max(0.0, Math.min(1.0, (double) currentStep / (double) totalSteps));
-        return Math.max(0.05, Math.min(0.95, base + withinStage * perStage));
+        double withinStage = Math.clamp((double) currentStep / (double) totalSteps, 0.0, 1.0);
+        return Math.clamp(base + withinStage * perStage, 0.05, 0.95);
     }
 
     private String rebuildDetail(String label, int count) {
@@ -4856,7 +5223,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     private String buildAsciiProgressBar(double progress, int width) {
         int normalizedWidth = Math.max(8, width);
-        double clamped = Math.max(0.0, Math.min(1.0, progress));
+        double clamped = Math.clamp(progress, 0.0, 1.0);
         int filled = (int) Math.round(clamped * normalizedWidth);
         StringBuilder builder = new StringBuilder();
         builder.append('[');
@@ -5003,7 +5370,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         StringBuilder builder = new StringBuilder();
         int painted = 0;
-        double verticalRatio = totalLines <= 1 ? 0.0 : Math.max(0.0, Math.min(1.0, (double) lineIndex / (double) (totalLines - 1)));
+        double verticalRatio = totalLines <= 1 ? 0.0 : Math.clamp((double) lineIndex / (double) (totalLines - 1), 0.0, 1.0);
         for (int index = 0; index < line.length(); index++) {
             char character = line.charAt(index);
             if (character == ' ') {
@@ -5026,7 +5393,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private RgbColor interpolateColor(RgbColor from, RgbColor to, double ratio) {
-        double clamped = Math.max(0.0, Math.min(1.0, ratio));
+        double clamped = Math.clamp(ratio, 0.0, 1.0);
         return new RgbColor(
             (int) Math.round(from.red() + (to.red() - from.red()) * clamped),
             (int) Math.round(from.green() + (to.green() - from.green()) * clamped),
@@ -5140,7 +5507,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
             if (bossBar == null) {
                 return;
             }
-            bossBar.progress((float) Math.max(0.0, Math.min(1.0, progress)));
+            bossBar.progress((float) Math.clamp(progress, 0.0, 1.0));
             bossBar.name(plugin.bossBarComponent(title, detail));
         }
 

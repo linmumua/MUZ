@@ -1,27 +1,37 @@
 package linmumua.doudizhu.assets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
  * 地主王冠的守护测试。
  *
- * <p>王冠是【地主身份标识】，不是装饰：玩家靠它一眼认出谁是地主。所以这里守的不是「画得好不好看」，
- * 而是三件会让它失效或让 HUD 歪掉的事：
+ * <p>王冠是【地主身份标识】，不是装饰：玩家靠它一眼认出谁是地主。
+ *
+ * <p><b>这一批测试整体重写过一次</b>，因为王冠的实现换了载体：原先是把王冠像素【盖进 8x8 脸矩阵】
+ * （`withCrown(int[][]) -> int[][]`），现在是【独立字形家族】画在脸上方
+ * （{@link PlayerHeadRenderer#crownMiniMessage}，返回 MiniMessage 文本）。
+ * 守的风险没变，只是断言对象从矩阵变成了文本：
  * <ol>
- *   <li>王冠占的是描边那两行，所以矩阵必须仍是 10x10 方阵 —— 变成 12x12 就超出预生成的字形范围，
- *       渲染出来是豆腐块；非方阵会让右侧列被截掉；</li>
- *   <li>脸不能被王冠盖掉 —— 王冠压在脸上等于毁了头像；</li>
- *   <li>王冠确实画出来了、而且是金色 —— 空实现也能让上面两条过。</li>
+ *   <li>王冠必须【净位移为零】—— 差一个像素，戴冠的地主整槽横向错开，三头像不对齐；</li>
+ *   <li>脸的矩阵【一个像素都不能动】—— 这是换独立家族的全部意义（先前两版一个挤低脸、一个遮住头发）；</li>
+ *   <li>王冠确实画出来了、是金色、且用的是王冠字体 —— 空实现也能让上面两条过；</li>
+ *   <li>王冠与描边【互不干扰】—— 两者曾经互斥，现在必须能同时开。</li>
  * </ol>
  */
 class PlayerHeadCrownTest {
 
-    /** 造一张纯色的假脸，每个像素都不透明，便于检查「脸有没有被盖掉」。 */
+    /** 假的偏移提供者：把偏移量原样写成可断言的标记，便于核算净位移。 */
+    private static final java.util.function.IntFunction<String> OFFSETS = px -> "[" + px + "]";
+
+    private static final Pattern OFFSET = Pattern.compile("\\[(-?\\d+)]");
+
+    /** 造一张纯色的假脸，每个像素都不透明。 */
     private static int[][] solidFace(int argb) {
         int size = PackAssets.AVATAR_HEAD_PIXELS;
         int[][] face = new int[size][size];
@@ -33,195 +43,156 @@ class PlayerHeadCrownTest {
         return face;
     }
 
-    private static boolean containsColor(int[][] matrix, int argb) {
-        for (int[] row : matrix) {
-            for (int pixel : row) {
-                if (pixel == argb) {
-                    return true;
-                }
-            }
+    /**
+     * 数一段 MiniMessage 的净水平位移：所有偏移标记之和，加上每个字形自带的前进量。
+     *
+     * <p>字形前进量是 {@code scale + 1}（{@code GLYPH_TRAILING_SPACING} 那 1 像素字间距）。
+     */
+    private static int netAdvance(String miniMessage, int scale) {
+        int total = 0;
+        Matcher matcher = OFFSET.matcher(miniMessage);
+        while (matcher.find()) {
+            total += Integer.parseInt(matcher.group(1));
         }
-        return false;
+        // 每个 <color:#......> 恰好包一个字形方块。
+        int glyphs = countOccurrences(miniMessage, "<color:#");
+        return total + glyphs * (scale + 1);
     }
 
-    private static int opaqueCount(int[][] matrix) {
+    private static int countOccurrences(String text, String needle) {
         int count = 0;
-        for (int[] row : matrix) {
-            for (int pixel : row) {
-                if ((pixel >>> 24) != 0) {
-                    count++;
-                }
+        int from = 0;
+        while (true) {
+            int at = text.indexOf(needle, from);
+            if (at < 0) {
+                return count;
             }
-        }
-        return count;
-    }
-
-    /**
-     * 戴冠【不许改变矩阵尺寸】—— 这是三个头像能对齐的前提。
-     *
-     * <p><b>守的是哪个 bug。</b>第一版王冠是往矩阵上面加两行做的（8x8 变 10x10），结果戴冠的
-     * 地主脸被挤低两像素、那一槽也宽一截，三个头像并排时一眼看出没对齐 —— 服主截图报的就是这个。
-     *
-     * <p>尺寸一致还连带保证了另外两件事：宽度不用为地主分叉（{@code advanceWidth} 只看描边），
-     * 行数不会超出构建期预生成的字形范围（{@code avatarPixelChar} 只接受 {@code row < 10}）。
-     */
-    @Test
-    void 戴冠不改变矩阵尺寸() {
-        int size = PackAssets.AVATAR_HEAD_PIXELS;
-        int[][] crowned = PlayerHeadRenderer.withCrown(solidFace(0xFF808080));
-
-        assertEquals(size, crowned.length,
-            "戴冠后行数变了：地主的脸会比农民高低错开，三个头像并排就是没对齐");
-        for (int row = 0; row < crowned.length; row++) {
-            assertEquals(size, crowned[row].length,
-                "第 " + row + " 行列数变了：renderMiniMessage 用同一个数当行列数，会截掉右侧列");
+            count++;
+            from = at + needle.length();
         }
     }
 
     /**
-     * 王冠只许盖头顶那两行，下面的五官一个像素都不许动。
+     * 王冠画完【净位移必须为零】—— 这是三个头像能对齐的前提。
      *
-     * <p><b>守的是哪个 bug。</b>王冠现在是直接盖在头像上的，盖的行数写多了就会吃掉眼睛 ——
-     * 那等于用身份标识毁掉了头像本身。头顶两行本来就是头发，被王冠压住是对的。
+     * <p><b>守的是哪个 bug。</b>第一版王冠往矩阵上加两行，戴冠的地主脸被挤低两像素、那一槽也宽一截，
+     * 三头像并排时一眼看出没对齐（服主截图报的就是这个）。换成独立家族后，几何风险从「行数变了」
+     * 转移到「光标没回到原位」：王冠画在脸【之前】，如果画完光标没退回行首，脸就会整体右移。
+     *
+     * <p>净位移为零还连带保证 {@code advanceWidth} 不用为地主分叉 —— 它只看描边。
      */
     @Test
-    void 王冠只盖头顶两行不动五官() {
-        int faceArgb = 0xFF3366CC;
-        int[][] crowned = PlayerHeadRenderer.withCrown(solidFace(faceArgb));
-
-        // 第 2 行往下是五官区，必须原样保留。
-        for (int row = 2; row < crowned.length; row++) {
-            for (int col = 0; col < crowned[row].length; col++) {
-                assertEquals(faceArgb, crowned[row][col],
-                    "(" + row + "," + col + ") 被王冠改写了：盖到五官上，头像会被毁掉");
-            }
+    void 王冠画完净位移为零() {
+        int scale = 6;
+        for (int faceWidth : new int[] {
+            PackAssets.AVATAR_HEAD_PIXELS, PackAssets.AVATAR_OUTLINED_PIXELS}) {
+            String crown = PlayerHeadRenderer.crownMiniMessage(faceWidth, scale, 0, OFFSETS);
+            assertEquals(0, netAdvance(crown, scale),
+                "王冠净位移必须为零（脸宽 " + faceWidth + " 列），否则戴冠的头像整槽横向错开");
         }
     }
 
     /**
-     * 王冠不改入参：调用方那份原始头像必须保持干净。
+     * 换独立家族的【全部意义】：脸的矩阵一个像素都不动。
      *
-     * <p><b>守的是哪个 bug。</b>渲染层同一张皮肤要出戴冠和不戴冠两个版本（地主和农民常用同一张
-     * 皮肤）。如果 {@code withCrown} 就地改了传进来的矩阵，先渲染的那次会把王冠【焊死】在
-     * 那份像素上，后面不戴冠的版本也会带着王冠 —— 农民头上莫名多顶王冠，而且极难查。
+     * <p><b>守的是哪两个 bug。</b>第一版往矩阵加两行 → 脸被挤低；第二版盖在头顶两行 → 头发被遮掉。
+     * 现在王冠在自己的字形家族里，脸矩阵根本不参与王冠渲染 —— 这条测试钉住这一点：
+     * 戴冠与不戴冠，脸那部分的输出必须【逐字符相同】。
      */
     @Test
-    void 戴冠不许改动传进来的矩阵() {
-        int faceArgb = 0xFF3366CC;
-        int[][] face = solidFace(faceArgb);
-        PlayerHeadRenderer.withCrown(face);
-
-        for (int row = 0; row < face.length; row++) {
-            for (int col = 0; col < face[row].length; col++) {
-                assertEquals(faceArgb, face[row][col],
-                    "入参 (" + row + "," + col + ") 被改了：同一张皮肤的不戴冠版本会跟着长出王冠");
-            }
-        }
-    }
-
-    /**
-     * 王冠图案必须左右对称。
-     *
-     * <p><b>守的是哪个 bug。</b>图案是手写的字符串，很容易两边空格数写不一样（第一版就是
-     * {@code "#  #  # "}，右边多一列空格）。头像是并排摆的，王冠偏一边一眼就看出来。
-     */
-    @Test
-    void 王冠图案左右对称() {
-        int[][] crowned = PlayerHeadRenderer.withCrown(solidFace(0));
-
-        for (int row = 0; row < 2; row++) {
-            int[] pixels = crowned[row];
-            for (int col = 0; col < pixels.length / 2; col++) {
-                int mirror = pixels.length - 1 - col;
-                assertEquals(pixels[col] >>> 24 != 0, pixels[mirror] >>> 24 != 0,
-                    "第 " + row + " 行第 " + col + " 与第 " + mirror + " 列不对称：王冠会看着偏向一边");
-            }
-        }
-    }
-
-    /**
-     * 王冠必须真的画出来，且是「山」字形的金色图案。
-     *
-     * <p><b>守的是哪个 bug。</b>上面两条测的都是「没破坏什么」，一个直接 return 原矩阵、
-     * 什么都不画的空实现照样能过。这条钉住王冠确实存在：
-     * 最上一行是三个冠尖（不连续），第二行是整条冠带（连续 8 列），且用的是金色。
-     *
-     * <p>不逐像素死钉具体图案：那样改冠形就得改测试，测试会变成实现的复印件。
-     * 钉的是「山字形」这个结构特征 —— 尖比带少、带是满的。
-     */
-    @Test
-    void 王冠是山字形的金色图案() {
-        // 用全透明的空头像：这样最上两行的不透明像素只可能来自王冠本身。
-        int[][] crowned = PlayerHeadRenderer.withCrown(solidFace(0));
-
-        int prongs = opaqueCount(new int[][] {crowned[0]});
-        int band = opaqueCount(new int[][] {crowned[1]});
-
-        assertTrue(prongs > 0, "最上一行没有任何不透明像素：王冠压根没画出来");
-        assertEquals(PackAssets.AVATAR_HEAD_PIXELS, band,
-            "第二行不是一条完整的冠带：山字形的底横必须是连续的，否则看着像三根断掉的刺");
-        assertTrue(prongs < band,
-            "冠尖数量不少于冠带宽度：那就不是山字形而是一个实心方块（尖=" + prongs + "，带=" + band + "）");
-
-        // 金色：与既有地主金边同色。冠尖和冠带必须同色，不然像两截东西拼起来的。
-        int gold = 0xFFFFD24A;
-        for (int col = 0; col < crowned[1].length; col++) {
-            if ((crowned[1][col] >>> 24) != 0) {
-                assertEquals(gold, crowned[1][col],
-                    "冠带第 " + col + " 列不是金色：王冠要和地主金边同色才认得出是同一套视觉");
-            }
-        }
-    }
-
-    /**
-     * 戴冠后的像素必须和原头像【不同】。
-     *
-     * <p><b>守的是哪个 bug。</b>缓存 key 里带了 {@code crowned}，而地主和农民很可能用同一张皮肤
-     * （同一个 URL）。如果 {@code withCrown} 实际没改变任何像素（比如王冠色误写成全透明），
-     * 缓存倒是分开了，画出来却一模一样 —— 王冠静默消失，且因为缓存分开了更难查。
-     */
-    @Test
-    void 戴冠后的像素必须与原头像不同() {
+    void 戴冠不改动脸的任何像素() {
+        int scale = 6;
         int[][] face = solidFace(0xFF808080);
-        int[][] crowned = PlayerHeadRenderer.withCrown(face);
+        String plain = PlayerHeadRenderer.renderMiniMessage(face, scale, OFFSETS, 0, false);
+        String crowned = PlayerHeadRenderer.renderMiniMessage(face, scale, OFFSETS, 0, true);
 
-        boolean differs = false;
-        for (int row = 0; row < face.length && !differs; row++) {
-            for (int col = 0; col < face[row].length; col++) {
-                if (face[row][col] != crowned[row][col]) {
-                    differs = true;
-                    break;
-                }
-            }
-        }
-        assertTrue(differs, "戴冠后像素与原头像完全一致：王冠没画出来，但缓存已经分成两条，很难查");
+        assertTrue(crowned.endsWith(plain),
+            "戴冠版必须是「王冠片段 + 完全相同的脸」；脸那部分只要差一个字符，"
+                + "就说明王冠又动了脸矩阵：\n不戴冠=" + plain + "\n戴冠=" + crowned);
+        String crownPart = crowned.substring(0, crowned.length() - plain.length());
+        assertNotEquals("", crownPart, "戴冠必须真的多画了王冠片段");
     }
 
     /**
-     * 王冠可以和描边【同时】开，且描边会把王冠一起勾出来。
+     * 王冠必须真的画出来，而且是金色。
      *
-     * <p><b>守的是哪个 bug。</b>第一版王冠占的是描边那两行，两者互斥、只能二选一。现在王冠
-     * 盖在头顶不改尺寸，就该能叠加。顺序也有讲究：先戴冠再描边，描边才会沿着王冠的轮廓走；
-     * 反过来先描边，王冠自己没有边、看着像贴上去的。
+     * <p><b>守的是哪个 bug。</b>上面两条测试对「空实现」全都通过 —— 什么都不画，净位移当然是零、
+     * 脸当然没被动。地主标识失效是【静默】的：玩家只会觉得「怎么看不出谁是地主」，
+     * 没人会想到是渲染问题。所以必须断言真的有金色方块。
      */
     @Test
-    void 王冠可以与描边叠加() {
-        int[][] face = solidFace(0xFF808080);
-        int outline = 0xFF000000;
+    void 王冠必须画出金色方块() {
+        String crown = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, 6, 0, OFFSETS);
+        int painted = countOccurrences(crown, "<color:#");
+        assertTrue(painted > 0, "王冠一个方块都没画，地主标识会静默失效：" + crown);
+        assertEquals(painted, countOccurrences(crown, "ffd24a"),
+            "王冠的每个方块都必须是金色 0xFFD24A（与既有地主金边同色）：" + crown);
+    }
 
-        // 渲染层的顺序：先戴冠，再描边。
-        int[][] both = PlayerHeadRenderer.withOutline(PlayerHeadRenderer.withCrown(face), outline);
-        int[][] onlyOutlined = PlayerHeadRenderer.withOutline(face, outline);
+    /**
+     * 王冠必须挂在【王冠自己的字体】上。
+     *
+     * <p><b>守的是哪个 bug。</b>王冠字形注册在 {@code muz_avatar_crown} 上，套错字体（比如沿用
+     * 头像那张）会让王冠整片变豆腐块 —— 而且因为码位在头像族里也是合法的，画出来是【别的东西】，
+     * 比空白更难排查。
+     */
+    @Test
+    void 王冠套的是王冠字体() {
+        String crown = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, 6, 0, OFFSETS);
+        assertTrue(crown.contains("<font:" + PackAssets.AVATAR_CROWN_FONT + ">"),
+            "王冠必须套 " + PackAssets.AVATAR_CROWN_FONT + "，套错会画成别的图案：" + crown);
+    }
 
-        assertEquals(PackAssets.AVATAR_OUTLINED_PIXELS, both.length,
-            "戴冠+描边后行数不是 10：超出预生成的字形范围，会渲染成豆腐块");
-        assertEquals(onlyOutlined.length, both.length,
-            "戴冠+描边与只描边的行数不同：地主那一槽会和农民高低错开");
-        // 【不能比不透明像素数】：脸本来就是不透明的，王冠盖上去只改颜色、不改不透明像素数，
-        // 两边计数会一样。要查的是王冠那个金色到底还在不在。
-        assertTrue(containsColor(both, 0xFFFFD24A),
-            "戴冠+描边后找不到王冠的金色：王冠在描边路径上被吞掉了");
-        assertFalse(containsColor(onlyOutlined, 0xFFFFD24A),
-            "只描边却出现了王冠金色：说明王冠被无条件画上了，农民也会戴冠");
+    /**
+     * 王冠与描边【互不干扰】，必须能同时开。
+     *
+     * <p><b>守的是哪个 bug。</b>「王冠加两行」那版里两者是互斥的（描边把 8x8 撑到 10x10，
+     * 王冠再加两行就超出预生成行数）。现在描边只作用于脸矩阵、王冠在独立家族，两者正交。
+     * 这条测试同时守住居中：8 列的王冠画在 10 列的脸上时必须右移一格，否则王冠偏左。
+     */
+    @Test
+    void 王冠与描边可以同时开且王冠居中() {
+        int scale = 6;
+        String onFace = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_HEAD_PIXELS, scale, 0, OFFSETS);
+        String onOutlined = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_OUTLINED_PIXELS, scale, 0, OFFSETS);
+
+        assertEquals(countOccurrences(onFace, "<color:#"), countOccurrences(onOutlined, "<color:#"),
+            "描边不该改变王冠画多少个方块 —— 两者是正交的");
+        assertNotEquals(onFace, onOutlined,
+            "10 列的脸上王冠必须右移一格才居中，输出理应与 8 列时不同");
+        assertEquals(0, netAdvance(onOutlined, scale),
+            "居中留白必须在行末退干净，否则描边+戴冠的地主整槽错开");
+    }
+
+    /**
+     * 偏移档必须真的传到王冠字形上。
+     *
+     * <p><b>守的是哪个 bug。</b>王冠字形每一档偏移是不同码位。如果渲染时把档位丢了（比如恒传 0），
+     * 王冠会固定画在【屏幕顶部】而脸跟着 HUD 沉下去 —— 王冠和脸分家，飘在半空。
+     */
+    @Test
+    void 偏移档变了王冠码位跟着变() {
+        int scale = 6;
+        String tier0 = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, scale, 0, OFFSETS);
+        String tier5 = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, scale, 5, OFFSETS);
+        assertNotEquals(tier0, tier5,
+            "不同偏移档必须用不同码位的王冠字形，否则王冠不会跟着 HUD 一起下沉");
+    }
+
+    /**
+     * 缩放倍数必须真的传到王冠字形上。
+     *
+     * <p><b>守的是哪个 bug。</b>王冠字形按 scale 预生成。丢了 scale（比如恒传默认值）会让王冠
+     * 与脸【尺寸不匹配】：脸放大到 16 倍而王冠还是 6 倍，看着像顶小帽子。
+     */
+    @Test
+    void 缩放倍数变了王冠字形跟着变() {
+        String small = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_HEAD_PIXELS, PackAssets.AVATAR_PIXEL_MIN_SCALE, 0, OFFSETS);
+        String large = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_HEAD_PIXELS, PackAssets.AVATAR_PIXEL_MAX_SCALE, 0, OFFSETS);
+        assertNotEquals(small, large, "不同 scale 必须用不同的王冠字形，否则王冠与脸尺寸不匹配");
     }
 }

@@ -87,6 +87,48 @@ class TrickHudViewTest {
      * 成立才敢拆。如果判断错了，桌边玩家名字会变豆腐块，所以这里把「HUD 后面接一段中文，
      * 那段必须仍是默认字体」写成断言。
      */
+    /**
+     * 牌面字体必须【随档位变】，深档不能沿用基名。
+     *
+     * <p><b>守的是哪个 bug。</b>牌族有 1025 档、一张字体只装 144 档，所以深档的牌挂在
+     * {@code muz_cards_2..8} 上。改动前这里写死 {@code CARD_GLYPH_FONT}，深档整手牌是豆腐块。
+     *
+     * <p>【为什么必须单独有这条】：现存的字体归属测试只用档 0，而档 0 的字体名恰好【就是】
+     * 基名，写死也能过；资源包契约测试比对的是 images.yml 自己的 font 字段，不看渲染输出。
+     * 两边都覆盖不到「渲染时取错字体」—— 实测把 cardGlyphFont(...) 换回 CARD_GLYPH_FONT，
+     * 全树测试依然全绿。这条就是补这个洞。
+     */
+    @Test
+    void 牌面字体随档位变而不是写死基名() {
+        List<DoudizhuCard> cards = List.of(card(CardRank.THREE), card(CardRank.FOUR));
+        // 找一个落在第 2 张字体上的档：牌族 144 档/张，档号 = heightTier * 偏移档数 + downTier。
+        int downTierCount = PackAssets.cardGlyphDownOffsetTierCount();
+        int deepHeightTier = -1;
+        int deepDownTier = -1;
+        for (int h = 0; h < PackAssets.cardGlyphHeightTierCount() && deepHeightTier < 0; h++) {
+            for (int d = 0; d < downTierCount; d++) {
+                if (!PackAssets.cardGlyphFont(h, d).equals(PackAssets.CARD_GLYPH_FONT)) {
+                    deepHeightTier = h;
+                    deepDownTier = d;
+                    break;
+                }
+            }
+        }
+        assertTrue(deepHeightTier >= 0,
+            "找不到任何落在非基名字体上的档 —— 牌族没被切分？那这条测试验不到东西");
+
+        String line = TrickHudView.buildMiniMessage(
+            TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY,
+            0, GAP, cards, STEP, OFFSETS, deepHeightTier, deepDownTier, 0);
+        String expected = PackAssets.cardGlyphFont(deepHeightTier, deepDownTier);
+
+        assertTrue(line.contains("<font:" + expected + ">"),
+            "档(" + deepHeightTier + "," + deepDownTier + ") 的牌必须套 " + expected
+                + "，套基名会让这一档整手牌变豆腐块（而浅档正常，默认配置测不出来）");
+        assertFalse(line.contains("<font:" + PackAssets.CARD_GLYPH_FONT + ">"),
+            "深档不该出现基名 " + PackAssets.CARD_GLYPH_FONT + "，那是第 0 张字体的名字");
+    }
+
     @Test
     void 每段文本的字体归属正确且不会漏给后续文本() {
         // 模拟 CraftEngine 的偏移片段：它自己就是一段带字体的文本。
@@ -107,8 +149,10 @@ class TrickHudViewTest {
 
         assertTrue(cardFonts.size() >= 2, "两张牌的字形应该都被解析出来，实际：" + cardFonts);
         for (String font : cardFonts) {
-            assertEquals(PackAssets.CARD_GLYPH_FONT, font,
-                "牌面字形没落在 " + PackAssets.CARD_GLYPH_FONT + " 上，客户端会显示豆腐块");
+            // 字体名随档位变（牌族切成 8 张），所以按当档算出来的名字比对。
+            String expectedFont = PackAssets.cardGlyphFont(0, 0);
+            assertEquals(expectedFont, font,
+                "牌面字形没落在 " + expectedFont + " 上，客户端会显示豆腐块");
         }
         assertEquals(List.of("craftengine:offset"), offsetFonts,
             "偏移片段应该保持自己的字体");
@@ -456,6 +500,204 @@ class TrickHudViewTest {
         );
     }
 
+    /**
+     * 记牌器行宽必须【逐格累加各格自报的宽度】，不能按「格数 × 某个固定宽」算。
+     *
+     * <p><b>守的是哪个 bug。</b>各格位数天然不等：某点数剩 4 张是一位数、剩 10 张以上是两位数，
+     * 宽度就差一个数字的宽。若行宽用乘法估算，算出来的值和实际画出来的宽度不一致，
+     * 会同时打坏两件事：一是 containerAdvance 取错最大值、整块 HUD 的居中基准偏掉；
+     * 二是行尾「补到容器宽」的补偿量算错，净前进量不再恒等于 W，
+     * 客户端按错误总宽居中，三行会各自错开而不是叠成一列。
+     *
+     * <p>这里故意让三格宽度互不相同（7/13/7），只要实现里出现任何等宽假定，
+     * 期望值就对不上 —— 乘法估算无论取哪一格当基准都会偏。
+     */
+    @Test
+    void 记牌器行宽按各格实际宽度逐个累加而不是假定等宽() {
+        List<TrickHudView.CounterCell> counters = List.of(
+            counterCell(7),
+            counterCell(13),
+            counterCell(7)
+        );
+        int gap = 2;
+
+        int advance = TrickHudView.containerAdvance(0, 0, 0, 0, 0, counters, gap);
+
+        // 7 + 13 + 7 = 27 个格子宽，外加两个间距 = 31。
+        // 若按「3 格 × 7」算得 25、按「3 格 × 13」算得 43，都与此不符。
+        assertEquals(27 + 2 * gap, advance, "行宽必须是各格宽度之和加格间距");
+    }
+
+    /**
+     * 记牌器行必须和其余两行【共用同一个原点】，并把光标补到容器宽。
+     *
+     * <p><b>守的是哪个 bug。</b>这个布局全靠客户端「按文本总宽自动居中」来把三行叠在一起：
+     * 每行都得从同一原点起画，最后由末行把净前进量补足到 W。如果记牌器行忘了退回行首、
+     * 或末行少补了那段留白，总宽就不再是 W，客户端居中时整块 HUD 横向漂移，
+     * 且三行漂移量不一致 —— 牌行、头像行、记牌器行会错开成阶梯状。
+     *
+     * <p>这里让记牌器行成为最窄的行（牌行更宽），于是它必须自己用留白补偿；
+     * 断言净前进量恰好等于 containerAdvance，就把「补偿算错」直接暴露出来。
+     */
+    @Test
+    void 记牌器行与其余两行共用原点且净前进量等于容器宽() {
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(7), counterCell(7));
+        int gap = 2;
+        int slot = 40;
+        int avatarGap = 4;
+        int step = 12;
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR, CardRank.FIVE);
+
+        String line = TrickHudView.buildMiniMessage(
+            avatar(slot), avatar(slot), avatar(slot),
+            slot, avatarGap, hand, step, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, counters, gap);
+
+        int expected = TrickHudView.containerAdvance(slot, avatarGap, hand.size(), step, 0, counters, gap);
+        assertEquals(expected, netAdvance(line), "净前进量必须恒等于容器宽，否则客户端居中会漂移");
+
+        // 记牌器行的第一格左沿 = (W - 行宽) / 2，即这一行自己也是居中的。
+        List<Integer> counterLefts = new ArrayList<>();
+        walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
+        int rowWidth = 7 + 7 + gap;
+        assertEquals(2, counterLefts.size(), "两格都要画出来");
+        assertEquals((expected - rowWidth) / 2, counterLefts.get(0), "记牌器行必须自己居中");
+        assertEquals(counterLefts.get(0) + 7 + gap, counterLefts.get(1), "第二格紧随第一格加间距");
+    }
+
+    /**
+     * 空格子【照样要走完自己自报的宽度】，不能直接跳过。
+     *
+     * <p><b>守的是哪个 bug。</b>某个点数出完后该格可能不画内容。若此时连宽度也不前进，
+     * 后面所有格子会整体左移一格，行宽随之缩短 —— 而记牌器的实用价值就在于
+     * 各点数的格子位置固定，玩家靠位置扫读。位置会跳动的记牌器等于没有。
+     */
+    @Test
+    void 空格子照样前进自报宽度以免后续格子左移() {
+        int gap = 2;
+        List<TrickHudView.CounterCell> counters = List.of(
+            new TrickHudView.CounterCell("", 7),
+            counterCell(7)
+        );
+
+        String line = TrickHudView.buildMiniMessage(
+            null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, counters, gap);
+
+        List<Integer> counterLefts = new ArrayList<>();
+        walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
+        assertEquals(1, counterLefts.size(), "空格子不产出可见片段");
+        // 第二格左沿必须是 7 + gap；若空格子被跳过则会变成 0。
+        assertEquals(7 + gap, counterLefts.get(0), "空格子必须占位，后续格子不得左移");
+        assertEquals(7 + gap + 7, netAdvance(line), "行宽必须包含空格子占的宽度");
+    }
+
+    private static TrickHudView.CounterCell counterCell(int advance) {
+        return new TrickHudView.CounterCell("<counter:" + advance + ">", advance);
+    }
+
+    /**
+     * 每行的 x 只该动那一行。
+     *
+     * <p>【为什么这条必须存在】：三行是拼在同一个字符串里靠光标进退分隔的，行首推了多少
+     * 行尾就要退回多少。少退一次，后面的行会被前一行的 x 带着一起跑 —— 表现为「调牌行的 x，
+     * 头像行也在动」，而所有旧的居中测试都会照旧全绿，因为它们只在三行 x 全为 0 时跑。
+     */
+    @Test
+    void perRowOffsetMovesOnlyThatRow() {
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(10), counterCell(12));
+
+        List<Integer> baseCards = new ArrayList<>();
+        List<Integer> baseAvatars = new ArrayList<>();
+        List<Integer> baseCounters = new ArrayList<>();
+        walk(rowOffsetLine(hand, counters, TrickHudView.RowXOffsets.NONE),
+            baseCards, null, 0, 0, baseAvatars, baseCounters);
+
+        // 只给牌行 +30：牌行整体右移 30，另两行一个像素都不许动。
+        List<Integer> movedCards = new ArrayList<>();
+        List<Integer> sameAvatars = new ArrayList<>();
+        List<Integer> sameCounters = new ArrayList<>();
+        walk(rowOffsetLine(hand, counters, new TrickHudView.RowXOffsets(30, 0, 0)),
+            movedCards, null, 0, 0, sameAvatars, sameCounters);
+
+        assertEquals(baseCards.size(), movedCards.size(), "偏移不该改变画出的牌数");
+        for (int index = 0; index < movedCards.size(); index++) {
+            assertEquals(baseCards.get(index) + 30, movedCards.get(index),
+                "牌行第 " + index + " 张没有整体右移 30");
+        }
+        assertEquals(baseAvatars, sameAvatars, "只调了牌行的 x，头像行不该动");
+        assertEquals(baseCounters, sameCounters, "只调了牌行的 x，记牌行不该动");
+    }
+
+    /**
+     * 三行各调各的，互不串扰，且净前进量不变。
+     *
+     * <p>净前进量是客户端居中的依据：它一变，整条 HUD 的水平基准就跟着漂，
+     * 三行会一起偏移半个差值 —— 那就不是「某一行相对另一行挪」而是整体乱掉了。
+     */
+    @Test
+    void perRowOffsetsAreIndependentAndPreserveNetAdvance() {
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(10), counterCell(12));
+        String base = rowOffsetLine(hand, counters, TrickHudView.RowXOffsets.NONE);
+
+        List<Integer> baseCards = new ArrayList<>();
+        List<Integer> baseAvatars = new ArrayList<>();
+        List<Integer> baseCounters = new ArrayList<>();
+        walk(base, baseCards, null, 0, 0, baseAvatars, baseCounters);
+
+        TrickHudView.RowXOffsets all = new TrickHudView.RowXOffsets(-12, 7, 40);
+        String moved = rowOffsetLine(hand, counters, all);
+        List<Integer> movedCards = new ArrayList<>();
+        List<Integer> movedAvatars = new ArrayList<>();
+        List<Integer> movedCounters = new ArrayList<>();
+        walk(moved, movedCards, null, 0, 0, movedAvatars, movedCounters);
+
+        assertShiftedBy(baseCards, movedCards, -12, "牌行");
+        assertShiftedBy(baseAvatars, movedAvatars, 7, "头像行");
+        assertShiftedBy(baseCounters, movedCounters, 40, "记牌行");
+        assertEquals(netAdvance(base), netAdvance(moved),
+            "每行的 x 必须首尾配对，净前进量不能变，否则客户端居中基准会漂");
+    }
+
+    /** 每行的 x 是叠加在整体 offset-x 之上的增量，不是替代。 */
+    @Test
+    void perRowOffsetStacksOnGlobalOffset() {
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(10));
+
+        List<Integer> onlyRow = new ArrayList<>();
+        walk(TrickHudView.buildMiniMessage(SMALL, BIG, SMALL, SLOT, GAP, hand, STEP, OFFSETS,
+            0, 0, 0, new TrickHudView.RowXOffsets(5, 0, 0), counters, GAP),
+            onlyRow, null, 0, 0, new ArrayList<>(), new ArrayList<>());
+
+        List<Integer> bothApplied = new ArrayList<>();
+        walk(TrickHudView.buildMiniMessage(SMALL, BIG, SMALL, SLOT, GAP, hand, STEP, OFFSETS,
+            0, 0, 100, new TrickHudView.RowXOffsets(5, 0, 0), counters, GAP),
+            bothApplied, null, 0, 0, new ArrayList<>(), new ArrayList<>());
+
+        assertShiftedBy(onlyRow, bothApplied, 100, "整体 offset-x 应当叠加在每行 x 之上");
+    }
+
+    private static String rowOffsetLine(
+        List<DoudizhuCard> hand,
+        List<TrickHudView.CounterCell> counters,
+        TrickHudView.RowXOffsets rowX
+    ) {
+        return TrickHudView.buildMiniMessage(SMALL, BIG, SMALL, SLOT, GAP, hand, STEP, OFFSETS,
+            0, 0, 0, rowX, counters, GAP);
+    }
+
+    private static void assertShiftedBy(
+        List<Integer> base, List<Integer> moved, int delta, String rowName) {
+        assertEquals(base.size(), moved.size(), rowName + "的元素个数变了");
+        for (int index = 0; index < moved.size(); index++) {
+            assertEquals(base.get(index) + delta, moved.get(index),
+                rowName + "第 " + index + " 个元素没有整体平移 " + delta);
+        }
+    }
+
     // ---- 下面是把输出当绘图指令执行的小解释器 ----
 
     /** count 张同样的牌。用来验张数变化时的几何，牌面本身是什么无关。 */
@@ -522,6 +764,18 @@ class TrickHudViewTest {
         int downTier,
         List<Integer> avatarLefts
     ) {
+        walk(line, cardLefts, cursorOut, heightTier, downTier, avatarLefts, new ArrayList<>());
+    }
+
+    private static void walk(
+        String line,
+        List<Integer> cardLefts,
+        int[] cursorOut,
+        int heightTier,
+        int downTier,
+        List<Integer> avatarLefts,
+        List<Integer> counterLefts
+    ) {
         int cursor = 0;
         int advance = PackAssets.cardGlyphAdvance(heightTier);
         for (int index = 0; index < line.length(); index++) {
@@ -534,6 +788,11 @@ class TrickHudViewTest {
                 } else if (tag.startsWith("avatar:")) {
                     avatarLefts.add(cursor);
                     cursor += Integer.parseInt(tag.substring(7));
+                } else if (tag.startsWith("counter:")) {
+                    // 记牌器格：和头像同构，自报宽度。单独一种标签是为了能和补偿偏移区分开，
+                    // 否则测「这一格画在哪」时分不出是格子还是留白。
+                    counterLefts.add(cursor);
+                    cursor += Integer.parseInt(tag.substring(8));
                 }
                 index = close;
                 continue;
@@ -550,9 +809,25 @@ class TrickHudViewTest {
 
     /** 该字符是不是【这一档】的牌字形。认错档会让下面的坐标全按错的前进量累加。 */
     private static boolean isCardGlyph(char value, int heightTier, int downTier) {
-        int tier = heightTier * PackAssets.cardGlyphDownOffsetTierCount() + downTier;
-        int start = PackAssets.CARD_GLYPH_CODEPOINT_START + tier * 55;
-        return value >= start && value < start + 55;
+        // 【不在这里复算码位】：字体切分后码位不再是「起点 + 档号 * 55」的线性式
+        // （每张字体内会取模回到起点），复算一遍必然与实现脱节。直接问 PackAssets
+        // 要这一档的 55 个字形，命中即是。
+        for (CardSuit suit : CardSuit.values()) {
+            if (suit == CardSuit.JOKER) {
+                continue;
+            }
+            for (CardRank rank : CardRank.values()) {
+                if (rank == CardRank.SMALL_JOKER || rank == CardRank.BIG_JOKER) {
+                    continue;
+                }
+                String glyph = PackAssets.cardGlyphChar(
+                    new DoudizhuCard(0, rank, suit), heightTier, downTier);
+                if (glyph.charAt(0) == value) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static List<DoudizhuCard> cards(CardRank... ranks) {

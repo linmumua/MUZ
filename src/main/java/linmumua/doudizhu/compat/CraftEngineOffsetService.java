@@ -37,6 +37,26 @@ public final class CraftEngineOffsetService {
     /** 只警告一次，避免每帧刷屏。 */
     private boolean warned;
 
+    /**
+     * 丢掉上一次的解析结果，下次取偏移时重新找 FontManager。
+     *
+     * <p>【为什么必须有这个入口】：{@code initialised} 只置一次，解析失败后永远不会
+     * 再试。于是只要出现下面任一情况，整条 HUD 就永久消失、且只能重启服务器：
+     * <ul>
+     *   <li>CraftEngine 比 MUZ 晚就绪（首次解析必然拿不到 instance）</li>
+     *   <li>资源包配置有错导致 CraftEngine 加载失败，修好配置后 reload</li>
+     *   <li>CraftEngine 自身 reload 后重建了 FontManager</li>
+     * </ul>
+     * 偏移服务取不到时 {@code TrickHudService.render} 会整条 hide，玩家看到的就是
+     * 「什么都没有」，而失败原因只写在控制台——没有任何线索指向这里。
+     */
+    public void invalidate() {
+        initialised = false;
+        warned = false;
+        fontManager = null;
+        createMiniMessageOffsetsMethod = null;
+    }
+
     public CraftEngineOffsetService(DoudizhuPlugin plugin) {
         this.plugin = plugin;
     }

@@ -68,6 +68,28 @@ public final class PhysicalTableManager {
      */
     private static final float MAX_ANIMATION_OVERSHOOT = 1.15f;
 
+    /**
+     * 当前动画曲线真实能达到的进度上界。
+     *
+     * <p>只有 {@code BACK_OUT} 会冲过目标值（{@code backOut} 内部就钳在
+     * {@link #MAX_ANIMATION_OVERSHOOT}），另外三条曲线
+     * （{@code LINEAR} / {@code EASE_OUT} / {@code EASE_IN_OUT}）峰值<b>恰好是 1.0</b>：
+     * {@code easeOutCubic(1)=1}、{@code linear} 先钳到 [0,1]、{@code easeInOutCubic(1)=1}。
+     *
+     * <p>包络按这个上界算抬升，而不是无条件乘 1.15。默认曲线是
+     * {@code animation-type: 1}（{@code EASE_OUT}），无条件乘 1.15 等于凭空把判定区
+     * 上沿抬高 {@code lift × 0.15} —— 默认配置下是 0.06×0.15 = <b>0.009 格</b>白送的空气。
+     * 这不是安全余量：那 15% 只有 BACK_OUT 用得上，其余曲线的牌永远到不了那个高度，
+     * 却让所有玩家都得为它多出一截「牌上方空气也能选中」。
+     *
+     * @return BACK_OUT 返回 1.15，其余返回 1.0
+     */
+    private float animationOvershootBound() {
+        return plugin.cardHoverAnimationCurve() == DoudizhuPlugin.AnimationCurve.BACK_OUT
+            ? MAX_ANIMATION_OVERSHOOT
+            : 1.0f;
+    }
+
     /** 通用的位移死区（距离平方）：位移小于 0.02 格的实体不重新传送，省掉大量无意义的同步包。 */
     private static final double DEFAULT_TELEPORT_EPSILON_SQUARED = 0.0004;
 
@@ -179,7 +201,7 @@ public final class PhysicalTableManager {
      * {@link #warnIfCapturerCouldOccludeButtons}。
      */
     private boolean capturerOcclusionWarned;
-    /** 开了 /muz debug show 的玩家。线框只对他自己可见。 */
+    /** 开启判定区可视化的玩家。线框只对他自己可见。 */
     private final Set<UUID> pickDebugViewers = new LinkedHashSet<>();
     /** 判定区面板实体池，按玩家。只 teleport 复用，不每 tick 重建，见 refreshPickDebug。 */
     private final Map<UUID, List<UUID>> pickDebugPool = new LinkedHashMap<>();
@@ -2798,14 +2820,18 @@ public final class PhysicalTableManager {
         // 捕获器在重建前后【复用】而不是重新生成，所以必须先把还活着的那批摘出来，
         // 让 clearPrivateEntities 跳过它们，否则会被连带删掉。理由见 reusableHandCardCapturers。
         Map<Integer, Interaction> reusableCapturers = reusableHandCardCapturers(placed, playerId);
-        clearPrivateEntities(placed, playerId, reusableCapturers);
+        // 两端的边缘瓦片走同一套复用逻辑，只是按端位键而不是牌 id 键。
+        // 理由见 reusableEdgeTiles：它和捕获器一样是点击事件入口，重建会换 entity id 而丢事件。
+        Map<HandEdge, Interaction> reusableTiles = reusableEdgeTiles(placed, playerId);
+        clearPrivateEntities(placed, playerId, reusableCapturers, reusableTiles);
         try {
-            renderPrivateHandCards(table, placed, playerId, reusableCapturers);
+            renderPrivateHandCards(table, placed, playerId, reusableCapturers, reusableTiles);
         } finally {
             // 没被这次铺牌认领的旧捕获器（对应的牌已经打出去了）必须销毁：
             // 它已经不在 privateEntitiesByPlayer 里，漏掉就是永久的孤儿实体，
             // 留在原地继续接事件，表现为「点空气选中了一张不存在的牌」。
             discardUnclaimedCapturers(reusableCapturers);
+            discardUnclaimedEdgeTiles(reusableTiles);
         }
     }
 
@@ -2845,7 +2871,69 @@ public final class PhysicalTableManager {
         return reusable;
     }
 
+    /**
+     * 把这位玩家当前还活着的两块边缘瓦片按端位摘出来，供本次铺牌复用。
+     *
+     * <p><b>为什么瓦片也必须复用。</b>与捕获器同一个理由，见
+     * {@link #reusableHandCardCapturers}：销毁再新建会换 entity id，客户端在收到
+     * remove + add 之前仍按旧 id 发 {@code ServerboundInteractPacket}，服务端解析不到实体，
+     * 事件压根不触发，窗口约 1 tick 加半个 RTT。瓦片是同一类实体、承担同一个
+     * 「点击事件唯一入口」的角色，让它每次铺牌重建就是在两端那两条边缘条上
+     * 精确重建这个丢事件窗口 —— 表现为「刚出完一手牌，点牌边没反应」。
+     *
+     * <p>不能拿「与牌本体同步闪烁」当理由：牌本体是 {@code ItemDisplay}，不接收点击，
+     * 它被重建不产生任何丢事件窗口，没有可对齐的对象。
+     *
+     * <p>按<b>端位</b>而不是牌 id 键：N=1 时同一张牌要挂左右两块，牌 id 做键装不下。
+     * 端位语义也更贴合复用意图 —— 出牌后手牌整体重排，「最左那块瓦片」该继续当最左，
+     * 哪怕最左现在换成了另一张牌。
+     */
+    private Map<HandEdge, Interaction> reusableEdgeTiles(PlacedTable placed, UUID playerId) {
+        Map<HandEdge, Interaction> reusable = new java.util.EnumMap<>(HandEdge.class);
+        Map<Integer, HandCardVisual> visuals = placed.privateVisualsByPlayer().get(playerId);
+        if (visuals == null) {
+            return reusable;
+        }
+        for (HandCardVisual visual : visuals.values()) {
+            claimLiveTile(reusable, HandEdge.LEFT, visual.leftEdgeTileId());
+            claimLiveTile(reusable, HandEdge.RIGHT, visual.rightEdgeTileId());
+        }
+        return reusable;
+    }
+
+    /**
+     * 把一个还活着的瓦片登记进复用池。
+     *
+     * <p>解析不到（被邻桌清场删掉、所在区块卸载过）就不进池子，于是上面照常 spawn 一个新的
+     * —— 「瓦片缺失必须被补齐」这条不变量与捕获器同口径。
+     */
+    private void claimLiveTile(Map<HandEdge, Interaction> pool, HandEdge edge, UUID tileId) {
+        if (tileId == null || pool.containsKey(edge)) {
+            return;
+        }
+        if (Bukkit.getEntity(tileId) instanceof Interaction tile) {
+            pool.put(edge, tile);
+        }
+    }
+
     private void discardUnclaimedCapturers(Map<Integer, Interaction> unclaimed) {
+        if (unclaimed.isEmpty()) {
+            return;
+        }
+        clearEntities(
+            unclaimed.values().stream().map(Entity::getUniqueId).collect(java.util.stream.Collectors.toList()),
+            false
+        );
+        unclaimed.clear();
+    }
+
+    /**
+     * 收掉本次铺牌没被认领的边缘瓦片。
+     *
+     * <p>端位会变化：手牌从 N≥2 掉到 N=1 时两块瓦片改挂同一张牌，
+     * 从 N≥1 掉到 0 时两块都不再需要。不收就是孤儿实体。
+     */
+    private void discardUnclaimedEdgeTiles(Map<HandEdge, Interaction> unclaimed) {
         if (unclaimed.isEmpty()) {
             return;
         }
@@ -2860,7 +2948,8 @@ public final class PhysicalTableManager {
         GameTable table,
         PlacedTable placed,
         UUID playerId,
-        Map<Integer, Interaction> reusableCapturers
+        Map<Integer, Interaction> reusableCapturers,
+        Map<HandEdge, Interaction> reusableEdgeTiles
     ) {
         // 明牌的牌面要给全场看，所以牌主掉线时也得照常铺。
         // 只有未明牌时才需要牌主在线：那种情况下这层牌只有他自己能看见。
@@ -2900,6 +2989,10 @@ public final class PhysicalTableManager {
             handCardCapturerEnvelope(pickEnvelopes[0], pickEnvelopes[1]);
         float capturerWidth = (float) handCardCapturerWidth(plugin.getHandSpacing());
         float capturerHeight = (float) (capturerEnvelope.halfHeight() * 2.0);
+        // 两端补覆盖用的瓦片宽度。捕获器宽 == 铺牌步长，所以 N 个捕获器的并集比拾取包络窄，
+        // 两端各缺 0.0715 格（默认配置）——那里看得见牌面却点不动。见 edgeTileWidth。
+        double edgeTileWidth = HandCardPickGeometry.edgeTileWidth(
+            pickEnvelopes[0].halfWidth(), capturerWidth);
         warnIfCapturerCouldOccludeButtons(capturerEnvelope);
 
         for (int index = 0; index < hand.size(); index++) {
@@ -2940,6 +3033,22 @@ public final class PhysicalTableManager {
                     table, placed, playerId, card, cardBaseLocation,
                     capturerEnvelope, capturerWidth, capturerHeight, spawned);
 
+            // 两端补边缘瓦片。N=1 时 index 0 同时是最左和最右，两块都挂在这一张上 ——
+            // 这正是最不能漏的场合：只剩一张时整张牌面完整露出，缺口占可见牌面 29.4%，
+            // 而斗地主每局必然经过「手上 1 张、必须点它出牌获胜」这个状态。
+            UUID leftEdgeTileId = index == 0
+                ? placeHandCardEdgeTile(
+                    table, playerId, card, HandEdge.LEFT, cardBaseLocation, step,
+                    capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth,
+                    reusableEdgeTiles.remove(HandEdge.LEFT), spawned)
+                : null;
+            UUID rightEdgeTileId = index == hand.size() - 1
+                ? placeHandCardEdgeTile(
+                    table, playerId, card, HandEdge.RIGHT, cardBaseLocation, step,
+                    capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth,
+                    reusableEdgeTiles.remove(HandEdge.RIGHT), spawned)
+                : null;
+
             if (shouldShowPrivateLabel(playerId, card, rankCounts)) {
                 Location labelLocation = privateCardLabelLocation(cardBaseLocation, seatIndex, placed.yaw(), lift);
                 TextDisplay label = spawnText(
@@ -2953,11 +3062,13 @@ public final class PhysicalTableManager {
                 spawned.add(label.getUniqueId());
                 cardBindings.put(label.getUniqueId(), new CardBinding(table.getName(), playerId, card.id()));
                 applyPrivateVisibility(playerId, label, revealed);
-                visuals.put(card.id(),
-                    new HandCardVisual(cardDisplay.getUniqueId(), label.getUniqueId(), capturerId));
+                visuals.put(card.id(), new HandCardVisual(
+                    cardDisplay.getUniqueId(), label.getUniqueId(), capturerId,
+                    leftEdgeTileId, rightEdgeTileId));
             } else {
-                visuals.put(card.id(),
-                    new HandCardVisual(cardDisplay.getUniqueId(), null, capturerId));
+                visuals.put(card.id(), new HandCardVisual(
+                    cardDisplay.getUniqueId(), null, capturerId,
+                    leftEdgeTileId, rightEdgeTileId));
             }
 
             applyPrivateVisibility(playerId, cardDisplay, revealed);
@@ -3066,6 +3177,95 @@ public final class PhysicalTableManager {
     }
 
     /**
+     * 在手牌某一端补一块边缘瓦片，把捕获器并集盖不到的那条缝填上。
+     *
+     * <h2>为什么会有这条缝</h2>
+     *
+     * <p>铺牌步长与捕获器宽度是<b>同一个公式</b>，于是 N 个捕获器恰好首尾相接，
+     * 并集只有 {@code [P₀−capHalf, P_{N−1}+capHalf]}；而拾取包络半宽由<b>放大态牌面</b>
+     * 胜出（默认 0.1215 &gt; 通道半宽 0.05）。两端于是各差 0.0715 格 ——
+     * 那里玩家看得见牌面却点不动。中间的牌不受影响：牌 i 的可见条被牌 i−1 的捕获器
+     * 盖住（错位但连续），唯独最两端没有邻居补位。算式见
+     * {@link HandCardPickGeometry#edgeTileWidth}。
+     *
+     * <p>瓦片宽度<b>比现有捕获器更窄</b>（0.0715 &lt; 0.1），所以它在深度方向鼓出更小，
+     * 永远在现有捕获器的近面之内 —— {@code warnIfCapturerCouldOccludeButtons} 按
+     * {@code handCardCapturerWidth * 0.5} 推出来的「手牌盒最外面那一面」仍然成立，
+     * 按钮遮挡余量只增不减。
+     *
+     * <h2>三张表一件都不能少</h2>
+     *
+     * <p>与 {@link #spawnHandCardCapturer} 完全同口径：进 {@code spawned} 才回收得到、
+     * 进 {@code cardBindings} 才不被邻桌清场误删（也避免 {@code isChairFurnitureEntity}
+     * 的兜底分支把它判成椅子家具而 {@code yieldsToBlockingEntity} 让位）、
+     * 调 {@code applyPrivateVisibility} 才只发给牌主自己。
+     *
+     * <p>可见性这一条尤其不能漏：把瓦片发给旁观者，旁观者右键它会走进手牌仲裁，
+     * 而 {@code pickHandCard} 按<b>点击者自己</b>的手牌求交必然判不中，
+     * 事件最后被保护判定静默取消 —— 等于在每位对手手牌的两端各造出一片
+     * 0.0715 格点不动方块的死区，症状与本次要修的缺口镜像对称，反而更难查。
+     *
+     * <p>瓦片绑的 cardId 与端点牌相同，N=1 时两块瓦片绑同一个 cardId
+     * <b>不冲突</b>：{@code cardBindings} 是 {@code entityUUID → CardBinding}，
+     * 键是实体 id，两块各占一行；而绑定只做路由与豁免，
+     * 「点到哪张牌」永远出自 {@code pickHandCard}。
+     *
+     * @param edge 端位，决定瓦片摆在端点牌的哪一侧
+     * @param anchorCard 端点那张牌（左端是 index 0、右端是 index N−1；N=1 时是同一张）
+     * @param reused 复用池里摘到的瓦片，为 null 则新建
+     * @return 瓦片实体 id；缺口不为正时返回 null（不需要瓦片）
+     */
+    private UUID placeHandCardEdgeTile(
+        GameTable table,
+        UUID playerId,
+        DoudizhuCard anchorCard,
+        HandEdge edge,
+        Location anchorCardLocation,
+        Vector step,
+        HandCardPickGeometry.Envelope capturerEnvelope,
+        double capturerWidth,
+        float capturerHeight,
+        double tileWidth,
+        Interaction reused,
+        List<UUID> spawned
+    ) {
+        if (tileWidth <= 0.0) {
+            return null;
+        }
+        double offset = HandCardPickGeometry.edgeTileCenterOffset(capturerWidth, tileWidth);
+        if (offset <= 0.0) {
+            return null;
+        }
+        // step 是「下一张牌相对上一张」的位移，长度等于铺牌步长，方向就是手牌铺开方向。
+        // 归一化后乘偏移量即可，不必再关心座位朝向与桌子 yaw —— 那些已经烘进 step 里了。
+        Vector along = normalizeHorizontal(step);
+        double sign = edge == HandEdge.LEFT ? -1.0 : 1.0;
+        Location tileCardLocation = anchorCardLocation.clone().add(
+            along.x() * offset * sign,
+            0.0,
+            along.z() * offset * sign
+        );
+        // 竖直位置与捕获器同源：同一个并集包络、同一个底边换算，
+        // 于是瓦片与捕获器在竖直方向严格齐平，不会出现「牌边能点、牌角点不到」。
+        Location tileLocation = handCardCapturerLocation(
+            tileCardLocation, capturerEnvelope, capturerHeight);
+        Interaction tile;
+        if (reused != null) {
+            teleportIfMoved(reused, tileLocation, CARD_TRACK_EPSILON_SQUARED);
+            reused.setInteractionWidth((float) tileWidth);
+            reused.setInteractionHeight(capturerHeight);
+            tile = reused;
+        } else {
+            tile = spawnInteraction(tileLocation, (float) tileWidth, capturerHeight);
+        }
+        spawned.add(tile.getUniqueId());
+        cardBindings.put(tile.getUniqueId(),
+            new CardBinding(table.getName(), playerId, anchorCard.id()));
+        applyPrivateVisibility(playerId, tile);
+        return tile.getUniqueId();
+    }
+
+    /**
      * 复用上一次铺牌留下的捕获器：只搬位置、改尺寸，<b>不销毁不新建</b>。
      *
      * <p>保住 entity id 不变是这条修法的全部意义，理由见 {@link #reusableHandCardCapturers}。
@@ -3141,6 +3341,46 @@ public final class PhysicalTableManager {
      *
      * <p>只喊一次。这条路径在出牌链路上是高频的，每次铺牌都打日志会把控制台冲掉。
      */
+    /**
+     * 让一块边缘瓦片跟上端点牌的布局位置。
+     *
+     * <p>只搬位置不改尺寸：宽度只跟 hand-spacing 与包络有关，而那两者一变就会走
+     * {@code renderPrivateHand} 整手重建（配置重载会重铺），不需要在这条每 tick 的路上改。
+     *
+     * <p>与捕获器共用 {@code CARD_TRACK_EPSILON_SQUARED}：死区不一致会让牌动了瓦片没动。
+     *
+     * @param tileId 瓦片实体 id，非端点牌为 null（此时直接返回）
+     * @param signedOffset 带符号的偏移量，左端为负、右端为正
+     */
+    private void followEdgeTile(
+        UUID tileId,
+        Location anchorCardLocation,
+        Vector along,
+        double signedOffset,
+        HandCardPickGeometry.Envelope capturerEnvelope,
+        float capturerHeight
+    ) {
+        if (tileId == null || signedOffset == 0.0) {
+            return;
+        }
+        if (!(Bukkit.getEntity(tileId) instanceof Interaction tile)) {
+            // 瓦片被邻桌清场之类的路径删掉了。这里刻意不触发整手重建：
+            // 缺一块瓦片只是两端边缘条点不到（回到修复前的状态），而整手重建会让
+            // 整排牌闪烁。下一次正常铺牌（出牌、换手牌）会把它补回来。
+            return;
+        }
+        Location target = handCardCapturerLocation(
+            anchorCardLocation.clone().add(
+                along.x() * signedOffset,
+                0.0,
+                along.z() * signedOffset
+            ),
+            capturerEnvelope,
+            capturerHeight
+        );
+        teleportIfMoved(tile, target, CARD_TRACK_EPSILON_SQUARED);
+    }
+
     private void warnIfCapturerCouldOccludeButtons(HandCardPickGeometry.Envelope capturerEnvelope) {
         if (capturerOcclusionWarned) {
             return;
@@ -3193,6 +3433,15 @@ public final class PhysicalTableManager {
         HandCardPickGeometry.Envelope capturerEnvelope =
             handCardCapturerEnvelope(pickEnvelopes[0], pickEnvelopes[1]);
         float capturerHeight = (float) (capturerEnvelope.halfHeight() * 2.0);
+        // 边缘瓦片也要跟着布局走。adjustPlayerHandOffset 允许玩家在运行时改
+        // spacing/lateral，牌会被下面的 teleportIfMoved 挪到新位置，而张数没变、
+        // visuals.size() == hand.size() 成立，不触发整手重建 —— 瓦片若没人管就留在原地，
+        // 与牌相对漂移，两端缺口重新出现且位置还错了。
+        double capturerWidth = handCardCapturerWidth(plugin.getHandSpacing());
+        double edgeTileWidth = HandCardPickGeometry.edgeTileWidth(
+            pickEnvelopes[0].halfWidth(), capturerWidth);
+        double edgeTileOffset = HandCardPickGeometry.edgeTileCenterOffset(capturerWidth, edgeTileWidth);
+        Vector edgeAlong = normalizeHorizontal(step);
 
         for (int index = 0; index < hand.size(); index++) {
             DoudizhuCard card = hand.get(index);
@@ -3262,6 +3511,12 @@ public final class PhysicalTableManager {
                 handCardCapturerLocation(cardBaseLocation, capturerEnvelope, capturerHeight),
                 CARD_TRACK_EPSILON_SQUARED
             );
+            // 边缘瓦片跟着端点牌的布局位置走，与捕获器同一个死区常量。
+            // 只有端点牌挂了瓦片，其余牌两个槽都是 null，这两行是 no-op。
+            followEdgeTile(visual.leftEdgeTileId(), cardBaseLocation, edgeAlong,
+                -edgeTileOffset, capturerEnvelope, capturerHeight);
+            followEdgeTile(visual.rightEdgeTileId(), cardBaseLocation, edgeAlong,
+                edgeTileOffset, capturerEnvelope, capturerHeight);
             if (labelEntity != null) {
                 teleportIfMoved(
                     labelEntity,
@@ -3326,7 +3581,7 @@ public final class PhysicalTableManager {
     }
 
     private void clearPrivateEntities(PlacedTable placed, UUID playerId) {
-        clearPrivateEntities(placed, playerId, Map.of());
+        clearPrivateEntities(placed, playerId, Map.of(), Map.of());
     }
 
     /**
@@ -3340,18 +3595,28 @@ public final class PhysicalTableManager {
      *
      * @param keepCapturers 本次要复用的捕获器（牌 id → 实体），这些实体不销毁、
      *                      也不从 {@code cardBindings} 摘掉，理由见 {@code reusableHandCardCapturers}
+     * @param keepEdgeTiles 本次要复用的边缘瓦片（端位 → 实体）。<b>必须一起算进 kept</b>：
+     *                      漏掉就会被当成普通私有实体删掉，复用池里拿到的是已死实体，
+     *                      {@code Bukkit.getEntity} 返回 null 于是重新 spawn ——
+     *                      复用等于没做，换 entity id 的丢事件窗口照旧回来
      */
-    private void clearPrivateEntities(PlacedTable placed, UUID playerId, Map<Integer, Interaction> keepCapturers) {
+    private void clearPrivateEntities(
+        PlacedTable placed,
+        UUID playerId,
+        Map<Integer, Interaction> keepCapturers,
+        Map<HandEdge, Interaction> keepEdgeTiles
+    ) {
         List<UUID> entities = placed.privateEntitiesByPlayer().remove(playerId);
         placed.privateVisualsByPlayer().remove(playerId);
         if (entities == null) {
             return;
         }
-        if (keepCapturers.isEmpty()) {
+        if (keepCapturers.isEmpty() && keepEdgeTiles.isEmpty()) {
             clearEntities(entities, false);
             return;
         }
-        Set<UUID> kept = keepCapturers.values().stream()
+        Set<UUID> kept = java.util.stream.Stream
+            .concat(keepCapturers.values().stream(), keepEdgeTiles.values().stream())
             .map(Entity::getUniqueId)
             .collect(java.util.stream.Collectors.toSet());
         clearEntities(entities.stream().filter(id -> !kept.contains(id)).toList(), false);
@@ -3828,7 +4093,7 @@ public final class PhysicalTableManager {
 
     private void configureCardAnimation(Display display) {
         display.setInterpolationDelay(0);
-        display.setInterpolationDuration(Math.max(2, Math.min(4, plugin.getCardHoverInterpolationTicks() / 2)));
+        display.setInterpolationDuration(Math.clamp(plugin.getCardHoverInterpolationTicks() / 2, 2, 4));
         // IMPORTANT REGRESSION GUARD:
         // Card teleports must not interpolate, otherwise click/hover refreshes can look like a rotate-and-rebound bug.
         try {
@@ -4804,7 +5069,7 @@ public final class PhysicalTableManager {
      */
     private Vector3f privateCardScale(float hoverProgress) {
         float baseFactor = Math.max(0.01f, plugin.getPrivateCardScale() / DEFAULT_PRIVATE_CARD_RENDER_SCALE);
-        float progress = Math.max(0.0f, Math.min(1.0f, hoverProgress));
+        float progress = Math.clamp(hoverProgress, 0.0f, 1.0f);
         float hoverFactor = 1.0f + (Math.max(1.0f, plugin.getHoverCardScale()) - 1.0f) * progress;
         float faceFactor = baseFactor * hoverFactor;
         return new Vector3f(
@@ -4871,13 +5136,13 @@ public final class PhysicalTableManager {
     }
 
     private static float easeOutCubic(float progress) {
-        float clamped = Math.max(0.0f, Math.min(1.0f, progress));
+        float clamped = Math.clamp(progress, 0.0f, 1.0f);
         float inverted = 1.0f - clamped;
         return 1.0f - inverted * inverted * inverted;
     }
 
     private static float linear(float progress) {
-        return Math.max(0.0f, Math.min(1.0f, progress));
+        return Math.clamp(progress, 0.0f, 1.0f);
     }
 
     private static float easeInOutCubic(float progress) {
@@ -4892,7 +5157,7 @@ public final class PhysicalTableManager {
         float c1 = 1.70158f;
         float c3 = c1 + 1.0f;
         float value = 1.0f + c3 * (float) Math.pow(clamped - 1.0f, 3.0f) + c1 * (float) Math.pow(clamped - 1.0f, 2.0f);
-        return Math.max(0.0f, Math.min(MAX_ANIMATION_OVERSHOOT, value));
+        return Math.clamp(value, 0.0f, MAX_ANIMATION_OVERSHOOT);
     }
 
     private static float applyCurve(float progress, DoudizhuPlugin.AnimationCurve curve) {
@@ -4992,7 +5257,7 @@ public final class PhysicalTableManager {
         double pickLaneHalfWidth = handCardCapturerWidth(plugin.getHandSpacing()) * 0.5;
         HandCardPickGeometry.Envelope unselectedRaw = HandCardPickGeometry.envelope(
             restScale.x, restScale.y, maxScale.x, maxScale.y,
-            animatedCardLift(0.0f, 1.0f) * MAX_ANIMATION_OVERSHOOT,
+            animatedCardLift(0.0f, 1.0f) * animationOvershootBound(),
             pickLaneHalfWidth);
         // 已选中牌的包络同样与动画状态无关，而且必须把牌【未抬起时的位置】并进去：
         // 选中抬升（render.selected-card.lift 默认 0.18 格）大于牌本体全高（约 0.139 格），
@@ -5001,7 +5266,7 @@ public final class PhysicalTableManager {
         // 详见 HandCardPickGeometry#envelopeForSelected。
         HandCardPickGeometry.Envelope selectedRaw = HandCardPickGeometry.envelopeForSelected(
             unselectedRaw, restScale.y,
-            animatedCardLift(1.0f, 0.0f) * MAX_ANIMATION_OVERSHOOT);
+            animatedCardLift(1.0f, 0.0f) * animationOvershootBound());
         return HandCardPickGeometry.unifiedEnvelopes(unselectedRaw, selectedRaw);
     }
 
@@ -5366,11 +5631,11 @@ public final class PhysicalTableManager {
         double pickLaneHalfWidth = Math.max(0.02, plugin.getHandSpacing()) * 0.5;
         HandCardPickGeometry.Envelope unselectedRaw = HandCardPickGeometry.envelope(
             restScale.x, restScale.y, maxScale.x, maxScale.y,
-            animatedCardLift(0.0f, 1.0f) * MAX_ANIMATION_OVERSHOOT,
+            animatedCardLift(0.0f, 1.0f) * animationOvershootBound(),
             pickLaneHalfWidth);
         HandCardPickGeometry.Envelope selectedRaw = HandCardPickGeometry.envelopeForSelected(
             unselectedRaw, restScale.y,
-            animatedCardLift(1.0f, 0.0f) * MAX_ANIMATION_OVERSHOOT);
+            animatedCardLift(1.0f, 0.0f) * animationOvershootBound());
         HandCardPickGeometry.Envelope[] unified =
             HandCardPickGeometry.unifiedEnvelopes(unselectedRaw, selectedRaw);
         HandCardPickGeometry.Envelope body =
@@ -5600,6 +5865,27 @@ public final class PhysicalTableManager {
         hoverCandidateTicksByViewer.remove(playerId);
         hoverGraceTicksByViewer.remove(playerId);
         hoverProgressByPlayer.remove(playerId);
+    }
+
+    /**
+     * 玩家下线时清掉他在这里的所有按玩家分组的缓存。
+     *
+     * <p>【为什么必须由退出事件显式调用】：{@link #tick()} 里的清理只遍历
+     * {@code Bukkit.getOnlinePlayers()}，离线玩家的 key 根本轮不到，
+     * 于是 hover/选中/调试面板这几张 map 会把已经下线的 UUID 永久留着。
+     * 单个 key 很小，但服务器长期运行、玩家反复进出，累积量是无上限的。
+     *
+     * <p>{@code selectedProgressByPlayer} 也要清：它不在 clearHover 里，
+     * 而是跟着私有手牌实体走（见 clearPrivateEntities），玩家下线时那批实体
+     * 会被收掉，但进度条目不会跟着消失。
+     */
+    public void clearPlayerCaches(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        clearHover(playerId);
+        clearPickDebug(playerId);
+        selectedProgressByPlayer.remove(playerId);
     }
 
     private Entity actionTarget(Player viewer) {
@@ -5944,7 +6230,35 @@ public final class PhysicalTableManager {
      *     牌本体没有判定框，空手右键空气时 PlayerInteractEvent 压根不触发，
      *     缺了它右键选牌整体失效
      */
-    private record HandCardVisual(UUID cardDisplayId, UUID labelId, UUID capturerId) {
+    /**
+     * 手牌铺开方向的两个端位。
+     *
+     * <p>边缘瓦片的复用池<b>按端位键，不按牌 id 键</b>：手上只剩 1 张时 index 0
+     * 同时是最左和最右，需要左右各挂一块瓦片，按牌 id 的 map 装不下同一张牌的两块。
+     */
+    private enum HandEdge {
+        LEFT,
+        RIGHT
+    }
+
+    /**
+     * 一张手牌对应的实体集合。
+     *
+     * <p>{@code leftEdgeTileId} / {@code rightEdgeTileId} 是<b>两端补覆盖用的边缘瓦片</b>，
+     * 只有端点牌非 null，中间的牌两个槽都是 null。为什么要两个槽而不是一个：
+     * 手上只剩 1 张时 index 0 同时是最左和最右，一个槽装不下两块，
+     * 漏掉的那一侧就是「最后一手点不动」——而斗地主每局必然经过这个状态。
+     *
+     * @param leftEdgeTileId 左端瓦片，非端点牌为 null
+     * @param rightEdgeTileId 右端瓦片，非端点牌为 null；N=1 时与 left 同挂在这一张上
+     */
+    private record HandCardVisual(
+        UUID cardDisplayId,
+        UUID labelId,
+        UUID capturerId,
+        UUID leftEdgeTileId,
+        UUID rightEdgeTileId
+    ) {
     }
 
     private record PlacedTable(

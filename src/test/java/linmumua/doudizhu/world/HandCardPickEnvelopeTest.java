@@ -47,7 +47,17 @@ class HandCardPickEnvelopeTest {
     /** render.selected-card.lift 实配。 */
     private static final double SELECTED_LIFT = 0.18;
 
-    /** BACK_OUT 曲线的过冲钳位，见 PhysicalTableManager#MAX_ANIMATION_OVERSHOOT。 */
+    /**
+     * BACK_OUT 曲线的过冲钳位，见 PhysicalTableManager#MAX_ANIMATION_OVERSHOOT。
+     *
+     * <p><b>只有 animation-type: 3（BACK_OUT）会用到它</b>。1.10.5 起生产侧改成按曲线取上界
+     * （{@code animationOvershootBound()}）：另外三条曲线峰值恰好是 1.0，
+     * 无条件乘 1.15 等于凭空把判定区上沿抬高 lift×0.15，
+     * 让所有玩家都为 BACK_OUT 独有的过冲多背一截「牌上方空气也能选中」。
+     *
+     * <p>本测试类沿用 1.15 是<b>刻意的</b>：它验的是最坏情况（过冲曲线）下包络仍然包住牌，
+     * 那是包络必须成立的上界。默认曲线只会让实际包络更小、更贴合，不会破这些断言。
+     */
     private static final double MAX_ANIMATION_OVERSHOOT = 1.15;
 
     /**

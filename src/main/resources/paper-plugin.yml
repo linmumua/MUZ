@@ -2,7 +2,14 @@ name: MUZ
 main: linmumua.doudizhu.DoudizhuPlugin
 version: ${version}
 api-version: "${apiVersion}"
-folia-supported: true
+# folia-supported 必须是 false：MuzScheduler 五个方法全走 BukkitScheduler
+# （runTask / runTaskLater / runTaskTimer / runTaskAsynchronously），而 Folia 把
+# BukkitScheduler 整个废掉了，调用即抛 UnsupportedOperationException。
+# 声明 true 会让管理员在 Folia 上照着装，插件在 onEnable 启动周期任务时就崩，
+# 比不声明支持更糟。要改回 true 必须先把 MuzScheduler 换成
+# GlobalRegionScheduler / RegionScheduler / EntityScheduler / AsyncScheduler 分发，
+# 并逐个确认实体操作跑在正确的区域线程上。
+folia-supported: false
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.
 # 不声明 libraries：MUZ 自己不需要 Paper 从 Maven 下载任何运行时，

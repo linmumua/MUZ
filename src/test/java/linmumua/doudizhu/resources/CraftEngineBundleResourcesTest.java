@@ -10,6 +10,8 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -27,6 +29,9 @@ import linmumua.doudizhu.model.DoudizhuCard;
 import org.junit.jupiter.api.Test;
 
 class CraftEngineBundleResourcesTest {
+    private static final Path BUILD_SCRIPT = Path.of("build.gradle.kts");
+    private static final Path RESOURCE_PACK_SOURCE = Path.of("resourcepack");
+
     @Test
     void generatedCraftEngineBundleIsOnClasspath() throws IOException {
         String index = read("craftengine/muz/_bundle_index.txt");
@@ -600,7 +605,7 @@ class CraftEngineBundleResourcesTest {
      */
     @Test
     void botAvatarImageDeclaresTheSameCharThePluginRenders() throws IOException {
-        String images = read("craftengine/muz/configuration/images.yml");
+        String images = readAllImageParts();
 
         assertTrue(images.contains("muz:bot_avatar:"), "images.yml 里缺少机器人头像图标声明");
         assertTrue(
@@ -616,16 +621,25 @@ class CraftEngineBundleResourcesTest {
             "任何字形都不能再挂 minecraft:default —— 三家挤同一张码位表就是 CE 报"
                 + "一千多条「字符已被占用」的原因"
         );
+        // 【按条目名精确取，不取「文件里第一个 char」】：拆分成多份后拼接顺序不再保证
+        // bot_avatar 排在最前，靠位置取值会读到别的字形的码位，断言变成随机通过。
         assertEquals(
             "\\u" + String.format("%04x", (int) PackAssets.BOT_AVATAR_CHAR.charAt(0)),
-            extractValue(images, "char: "),
-            "images.yml 的 char 与 PackAssets.BOT_AVATAR_CHAR 不一致，桌边会显示豆腐块"
+            glyphEntries().get("bot_avatar").get("char"),
+            "images 里 bot_avatar 的 char 与 PackAssets.BOT_AVATAR_CHAR 不一致，桌边会显示豆腐块"
         );
 
         String index = read("craftengine/muz/_bundle_index.txt");
         assertTrue(
+            index.contains("configuration/images/"),
+            "拆分后的 images/ 没进资源包，CE 不会注册这些字形"
+        );
+        // 【不许退回单份】：单份 images.yml 会超过 SnakeYAML 的 3 MiB 单文档上限，
+        // CraftEngine 抛 YamlEngineException 后整包不生效。线上已因此炸过一次，
+        // 而且症状是「资源包毫无反应」，不看服务端日志根本定位不到这里。
+        assertFalse(
             index.contains("configuration/images.yml"),
-            "images.yml 没进资源包，CE 不会注册这个字形"
+            "又出现了单份 images.yml：它必然超过 SnakeYAML 单文档上限，会让整个资源包加载失败"
         );
         assertTrue(
             index.contains("resourcepack/assets/muz/textures/font/bot_avatar.png"),
@@ -642,7 +656,7 @@ class CraftEngineBundleResourcesTest {
      */
     @Test
     void outlinedBotAvatarGlyphsMatchThePluginCodepoints() throws IOException {
-        String images = read("craftengine/muz/configuration/images.yml");
+        String images = readAllImageParts();
         String index = read("craftengine/muz/_bundle_index.txt");
 
         record Glyph(String id, String character, String texture) {
@@ -765,10 +779,13 @@ class CraftEngineBundleResourcesTest {
 
                     // 字形必须挂在牌面自己的字体上。挂回 minecraft:default 会和头像
                     // 抢同一张码位表，扩档时互相盖掉（CE 会报「字符已被另一张图片占用」）。
+                    // 字体名【随档位变】：牌族 1025 档、144 档/张，切成 8 张字体。
+                    // 断言的是「插件算出的名字 == 资源包里写的名字」，而不是恒等于基名。
                     assertEquals(
-                        PackAssets.CARD_GLYPH_FONT,
+                        PackAssets.cardGlyphFont(heightTier, downTier),
                         entries.get(entry).get("font"),
-                        "牌面字形的字体名必须与 PackAssets.CARD_GLYPH_FONT 一致"
+                        "牌面字形的字体名必须与 PackAssets.cardGlyphFont(档) 算出的一致，"
+                            + "否则该档整手牌是豆腐块"
                     );
                 }
             }
@@ -803,10 +820,18 @@ class CraftEngineBundleResourcesTest {
             }
         }
 
+        // 【必须先断言非空】：这条测试靠正则从条目名反推档位。哪天条目命名规则一改，
+        // 正则会匹配不到任何东西、generated 变成空集，而 plugin 若也为空就假绿了 ——
+        // 那是一条永远不可能再红的测试，比没有测试更糟。
+        assertFalse(generated.isEmpty(),
+            "从 images.yml 反推出的牌行偏移档是空集：条目命名规则变了而这条正则没跟上，"
+                + "「两侧同源」实际没有被验证");
+
         Set<Integer> plugin = new java.util.TreeSet<>();
         for (int tier = 0; tier < PackAssets.cardGlyphDownOffsetTierCount(); tier++) {
             plugin.add(PackAssets.cardGlyphDownOffsetAt(tier));
         }
+        assertFalse(plugin.isEmpty(), "PackAssets 的牌行偏移档位表是空的");
 
         assertEquals(
             plugin,
@@ -845,10 +870,15 @@ class CraftEngineBundleResourcesTest {
             }
         }
 
+        assertFalse(generated.isEmpty(),
+            "从 images.yml 反推出的头像行偏移档是空集：条目命名规则变了而这条正则没跟上，"
+                + "「两侧同源」实际没有被验证");
+
         Set<Integer> plugin = new java.util.TreeSet<>();
         for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
             plugin.add(PackAssets.avatarDownOffsetAt(tier));
         }
+        assertFalse(plugin.isEmpty(), "PackAssets 的头像行偏移档位表是空的");
 
         assertEquals(
             plugin,
@@ -882,16 +912,24 @@ class CraftEngineBundleResourcesTest {
             avatarTiers.add(PackAssets.avatarDownOffsetAt(tier));
         }
 
+        // 【必须按真实默认推导，不许写死数字】：默认相接点 = offset-down + 12 * avatar-scale，
+        // 盒高基数从 8 改 10 再改 12（王冠凸出）时这个值就动过两次。写死成字面量的话，
+        // 基数一改这条测试只是「守着一个不再是默认值的数」，照样绿。
+        int defaultCardDown = 50;
+        int defaultScale = 6;
+        int touching = PackAssets.avatarRowDownOffset(defaultCardDown, defaultScale);
+
         assertFalse(
-            cardTiers.contains(110),
-            "牌表又含上了 110。牌行的合法区间是 0..52（那是「把牌从屏幕顶边往下推一点」的量），"
-                + "110 会把牌推到屏幕中间；它是头像行专用值，混进牌表意味着两张表被合回去了，"
+            cardTiers.contains(touching),
+            "牌表含上了头像行专用的 " + touching + "。牌行的量级是「把牌从屏幕顶边往下推一点」，"
+                + "这个值会把牌推到屏幕中间；它出现在牌表里意味着两张表被合回去了，"
                 + "275 条/档的牌字形会白生成一整档"
         );
         assertTrue(
-            avatarTiers.contains(110),
-            "头像表缺了 110。它是默认组合（offset-down=50 + avatar-scale=6）两行精确相接的那一档，"
-                + "缺了它默认配置自己就会触发回退警告"
+            avatarTiers.contains(touching),
+            "头像表缺了 " + touching + "。它是默认组合（offset-down=" + defaultCardDown
+                + " + avatar-scale=" + defaultScale + "）两行精确相接的那一档，"
+                + "缺了它默认配置自己就会触发吸附"
         );
         assertEquals(
             0, PackAssets.cardGlyphDownOffsetAt(0),
@@ -905,14 +943,19 @@ class CraftEngineBundleResourcesTest {
     }
 
     /**
-     * 头像字形盒必须按 {@code 10 * scale} 生成，不是 {@code 8 * scale}。
+     * 头像字形盒按 {@code 10 * scale} 生成，而两行布局要按 {@code 12 * scale} 让开。
      *
-     * <p>这条锁的是出牌 HUD 两行布局的垂直几何依据。字形按 {@code AVATAR_OUTLINED_PIXELS}(=10)
-     * 行预生成，第 row 行的贴图高 {@code (10 - row) * scale}，所以 row 0 的 height 就是
-     * {@code 10 * scale} —— 6 倍是 60 像素，不是 48。
+     * <p>这条锁的是出牌 HUD 两行布局的垂直几何依据，两个数字都要钉：
+     * <ul>
+     *   <li><b>字形本身</b>按 {@code AVATAR_OUTLINED_PIXELS}(=10) 行预生成，第 row 行的贴图高
+     *       {@code (10 - row) * scale}，所以 row 0 的 height 是 {@code 10 * scale} —— 6 倍 60 像素；
+     *   <li><b>行整体</b>要让开 {@link PackAssets#AVATAR_ROW_TOTAL_PIXELS}(=12) 行，因为地主王冠
+     *       是独立字形族、向上再凸出 2 行 —— 6 倍 72 像素。
+     * </ul>
      *
-     * <p>守的风险：代码注释里长期写着「6 倍是 48 像素高」（那说的是关掉描边后可见的 8x8 脸），
-     * 照着它算两行间距会让头像顶边压进牌里 12 像素。有人「修正」生成循环为 8 行时，
+     * <p>守的风险有两层：一是代码注释里长期写着「6 倍是 48 像素高」（那说的是关掉描边后可见的
+     * 8x8 脸），照它算两行间距会让头像压进牌里；二是盒高基数从 10 改成 12 之前，地主王冠会压进
+     * 牌行而普通玩家看不出问题。有人「修正」生成循环为 8 行、或把行整体高改回 10 时，
      * 现有的码位比对测试仍会全绿（码位没变），只有这条会红。
      */
     @Test
@@ -933,20 +976,22 @@ class CraftEngineBundleResourcesTest {
             }
         }
 
-        // 把「盒高 = 10*scale」这条直接钉在两行布局用的算式上，避免有人只改算式不改字形。
+        // 把「行整体高 = 12*scale」钉在两行布局用的算式上，避免有人只改算式不改字形。
+        // 【12 而不是 10】：王冠向上凸出 2 行也占位置，按 10 算地主王冠会压进牌行。
         assertEquals(
-            60,
+            72,
             PackAssets.avatarRowDownOffset(0, 6),
-            "6 倍头像的字形盒必须按 60 像素算（10*6），不是 48（那是可见的 8x8 脸）"
+            "6 倍头像行整体必须按 72 像素算（12*6 = 描边 10 行 + 王冠 2 行），不是 60 也不是 48"
         );
 
         // 全倍数都钉一遍：只钉 6 倍的话，有人把算式改成「6 倍特判 + 其余按 8 算」也能全绿。
-        // 4..10 每一档都验，是因为 avatar-scale 放行的就是这个区间。
+        // 逐档验的区间就是 avatar-scale 放行的那个区间（现在是 2..16，随资源包参数走）。
         for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
             assertEquals(
-                10 * scale,
+                PackAssets.AVATAR_ROW_TOTAL_PIXELS * scale,
                 PackAssets.avatarRowDownOffset(0, scale),
-                scale + " 倍头像的盒高必须是 10*" + scale + "=" + (10 * scale)
+                scale + " 倍头像行整体高必须是 12*" + scale + "="
+                    + (PackAssets.AVATAR_ROW_TOTAL_PIXELS * scale)
                     + "，不是 8*" + scale + "=" + (8 * scale)
                     + "。描边那两行永远参与字形度量，运行期关 avatar-outline 只是不画像素、"
                     + "不改度量；按 8 算会让头像顶边压进牌里 " + (2 * scale) + " 像素"
@@ -1044,14 +1089,21 @@ class CraftEngineBundleResourcesTest {
             }
         }
 
-        // 缩放只许缩小：贴图本身 35x53，放大只会得到插值糊掉的牌，而且满手 20 张会横出屏幕。
+        // 【放大已放开】：档位区间是 32..56，上界超过贴图原生的 53。放大确有插值模糊，
+        // 但要不要放大是服主的事，不该由这里替他决定 —— 所以这条改成守「默认值仍是 1:1」，
+        // 而不是守「所有档都不放大」。真正要防的是默认配置静默变成放大档。
+        assertEquals(53, PackAssets.DEFAULT_CARD_HEIGHT,
+            "默认牌面高必须是贴图原生的 53（1:1 不插值）；改大了所有服主开箱就看到糊牌");
         for (int heightTier = 0; heightTier < PackAssets.cardGlyphHeightTierCount(); heightTier++) {
             assertTrue(
-                PackAssets.cardGlyphHeightAt(heightTier) <= 53,
-                "缩放档 " + heightTier + " 比贴图原始高度还大，牌会被放大插值糊掉"
+                PackAssets.cardGlyphHeightAt(heightTier) <= 56,
+                "缩放档 " + heightTier + " 超出预生成上界 56，资源包里没有对应字形"
             );
         }
-        assertEquals(53, PackAssets.cardGlyphHeightAt(0), "缩放档 0 必须是 1:1，它是默认档也是上限");
+        // 【索引 0 不再承载「默认」语义】：档位按范围生成后索引 0 是区间端点（降序时 56）。
+        // 默认值改由显式常量 DEFAULT_CARD_HEIGHT 给，所以这里守「53 仍在表内」而不是「在索引 0」。
+        assertTrue(PackAssets.cardGlyphHeightTierOf(53) >= 0,
+            "1:1 的 53 必须仍是可选档位，否则默认配置一启动就被吸附成别的高度");
     }
 
     /**
@@ -1361,7 +1413,7 @@ class CraftEngineBundleResourcesTest {
     }
 
     private static Map<String, Map<String, String>> glyphEntries() throws IOException {
-        String images = read("craftengine/muz/configuration/images.yml").replace("\r\n", "\n");
+        String images = readAllImageParts().replace("\r\n", "\n");
         Map<String, Map<String, String>> entries = new HashMap<>();
         Map<String, String> current = null;
         for (String line : images.split("\n")) {
@@ -1428,6 +1480,82 @@ class CraftEngineBundleResourcesTest {
             assertEquals(35, texture.getWidth(), path + " 宽度不是裁切后的牌面宽度");
             assertEquals(53, texture.getHeight(), path + " 高度不是裁切后的牌面高度");
         }
+    }
+
+    /**
+     * 原版 9 槽 Hotbar 贴图是客户端全局资源，构建脚本与源资源包都不许重新引入。
+     *
+     * <p>只检查 bundle 索引不够：若生成逻辑重新写出这两张图、但索引阶段又恰好漏掉，
+     * 成品测试可能暂时全绿；反过来，只扫构建脚本文本又会被历史说明注释误命中。
+     * 因此同时锁三层：去注释后的生成脚本没有显式生成/复制目标文件，整包复制的源目录里
+     * 没有目标文件，最终 bundle 索引和 classpath 也都没有目标路径。
+     */
+    @Test
+    void originalMinecraftHotbarSpritesAreNeverGeneratedCopiedOrBundled() throws IOException {
+        String activeBuildScript = stripComments(Files.readString(BUILD_SCRIPT));
+        String[] sprites = {"hotbar.png", "hotbar_selection.png"};
+
+        for (String sprite : sprites) {
+            assertFalse(activeBuildScript.contains("\"" + sprite + "\""),
+                "build.gradle.kts 又显式生成或复制了原版 " + sprite
+                    + "；该贴图会全局隐藏/替换所有玩家的 9 槽物品栏，不能按 PLAYING 阶段切换");
+
+            Path sourceSprite = RESOURCE_PACK_SOURCE.resolve(
+                "assets/minecraft/textures/gui/sprites/hud/" + sprite);
+            assertFalse(Files.exists(sourceSprite),
+                sourceSprite + " 出现在整包 copyRecursively 的源目录中，构建时会被无条件复制进资源包");
+        }
+
+        String index = read("craftengine/muz/_bundle_index.txt");
+        for (String sprite : sprites) {
+            String bundledPath = "resourcepack/assets/minecraft/textures/gui/sprites/hud/" + sprite;
+            assertFalse(index.lines().anyMatch(line -> line.trim().equals(bundledPath)),
+                bundledPath + " 不得出现在 _bundle_index.txt；否则 CE 会把原版 Hotbar 覆盖发给所有玩家");
+            assertNull(
+                CraftEngineBundleResourcesTest.class.getClassLoader().getResource("craftengine/muz/" + bundledPath),
+                bundledPath + " 已进入测试 classpath，即使索引漏记也说明生成/复制回退了"
+            );
+        }
+    }
+
+    /**
+     * PLAYING 阶段的自定义 5 槽字形必须是与原版 hotbar 等宽的全不透明遮罩。
+     *
+     * <p>182×22 与全不透明都是业务契约，不只是两侧常量「彼此相等」：若生成侧和
+     * PackAssets 一起退回 108px，普通一致性断言仍会通过，但原版外围四槽会露出来，
+     * 视觉上就不是 5 槽替换。只改生成器或只改常量则会让负空格归零横向串位。
+     */
+    @Test
+    void hotbarSlotsTextureIsFullOpaqueOriginalWidthMask() throws IOException {
+        String path = "craftengine/muz/resourcepack/assets/muz/textures/font/hotbar_slots.png";
+        BufferedImage texture = readImage(path);
+        assertEquals(182, PackAssets.HOTBAR_HUD_GLYPH_WIDTH,
+            "Hotbar 遮罩必须等宽覆盖原版 9 槽背景，不能退回只画中央 108px");
+        assertEquals(22, PackAssets.HOTBAR_HUD_GLYPH_HEIGHT,
+            "Hotbar 遮罩高度必须保持原版背景的 22px");
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_WIDTH, texture.getWidth(),
+            path + " 的真实宽度与 PackAssets.HOTBAR_HUD_GLYPH_WIDTH 不一致");
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_HEIGHT, texture.getHeight(),
+            path + " 的真实高度与 PackAssets.HOTBAR_HUD_GLYPH_HEIGHT 不一致");
+        for (int y = 0; y < texture.getHeight(); y++) {
+            for (int x = 0; x < texture.getWidth(); x++) {
+                assertEquals(255, (texture.getRGB(x, y) >>> 24) & 0xFF,
+                    path + " 在 (" + x + "," + y + ") 不是全不透明，原版物品栏会从下面透出来");
+            }
+        }
+        assertEquals(
+            PackAssets.HOTBAR_HUD_GLYPH_WIDTH + 1,
+            PackAssets.HOTBAR_HUD_GLYPH_ADVANCE,
+            "Minecraft 位图字形前进量必须始终是 PNG 宽度 + 1；不能只改 WIDTH 不改 ADVANCE"
+        );
+
+        Map<String, String> fields = glyphEntries().get("hotbar_slots");
+        assertNotNull(fields, "images/hotbar_hud.yml 缺少 muz:hotbar_slots 字形声明");
+        assertEquals("muz:font/hotbar_slots.png", fields.get("file"),
+            "Hotbar 字形声明没有引用被测的 hotbar_slots.png，宽度断言会失去实际意义");
+        assertTrue(read("craftengine/muz/_bundle_index.txt").lines()
+                .anyMatch(line -> line.trim().equals("resourcepack/assets/muz/textures/font/hotbar_slots.png")),
+            "hotbar_slots.png 未进入 bundle 索引，运行期即使发送正确码位也只会显示豆腐块");
     }
 
     /**
@@ -1518,6 +1646,40 @@ class CraftEngineBundleResourcesTest {
             assertNotNull(image, "读不出图片 " + path);
             return image;
         }
+    }
+
+    /**
+     * 把 configuration/images/ 下所有拆分文件拼成一份来断言。
+     *
+     * <p>【为什么是多份】：这些字形条目是乘出来的（牌 55 张 × 25 高度档 × 41 偏移档，
+     * 头像 201 偏移档 × 15 scale × 10 行），合计 9 万多条、13 MiB。CraftEngine 用
+     * SnakeYAML Engine 解析，单份文档超过 3,145,728 code point 就直接抛
+     * YamlEngineException、整包不生效——线上已经因此炸过一次。所以生成器按
+     * 牌高与 scale 切成 42 份，每份各自远低于上限。
+     *
+     * <p>文件清单从 _bundle_index.txt 取：classpath 没法列目录，而那份索引本来
+     * 就是生成器写出来的全量清单。
+     */
+    private static String readAllImageParts() throws IOException {
+        String index = read("craftengine/muz/_bundle_index.txt");
+        StringBuilder combined = new StringBuilder();
+        int found = 0;
+        for (String line : index.split("\\R")) {
+            String entry = line.trim();
+            if (entry.startsWith("configuration/images/") && entry.endsWith(".yml")) {
+                combined.append(read("craftengine/muz/" + entry)).append('\n');
+                found++;
+            }
+        }
+        assertTrue(found > 0, "_bundle_index.txt 里没有 configuration/images/ 下的任何文件");
+        return combined.toString();
+    }
+
+    /** 源码契约断言不应被构建脚本注释里的历史说明误命中。 */
+    private static String stripComments(String source) {
+        return source
+            .replaceAll("(?s)/\\*.*?\\*/", "")
+            .replaceAll("(?m)//.*$", "");
     }
 
     private static String read(String path) throws IOException {

@@ -433,6 +433,16 @@ class PlayerHeadRendererTest {
      * 没算「档位倍数」，于是牌面偏移档从 6 扩到 15、实际占用涨到 4125 个码位、
      * 盖穿头像起点时，测试照样是绿的，问题一路跑到 CE 启动才炸出一千多条警告。
      * 估算换成全枚举后，任何一次扩档只要产生重复码位，这里立刻红。
+     *
+     * <p><b>唯一性的判据随字体切分改成了「(字体名, 码位) 配对」</b>，不再是裸码位。
+     * 头像族现在有 201 档、一张字体只装 40 档，所以档 0 / 40 / 80 的码位基址都回到
+     * {@code 0xE800} —— 裸码位【必然重复】，靠落在 {@code muz_avatar} / {@code _2} /
+     * {@code _3} 上区分。按裸码位判唯一会把这个正常设计判成冲突。
+     *
+     * <p>改成配对后这条测试反而【更强】：原来只能发现同一张表内撞码位，现在还能发现
+     * 「字体名算错」—— 若 {@code avatarPixelFont} 与 {@code avatarPixelChar} 用了不一致的
+     * 切分算式，两个不同组合就会落到同一个 (字体, 码位) 上，这里立刻红。
+     * 而那种错的线上表现是【画成别的图案】，比豆腐块更难排查。
      */
     @Test
     void avatarGlyphCodepointsAreUniqueWithinTheirOwnFont() {
@@ -440,18 +450,79 @@ class PlayerHeadRendererTest {
         // 遍历【头像自己那张档位表】。拆表后头像的码位公式用的是 avatarDownOffsetTierCount()，
         // 拿牌表的档数来遍历会漏掉或多出档位，唯一性就验不全。
         for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
+            String font = PackAssets.avatarPixelFont(tier);
             for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
                  scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
                 for (int row = 0; row < PackAssets.AVATAR_OUTLINED_PIXELS; row++) {
                     String glyph = PackAssets.avatarPixelChar(scale, row, tier);
+                    // key 是「字体 + 码位」：同一个码位落在不同字体上是两个不同字形。
+                    String slot = font + "@" + Integer.toHexString(glyph.codePointAt(0));
                     String who = "scale=" + scale + " row=" + row + " downTier=" + tier;
-                    String previous = seen.put(glyph, who);
+                    String previous = seen.put(slot, who);
                     assertNull(previous,
-                        "头像字形码位 U+" + Integer.toHexString(glyph.codePointAt(0))
-                            + " 被两个组合共用：" + previous + " 与 " + who);
+                        "头像字形槽位 " + slot + " 被两个组合共用：" + previous + " 与 " + who
+                            + "。同字体内撞码位会让其中一个画成另一个的图案");
                 }
             }
         }
+    }
+
+    /**
+     * 王冠字形也必须逐槽唯一，同理。
+     *
+     * <p>王冠族一档只占 30 个码位，从 {@code 0xE000} 起单张字体就装得下全部 201 档，
+     * 所以这里【不该】出现字体切分 —— 顺带断言这一点：一旦哪天王冠族也需要切分，
+     * 这条会提醒改动方去核对 {@code crownMiniMessage} 里的字体标签。
+     */
+    @Test
+    void 王冠字形码位逐槽唯一且单张字体装得下() {
+        Map<String, String> seen = new HashMap<>();
+        for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
+            String font = PackAssets.avatarCrownFont(tier);
+            assertEquals(PackAssets.AVATAR_CROWN_FONT, font,
+                "王冠族本该单张字体装下全部档位；出现切分说明码位预算变了，"
+                    + "crownMiniMessage 的字体标签要跟着核对");
+            for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
+                 scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+                for (int row = 0; row < PackAssets.AVATAR_CROWN_PIXELS; row++) {
+                    String glyph = PackAssets.avatarCrownChar(scale, row, tier);
+                    String slot = font + "@" + Integer.toHexString(glyph.codePointAt(0));
+                    String who = "scale=" + scale + " row=" + row + " downTier=" + tier;
+                    String previous = seen.put(slot, who);
+                    assertNull(previous, "王冠字形槽位 " + slot + " 被共用：" + previous + " 与 " + who);
+                }
+            }
+        }
+    }
+
+    /**
+     * 脸的字体必须【随偏移档变】。
+     *
+     * <p>守的风险：头像族有 201 档但一张字体只装 40 档，深档的脸挂在 {@code muz_avatar_2..6} 上。
+     * {@code renderMiniMessage} 里若沿用写死的 {@code AVATAR_PIXEL_FONT}（改动前就是这样），
+     * 深档整片脸都是豆腐块 —— 而浅档一切正常，本地默认配置根本测不出来。
+     */
+    @Test
+    void 脸的字体随偏移档变() {
+        int scale = 6;
+        int[][] face = new int[PackAssets.AVATAR_HEAD_PIXELS][PackAssets.AVATAR_HEAD_PIXELS];
+        for (int[] row : face) {
+            java.util.Arrays.fill(row, 0xFF808080);
+        }
+        java.util.function.IntFunction<String> offsets = px -> "[" + px + "]";
+
+        int deepTier = 40;
+        assertNotEquals(PackAssets.avatarPixelFont(0), PackAssets.avatarPixelFont(deepTier),
+            "档 0 与档 " + deepTier + " 必须落在不同字体上，否则这条测试验不到东西");
+
+        String shallow = PlayerHeadRenderer.renderMiniMessage(face, scale, offsets, 0);
+        String deep = PlayerHeadRenderer.renderMiniMessage(face, scale, offsets, deepTier);
+
+        assertTrue(shallow.contains("<font:" + PackAssets.avatarPixelFont(0) + ">"),
+            "浅档必须套档 0 的字体：" + shallow.substring(0, Math.min(80, shallow.length())));
+        assertTrue(deep.contains("<font:" + PackAssets.avatarPixelFont(deepTier) + ">"),
+            "深档必须套 " + PackAssets.avatarPixelFont(deepTier) + "，套错整片脸是豆腐块："
+                + deep.substring(0, Math.min(80, deep.length())));
     }
 
     /**

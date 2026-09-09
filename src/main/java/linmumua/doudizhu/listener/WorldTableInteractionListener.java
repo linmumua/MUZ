@@ -1,6 +1,8 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.GamePhase;
+import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.ui.MuzTheme;
 import linmumua.doudizhu.room.TableLevel;
 import java.util.Iterator;
@@ -33,6 +35,9 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerItemHeldEvent;
+import org.bukkit.event.player.PlayerKickEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 
@@ -53,6 +58,16 @@ public final class WorldTableInteractionListener implements Listener {
     /* 最近一次已消费的按钮点击：玩家 -> [实体, tick]，用于 AT 与 INTERACT 之间去重 */
     private final Map<UUID, ConsumedButtonClick> consumedButtonClicks = new LinkedHashMap<>();
 
+    /* 调试棒右键也可能同时投递 AT、INTERACT 两个事件，按玩家和 tick 去重。 */
+    private final Map<UUID, Integer> consumedHudDebugClicks = new LinkedHashMap<>();
+
+    /* 已通过调试棒建立临时行覆盖的玩家；离桌/退出时清除。 */
+    private final java.util.Set<UUID> hudDebugSessionPlayers = new java.util.LinkedHashSet<>();
+    /* 曾在牌桌内使用过调试棒的玩家；用于 tick 识别离桌。 */
+    private final java.util.Set<UUID> hudDebugTablePlayers = new java.util.LinkedHashSet<>();
+    /* 当前仍显示假预览的玩家；换手时只隐藏预览，不清行覆盖。 */
+    private final java.util.Set<UUID> hudDebugPreviewPlayers = new java.util.LinkedHashSet<>();
+
     /** 记录一次已经执行过的按钮点击，供同一次右键的另一个事件识别并跳过。 */
     record ConsumedButtonClick(UUID entityId, int tick) {
     }
@@ -71,6 +86,11 @@ public final class WorldTableInteractionListener implements Listener {
             return;
         }
         ItemStack item = event.getItem();
+        if (plugin.isHudDebugStick(item)) {
+            event.setCancelled(true);
+            handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
         if (!plugin.isTablePlacer(item) && !plugin.isDoudizhuTableRemover(item)) {
             return;
         }
@@ -86,6 +106,88 @@ public final class WorldTableInteractionListener implements Listener {
             plugin.playPlacementBlockedWarning(event.getPlayer());
             event.getPlayer().sendActionBar(MuzTheme.danger(message));
         }
+    }
+
+    /**
+     * 调试棒只在主手右键时消费事件，并且必须排在桌器、手牌和保护逻辑之前。
+     */
+    private void handleHudDebugStickOnce(Player player) {
+        UUID playerId = player.getUniqueId();
+        int currentTick = Bukkit.getCurrentTick();
+        Integer previousTick = consumedHudDebugClicks.put(playerId, currentTick);
+        if (previousTick != null && previousTick == currentTick) {
+            return;
+        }
+        handleHudDebugStick(player);
+    }
+
+    /**
+     * 右键循环 1..7 行组合，Shift+右键固定为 0；行覆盖交给插件 API，正式出牌阶段
+     * 不画假预览，等待 GameTable 的正式 HUD tick 应用覆盖。
+     */
+    private void handleHudDebugStick(Player player) {
+        UUID playerId = player.getUniqueId();
+        int rows;
+        if (player.isSneaking()) {
+            plugin.hideAllHudRows(playerId);
+            rows = 0;
+        } else {
+            rows = plugin.cycleHudRowOverride(playerId);
+        }
+        GameTable table = plugin.getTableManager().getTableOf(player);
+        if (rows == 0 || (table != null && table.getPhase() == GamePhase.PLAYING)) {
+            hideHudDebugPreview(player);
+        } else {
+            plugin.showHudDebugPreview(player);
+            hudDebugPreviewPlayers.add(playerId);
+        }
+        hudDebugSessionPlayers.add(playerId);
+        if (table != null) {
+            hudDebugTablePlayers.add(playerId);
+        }
+        player.sendActionBar(rows == 0
+            ? MuzTheme.warning("HUD 已全关（右键恢复）")
+            : MuzTheme.accent("HUD · " + DoudizhuPlugin.describeHudRows(rows)));
+    }
+
+    private void hideHudDebugPreview(Player player) {
+        if (hudDebugPreviewPlayers.remove(player.getUniqueId())) {
+            plugin.trickHudPreview().hide(player);
+        }
+    }
+
+    /** 调试棒换出主手后，清掉仍挂在客户端上的假预览；临时行覆盖留到离桌/退出再清。 */
+    @EventHandler
+    public void onHudDebugStickHeldChange(PlayerItemHeldEvent event) {
+        Player player = event.getPlayer();
+        plugin.scheduler().runLater(1L, () -> {
+            if (!player.isOnline() || plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
+                return;
+            }
+            hideHudDebugPreview(player);
+        });
+    }
+
+    @EventHandler
+    public void onHudDebugPlayerQuit(PlayerQuitEvent event) {
+        clearHudDebugState(event.getPlayer());
+    }
+
+    @EventHandler
+    public void onHudDebugPlayerKick(PlayerKickEvent event) {
+        clearHudDebugState(event.getPlayer());
+    }
+
+    private void clearHudDebugState(Player player) {
+        UUID playerId = player.getUniqueId();
+        plugin.trickHudPreview().hide(player);
+        hudDebugPreviewPlayers.remove(playerId);
+        plugin.clearHudRowOverride(playerId);
+        consumedButtonClicks.remove(playerId);
+        consumedHudDebugClicks.remove(playerId);
+        hudDebugSessionPlayers.remove(playerId);
+        hudDebugTablePlayers.remove(playerId);
+        hudDebugPreviewPlayers.remove(playerId);
     }
 
     /**
@@ -111,6 +213,14 @@ public final class WorldTableInteractionListener implements Listener {
             || event.getAction() == Action.RIGHT_CLICK_BLOCK;
         boolean leftClick = event.getAction() == Action.LEFT_CLICK_AIR
             || event.getAction() == Action.LEFT_CLICK_BLOCK;
+
+        // 调试棒必须先于手牌与保护逻辑消费；只认玩家主手里的调试棒。
+        if (rightClick && event.getHand() == EquipmentSlot.HAND
+            && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
+            event.setCancelled(true);
+            handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
 
         if (rightClick || leftClick) {
             // 追踪：六个事件入口之一。blocking 实体恒为 null（牌无判定框，
@@ -171,6 +281,12 @@ public final class WorldTableInteractionListener implements Listener {
      */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInteract(PlayerInteractEntityEvent event) {
+        if (event.getHand() == EquipmentSlot.HAND
+            && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
+            event.setCancelled(true);
+            handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
         // 追踪：六个事件入口之一。onAttack 与 onInteractAt 的 tracing 用同一前缀，
         // 但这里 blocking 可能不为 null
         boolean rightClick = true; // INTERACT 入口恒为右键，与 BlockedBy 调用处口径一致
@@ -263,6 +379,12 @@ public final class WorldTableInteractionListener implements Listener {
      */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInteractAt(PlayerInteractAtEntityEvent event) {
+        if (event.getHand() == EquipmentSlot.HAND
+            && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
+            event.setCancelled(true);
+            handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
         // 追踪：六个事件入口之一。AT 与 INTERACT 两条路都打一次，看哪个包先到、
         // 以及 blockedBy 的 blocking 实体分别是什么
         boolean rightClick = true;
@@ -573,6 +695,51 @@ public final class WorldTableInteractionListener implements Listener {
     private void tickToolPreviews() {
         tickTablePlacerPreviews();
         tickTableRemoverPreviews();
+        tickHudDebugPreviews();
+    }
+
+    /** 调试棒预览只由主线程刷新；正式 PLAYING HUD 仍由 GameTable 自己的 tick 负责。 */
+    private void tickHudDebugPreviews() {
+        Iterator<UUID> iterator = hudDebugSessionPlayers.iterator();
+        while (iterator.hasNext()) {
+            UUID playerId = iterator.next();
+            Player player = plugin.getServer().getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                plugin.clearHudRowOverride(playerId);
+                hudDebugTablePlayers.remove(playerId);
+                hudDebugPreviewPlayers.remove(playerId);
+                consumedHudDebugClicks.remove(playerId);
+                iterator.remove();
+                continue;
+            }
+            GameTable table = plugin.getTableManager().getTableOf(player);
+            boolean wasInTable = hudDebugTablePlayers.contains(playerId);
+            if (table == null && wasInTable) {
+                plugin.clearHudRowOverride(playerId);
+                hideHudDebugPreview(player);
+                hudDebugTablePlayers.remove(playerId);
+                iterator.remove();
+                continue;
+            }
+            if (table == null) {
+                hudDebugTablePlayers.remove(playerId);
+            } else {
+                hudDebugTablePlayers.add(playerId);
+            }
+            if (!plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
+                hideHudDebugPreview(player);
+                continue;
+            }
+            int rows = plugin.hudRowOverride(playerId);
+            if (table != null && table.getPhase() == GamePhase.PLAYING) {
+                hideHudDebugPreview(player);
+            } else if (rows == 0) {
+                hideHudDebugPreview(player);
+            } else {
+                plugin.showHudDebugPreview(player);
+                hudDebugPreviewPlayers.add(playerId);
+            }
+        }
     }
 
     private void tickTablePlacerPreviews() {

@@ -19,6 +19,7 @@ public final class CraftEngineLifecycleListener implements Listener {
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
         if (isCraftEngineReload(event.getMessage())) {
+            plugin.getCraftEngineOffsetService().invalidate();
             plugin.getCraftEngineBundleExporter().ensureBundleReady("player-ce-reload", false);
             plugin.scheduleVisualWarmupRebuilds("player-ce-reload", 40L, 140L);
         }
@@ -27,6 +28,7 @@ public final class CraftEngineLifecycleListener implements Listener {
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onServerCommand(ServerCommandEvent event) {
         if (isCraftEngineReload(event.getCommand())) {
+            plugin.getCraftEngineOffsetService().invalidate();
             plugin.getCraftEngineBundleExporter().ensureBundleReady("console-ce-reload", false);
             plugin.scheduleVisualWarmupRebuilds("console-ce-reload", 40L, 140L);
         }
@@ -35,6 +37,7 @@ public final class CraftEngineLifecycleListener implements Listener {
     @EventHandler
     public void onPluginEnable(PluginEnableEvent event) {
         if (event.getPlugin().getName().equalsIgnoreCase("CraftEngine")) {
+            plugin.getCraftEngineOffsetService().invalidate();
             plugin.ensureCraftEngineProtectionListenerRegistered();
             plugin.getCraftEngineBundleExporter().ensureBundleReady("craftengine-enable", false);
             plugin.attemptPersistedTableRestore();

@@ -72,8 +72,18 @@ class PrivateHandRebuildCostTest {
      */
     @Test
     void clearingPrivateEntitiesKeepsAnimationProgress() throws IOException {
-        String body = methodBody(MANAGER,
-            "private void clearPrivateEntities(PlacedTable placed, UUID playerId, Map<Integer, Interaction> keepCapturers)");
+        // 1.10.5 起这个方法签名跨多行（多了 keepEdgeTiles：两端补覆盖的边缘瓦片也要跳过
+        // clear，理由与捕获器同源 —— 漏掉就会被删掉，复用池拿到死实体，换 id 的丢事件窗口回来）。
+        // 锚点只取到方法名的左括号：整签名当字面量会把断言绑死在换行与缩进上，
+        // 格式一动就红，而那与本用例要验的事（不许清动画进度）毫无关系。
+        // 断言本身一字未动。
+        // 锚点取「4 参重载的第一个参数」而不是方法名：
+        //   1. 不能带换行 —— 源文件是 CRLF，字面量里的 \n 永远匹配不上；
+        //   2. 不能只写方法名 —— 那会先命中 2 参重载（它只有一行委托调用），
+        //      body 里压根没有 hoverProgressByPlayer.remove，两条 assertFalse
+        //      会「因为什么都没找到」而通过，成为静默的假绿，比直接红更糟。
+        // 用 keepEdgeTiles 那一行做锚点：它只存在于 4 参重载里，且不含换行。
+        String body = methodBody(MANAGER, "Map<HandEdge, Interaction> keepEdgeTiles");
 
         assertFalse(body.contains("hoverProgressByPlayer.remove"),
             "clearPrivateEntities 又清了悬停进度：重建后悬停中的牌会「落下再长起来」");
@@ -161,11 +171,23 @@ class PrivateHandRebuildCostTest {
         assertTrue(clearAt >= 0, "铺牌不再清旧实体，这条测试的锚点已失效");
         assertTrue(pickAt < clearAt,
             "先 clear 再摘可复用捕获器：捕获器已经被删掉，复用拿到的是死实体，等于没改");
-        assertTrue(body.contains("clearPrivateEntities(placed, playerId, reusableCapturers)"),
+        assertTrue(body.contains("clearPrivateEntities(placed, playerId, reusableCapturers, reusableTiles)"),
             "clear 没有收到要跳过的捕获器集合：它们会被连带删掉，复用失效");
         assertTrue(body.contains("discardUnclaimedCapturers("),
             "没被认领的旧捕获器没有销毁：它已不在 privateEntitiesByPlayer 里，"
                 + "会变成永久孤儿实体留在原地接事件，表现为点空气选中一张不存在的牌");
+
+        // 边缘瓦片（1.10.5 新增）走完全相同的三步，一步都不能少。
+        // 它和捕获器一样是点击事件入口，每次铺牌重建就会在两端那两条 0.0715 格的
+        // 边缘条上精确重建「出牌后约 1 tick + 半个 RTT 点击丢失」的窗口。
+        int pickTilesAt = body.indexOf("reusableEdgeTiles(");
+        assertTrue(pickTilesAt >= 0,
+            "铺牌没有先摘出可复用的边缘瓦片：两端边缘条会在每次出牌后短暂点不动");
+        assertTrue(pickTilesAt < clearAt,
+            "先 clear 再摘可复用瓦片：瓦片已经被删掉，复用拿到的是死实体，等于没改");
+        assertTrue(body.contains("discardUnclaimedEdgeTiles("),
+            "没被认领的边缘瓦片没有销毁：手牌从 N≥2 掉到 N=1 时两块瓦片改挂同一张牌，"
+                + "旧的那块会变成孤儿实体留在原地接事件");
     }
 
     private static String methodBody(Path file, String signature) throws IOException {

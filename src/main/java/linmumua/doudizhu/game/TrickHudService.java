@@ -8,10 +8,13 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
+import linmumua.doudizhu.assets.PackTiers;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
 import linmumua.doudizhu.config.MuzYamlConfig;
+import linmumua.doudizhu.model.CardRank;
 import linmumua.doudizhu.model.DoudizhuCard;
+import linmumua.doudizhu.ui.MuzTheme;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -71,8 +74,7 @@ final class TrickHudService {
      * 整条 HUD 相对 BossBar 默认位置往下推的像素数。
      *
      * <p>50 是测试服实测调优值，把 HUD 从紧贴屏幕顶部推到不挡准星的位置。
-     * 必须是 {@link PackAssets#cardGlyphDownOffsetTierList()} 里预生成的档位，
-     * 否则默认配置本身就会触发回退警告。
+     * 落在预生成档位上（0..80 步长 2），所以默认配置不会被吸附。
      *
      * <p>这一项只管牌行；头像行由 {@link #DEFAULT_AVATAR_OFFSET_DOWN} 单独管。
      */
@@ -85,8 +87,8 @@ final class TrickHudService {
      * 头像盒高」，也就是两行【精确相接、零重叠】的那个点。谁改了 {@link #DEFAULT_OFFSET_DOWN}
      * 或 {@link #DEFAULT_AVATAR_SCALE}，默认值会自己跟着走，不会退化成一个和牌行错开的数。
      *
-     * <p>算出来必须落在 {@link PackAssets#avatarDownOffsetTierList()} 里，否则默认配置
-     * 自己就会触发回退警告 —— 有测试守这一点。
+     * <p>算出来是 {@code 50 + 12 * 6 = 122}，落在预生成档位上（0..400 步长 2），
+     * 所以默认配置既不会被吸附也不会触发重叠警告 —— 有测试守这一点。
      */
     private static final int DEFAULT_AVATAR_OFFSET_DOWN =
         PackAssets.avatarRowDownOffset(DEFAULT_OFFSET_DOWN, DEFAULT_AVATAR_SCALE);
@@ -96,6 +98,14 @@ final class TrickHudService {
      * 一手最多能有 20 张（比如四个三带的飞机），全展开要 700 像素以上会超出屏幕。
      */
     private static final int DEFAULT_CARD_STEP = 22;
+
+    /**
+     * 记牌器相邻两格的默认间距。
+     *
+     * <p>15 个点数（13 个普通 + 双王）一字排开，间距每加 1 像素整行就宽 14 像素，
+     * 所以这里取得很小：2 像素已经够把相邻两格分开，再大就有超出屏宽的风险。
+     */
+    private static final int DEFAULT_COUNTER_GAP = 2;
 
     /**
      * 从 config 读出来的那几个可调量。
@@ -109,7 +119,20 @@ final class TrickHudService {
      * @param avatarDownOffsetTier 头像行的向下偏移【档序号】，查的是头像那张【独立】档位表。
      *                       两行位置可以各自随便调，代价是配歪了会重叠，只靠警告拦（见
      *                       {@link #warnIfRowsOverlap}）
-     * @param offsetX        整体水平偏移像素，正右负左
+     * @param offsetX        整体水平偏移像素，正右负左；三行一起动
+     * @param rowXOffsets    三行【各自】的水平偏移，叠加在 {@link #offsetX} 之上。
+     *                       独立出来是因为三行宽度天生不等，一个整体 x 做不到「牌行靠左、
+     *                       记牌行再往左一点」这类排布；而横向靠负空格实现，任意整数都合法、
+     *                       不需要预生成字形，拆开的代价只是多三个配置键
+     * @param counterEnabled 记牌器行（第三行）的开关。【与 {@link #enabled} 分开】：
+     *                       有人只想要「谁出了什么」而嫌记牌器占地方或觉得降低难度，
+     *                       关它不该连整条 HUD 一起关掉
+     * @param counterGap     记牌器相邻两格的间距。各格自身宽度【不在这里配】：
+     *                       它由剩余张数的实际位数决定（剩 4 张一位数、剩 10 张以上两位数），
+     *                       是算出来的而不是配出来的，配一个固定宽反而会让两位数互相压字
+     * @param counterHideExhausted 某个点数出完（剩 0 张）时是否隐藏那一格。
+     *                       【隐藏的只是内容，不是位置】：那一格照样占住它的宽度，
+     *                       否则后面所有格子会左移、玩家靠位置扫读的习惯就废了
      */
     record Settings(
         boolean enabled,
@@ -119,7 +142,11 @@ final class TrickHudService {
         int heightTier,
         int downOffsetTier,
         int avatarDownOffsetTier,
-        int offsetX
+        int offsetX,
+        TrickHudView.RowXOffsets rowXOffsets,
+        boolean counterEnabled,
+        int counterGap,
+        boolean counterHideExhausted
     ) {
     }
 
@@ -151,41 +178,85 @@ final class TrickHudService {
         // avatarGap 不校验：负值是有意义的用法（让第一张牌压在头像上做紧凑排版）。
         int avatarGap = config.getInt("trick-hud.avatar-gap", DEFAULT_AVATAR_GAP);
 
-        // 缩放与向下偏移都只能取【构建期预生成的档位】：height/ascent 固化在资源包的
-        // images.yml 里，运行时改不了，写一个没生成过的值会直接变豆腐块。
-        int cardHeight = config.getInt("trick-hud.card-height", PackAssets.cardGlyphHeightAt(0));
-        int heightTier = PackAssets.cardGlyphHeightTierOf(cardHeight);
-        if (heightTier < 0) {
-            warn.accept("trick-hud.card-height=" + cardHeight + " 不是预生成的缩放档（可选 "
-                + PackAssets.cardGlyphHeightTierList() + "），已回退为 " + PackAssets.cardGlyphHeightAt(0));
-            heightTier = 0;
-        }
+        // 缩放与向下偏移仍然只能落在【构建期预生成的档位】上（height/ascent 固化在资源包的
+        // images.yml 里，运行时改不了），但档位现在很密，所以【就近吸附】而不是回退到默认：
+        // 服主写 111 想要的显然是「111 附近」，吸到 110 的误差 1 像素肉眼看不出；
+        // 而回退到默认 50 会让他觉得「配了没用」。越界才警告 —— 配 500 想要的不是 400。
+        int cardHeight = config.getInt("trick-hud.card-height", PackAssets.DEFAULT_CARD_HEIGHT);
+        int heightTier = snapTier(
+            cardHeight, PackAssets.cardGlyphHeightMin(), PackAssets.cardGlyphHeightMax(),
+            PackAssets.nearestCardGlyphHeightTier(cardHeight),
+            "trick-hud.card-height", warn, PackAssets::cardGlyphHeightAt);
 
         int offsetDown = config.getInt("trick-hud.offset-down", DEFAULT_OFFSET_DOWN);
-        int downOffsetTier = PackAssets.cardGlyphDownOffsetTierOf(offsetDown);
-        if (downOffsetTier < 0) {
-            warn.accept("trick-hud.offset-down=" + offsetDown + " 不是预生成的偏移档（可选 "
-                + PackAssets.cardGlyphDownOffsetTierList() + "），已回退为 "
-                + PackAssets.cardGlyphDownOffsetAt(0));
-            downOffsetTier = 0;
-        }
+        int downOffsetTier = snapTier(
+            offsetDown, PackAssets.cardGlyphDownOffsetMin(), PackAssets.cardGlyphDownOffsetMax(),
+            PackAssets.nearestCardGlyphDownOffsetTier(offsetDown),
+            "trick-hud.offset-down", warn, PackAssets::cardGlyphDownOffsetAt);
 
         // 头像行的偏移【独立于牌行】，查的是头像自己那张档位表。两行能各自随便调是刻意的，
         // 代价是配歪了两行会重叠 —— 那由下面的 warnIfRowsOverlap 出警告，不在这里拦。
         int avatarOffsetDown = config.getInt("trick-hud.avatar-offset-down", DEFAULT_AVATAR_OFFSET_DOWN);
-        int avatarDownOffsetTier = PackAssets.avatarDownOffsetTierOf(avatarOffsetDown);
-        if (avatarDownOffsetTier < 0) {
-            warn.accept("trick-hud.avatar-offset-down=" + avatarOffsetDown + " 不是预生成的头像偏移档（可选 "
-                + PackAssets.avatarDownOffsetTierList() + "），已回退为 " + DEFAULT_AVATAR_OFFSET_DOWN);
-            avatarDownOffsetTier = PackAssets.avatarDownOffsetTierOf(DEFAULT_AVATAR_OFFSET_DOWN);
-        }
+        int avatarDownOffsetTier = snapTier(
+            avatarOffsetDown, PackAssets.avatarDownOffsetMin(), PackAssets.avatarDownOffsetMax(),
+            PackAssets.nearestAvatarDownOffsetTier(avatarOffsetDown),
+            "trick-hud.avatar-offset-down", warn, PackAssets::avatarDownOffsetAt);
         warnIfRowsOverlap(downOffsetTier, avatarDownOffsetTier, avatarScale, warn);
 
         // offset-x 不校验：任意整数都合法（正右负左），靠负空格实现，不依赖预生成字形。
         int offsetX = config.getInt("trick-hud.offset-x", 0);
 
+        // 三行各自的 x，同样不校验。它们是【叠加在 offset-x 之上的增量】：
+        // offset-x 管整条 HUD 往哪偏，这三个管某一行相对其他行往哪偏。
+        // 全为 0（默认）时行为与只有 offset-x 时完全一致。
+        TrickHudView.RowXOffsets rowXOffsets = new TrickHudView.RowXOffsets(
+            config.getInt("trick-hud.card-offset-x", 0),
+            config.getInt("trick-hud.avatar-offset-x", 0),
+            config.getInt("trick-hud.counter.offset-x", 0));
+
+        // 记牌器行【独立开关】：关掉只少画第三行，牌行与头像行照旧。
+        boolean counterEnabled = config.getBoolean("trick-hud.counter.enabled", true);
+
+        // 和 avatarGap 不同，这里【必须拦负值】：头像槽的负间距是有意义的紧凑排版，
+        // 而记牌器 15 格一字排开，负间距会让点数图标和邻格的数字直接叠在一起糊成一团，
+        // 没有任何一种看法能读出剩几张。这属于纯粹的配置笔误，回退而不是照用。
+        int counterGap = config.getInt("trick-hud.counter.gap", DEFAULT_COUNTER_GAP);
+        if (counterGap < 0) {
+            warn.accept("trick-hud.counter.gap=" + counterGap
+                + " 不能为负（会让相邻两格压字），已回退为 " + DEFAULT_COUNTER_GAP);
+            counterGap = DEFAULT_COUNTER_GAP;
+        }
+
+        boolean counterHideExhausted = config.getBoolean("trick-hud.counter.hide-exhausted", false);
+
         return new Settings(
-            enabled, avatarScale, avatarGap, cardStep, heightTier, downOffsetTier, avatarDownOffsetTier, offsetX);
+            enabled, avatarScale, avatarGap, cardStep, heightTier, downOffsetTier, avatarDownOffsetTier, offsetX,
+            rowXOffsets, counterEnabled, counterGap, counterHideExhausted);
+    }
+
+    /**
+     * 把配置值吸附到最近的预生成档，越界时额外留一条警告。
+     *
+     * <p>【范围内静默、越界才警告】是刻意的分工：档位步长只有 1~2 像素，范围内吸附的误差
+     * 服主根本看不出来，为此刷一条警告只会让他以为配错了。而越界是真的没被满足 ——
+     * 配 500 却只能给 400，不说他会一直以为是配置没生效。
+     *
+     * @param value    config 里写的原始值
+     * @param min      该档位表的最小值
+     * @param max      最大值
+     * @param tier     已经算好的最近档序号
+     * @param key      配置键名，用于警告文案
+     * @param resolve  档序号 → 实际值，用于把「吸附到了多少」写进警告
+     * @return 最终采用的档序号（与传入的 {@code tier} 相同，这里只负责警告）
+     */
+    private static int snapTier(
+        int value, int min, int max, int tier, String key,
+        Consumer<String> warn, java.util.function.IntUnaryOperator resolve) {
+        if (value < min || value > max) {
+            warn.accept(key + "=" + value + " 超出资源包预生成范围（" + min + ".." + max
+                + "），已按最接近的 " + resolve.applyAsInt(tier) + " 处理");
+        }
+        return tier;
     }
 
     /**
@@ -197,11 +268,12 @@ final class TrickHudService {
      *
      * <p>几何依据：位图字形占基线上方 {@code [ascent - height, ascent]}，两族都取
      * {@code ascent = height - d}，于是字形盒是「基线下方 d 到基线上方 height - d」。
-     * 头像顶边在基线下方 {@code d_头像 - 10 * scale}，不重叠要求它不高于牌底（基线下方
-     * {@code d_牌}），即 {@code d_头像 - 10 * scale >= d_牌}。
+     * 头像行顶边在基线下方 {@code d_头像 - 12 * scale}，不重叠要求它不高于牌底（基线下方
+     * {@code d_牌}），即 {@code d_头像 - 12 * scale >= d_牌}。
      *
-     * <p>盒高必须按 {@link PackAssets#AVATAR_OUTLINED_PIXELS}(10) 算，不是 8：描边那两行
-     * 永远参与字形度量，运行期关 avatar-outline 只是不画。按 8 算会漏报 2*scale 像素的重叠。
+     * <p>盒高必须按 {@link PackAssets#AVATAR_ROW_TOTAL_PIXELS}(12) 算，不是 8 也不是 10：
+     * 描边那两行永远参与字形度量（运行期关 avatar-outline 只是不画），而王冠还要再往上凸出
+     * 2 行。按 10 算会漏报王冠那 {@code 2 * scale} 像素 —— 地主的王冠压进牌行却不报警。
      *
      * <p>纯函数，警告去向由调用方决定（同 {@link #readSettings}），测试可以直接断言
      * 「重叠组合确实留了警告」。
@@ -214,16 +286,18 @@ final class TrickHudService {
         int cardDownOffsetTier, int avatarDownOffsetTier, int avatarScale, Consumer<String> warn) {
         int cardDown = PackAssets.cardGlyphDownOffsetAt(cardDownOffsetTier);
         int avatarDown = PackAssets.avatarDownOffsetAt(avatarDownOffsetTier);
-        int boxHeight = PackAssets.AVATAR_OUTLINED_PIXELS * avatarScale;
+        int boxHeight = PackAssets.AVATAR_ROW_TOTAL_PIXELS * avatarScale;
         int required = PackAssets.avatarRowDownOffset(cardDown, avatarScale);
         if (avatarDown >= required) {
             return;
         }
+        // 【不枚举合法值】：档位放开后有两百多档，列出来是天书。给一个可直接抄的建议值就够，
+        // 而且现在任意整数都能配（会就近吸附），服主不需要知道网格在哪。
         warn.accept("trick-hud.avatar-offset-down=" + avatarDown + " 比牌行低太少，头像会压进牌里 "
-            + (required - avatarDown) + " 像素（牌行 offset-down=" + cardDown + " + 头像字形盒高 "
-            + boxHeight + " = 至少要 " + required + "，注意盒高按 10*avatar-scale 算、"
-            + "与 avatar-outline 开关无关）；想要两行精确相接请把 avatar-offset-down 设为 "
-            + required + "，它必须是预生成档位之一（" + PackAssets.avatarDownOffsetTierList() + "）");
+            + (required - avatarDown) + " 像素（牌行 offset-down=" + cardDown + " + 头像行整体高 "
+            + boxHeight + " = 至少要 " + required + "，盒高按 12*avatar-scale 算：描边 10 行加"
+            + "王冠凸出 2 行，与 avatar-outline 开关无关）；建议把 avatar-offset-down 设为 "
+            + required + " 或更大");
     }
 
     private final DoudizhuPlugin plugin;
@@ -259,6 +333,9 @@ final class TrickHudService {
     /** 上一次发给该观看者的那一行，内容没变就不重新解析 MiniMessage，也不重发。 */
     private final Map<UUID, String> lastLines = new HashMap<>();
 
+    /** 已经收到过「偏移不可用」提示的人，避免每秒刷屏。 */
+    private final java.util.Set<UUID> offsetWarnedViewers = new java.util.HashSet<>();
+
     TrickHudService(
         DoudizhuPlugin plugin,
         CraftEngineOffsetService offsetService,
@@ -285,6 +362,9 @@ final class TrickHudService {
     void reloadSettings() {
         this.snapshot = buildSnapshot();
         lastLines.clear();
+        // 清掉提示去重：reload 常常就是为了修偏移不可用这个问题，
+        // 不清的话修好之前那批人再也收不到提示，修没修好也看不出来。
+        offsetWarnedViewers.clear();
     }
 
     private Snapshot buildSnapshot() {
@@ -404,33 +484,183 @@ final class TrickHudService {
      * @param cards    桌上最后打出的那手牌；空表示这一轮还没人出牌，上排留空但头像照旧显示
      */
     void render(Player viewer, Seat previous, Seat current, Seat next, List<DoudizhuCard> cards) {
+        render(viewer, previous, current, next, cards, Map.of());
+    }
+
+    /**
+     * 带记牌器读数的渲染入口。
+     *
+     * @param remainingCounts 每个点数还剩几张；空表示不画记牌行
+     */
+    void render(
+        Player viewer,
+        Seat previous,
+        Seat current,
+        Seat next,
+        List<DoudizhuCard> cards,
+        Map<CardRank, Integer> remainingCounts
+    ) {
+        // 调试棒是玩家级覆盖：没有覆盖时插件 API 返回 7，正式 HUD 的默认语义不变。
+        render(viewer, previous, current, next, cards, remainingCounts,
+            plugin.hudRowOverride(viewer.getUniqueId()), false);
+    }
+
+    /**
+     * 调试预览专用入口：允许只显示指定行，并在不要求玩家携带记牌器时显示样例记牌数据。
+     * 正式牌桌调用上面的旧入口，默认三行全开且仍要求玩家持有记牌器。
+     */
+    void render(
+        Player viewer,
+        Seat previous,
+        Seat current,
+        Seat next,
+        List<DoudizhuCard> cards,
+        Map<CardRank, Integer> remainingCounts,
+        int visibleRows,
+        boolean forceCounterWithoutItem
+    ) {
         // 【整帧只读一次快照】：reload 可能在渲染中途换掉它，读两次就可能前半帧用旧 scale、
         // 后半帧用新槽宽，画出错位的一帧。存成局部变量后这一帧一定是自洽的。
         Snapshot current0 = snapshot;
         Settings settings = current0.settings();
-        if (!settings.enabled() || !offsetService.isAvailable()) {
+        if (!settings.enabled()) {
+            // 服主主动关掉的，静默即正确行为。
+            hide(viewer);
+            return;
+        }
+        if (!offsetService.isAvailable()) {
             // 没有负空格就没法叠牌也没法拼头像，整条 HUD 不显示，避免画出一条横到屏幕外的牌。
+            //
+            // 【这一条必须给玩家可见提示，不能和上面那种情况混在一起】：这是故障而不是
+            // 配置意图。原因写在控制台（CraftEngineOffsetService.warnOnce），玩家端却
+            // 只表现为「HUD 什么都没有」，没有任何线索指向 CraftEngine 没就绪——
+            // 实际排查时这一步耗掉的时间远超其他环节。
+            warnOffsetsUnavailableOnce(viewer);
             hide(viewer);
             return;
         }
         // 名单要在三个槽【之前】算好并整份传下去：皮肤分配必须看到同桌全部 bot 才能保证不重脸，
         // 逐槽各算一次只能看到自己，两个 bot 就可能撞到同一张皮肤。
+        // 【为什么是「背包里有」而不是「握在主手」】：打牌全程要右键选牌、左键出牌，
+        // 要求主手握着记牌器等于让玩家在「看得到记牌」和「操作顺手」之间二选一。
+        // 背包里有就生效，拿到即可用。预览入口可显式放宽这个玩家级开关。
+        boolean showCounter = settings.counterEnabled()
+            && (forceCounterWithoutItem || plugin.hasCounterItem(viewer))
+            && (visibleRows & 4) != 0;
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
         String line = TrickHudView.buildMiniMessage(
-            avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier),
-            avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier),
-            avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier),
-            current0.avatarSlotWidth(),
+            (visibleRows & 2) != 0
+                ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier)
+                : TrickHudView.Avatar.EMPTY,
+            (visibleRows & 2) != 0
+                ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier)
+                : TrickHudView.Avatar.EMPTY,
+            (visibleRows & 2) != 0
+                ? avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier)
+                : TrickHudView.Avatar.EMPTY,
+            (visibleRows & 2) != 0 ? current0.avatarSlotWidth() : 0,
             settings.avatarGap(),
-            cards,
+            (visibleRows & 1) != 0 ? cards : List.of(),
             settings.cardStep(),
             offsetService::offset,
             settings.heightTier(),
             settings.downOffsetTier(),
-            settings.offsetX()
+            settings.offsetX(),
+            settings.rowXOffsets(),
+            showCounter ? counterCells(remainingCounts, settings.counterHideExhausted(), avatarRowDownTier) : List.of(),
+            settings.counterGap()
         );
         apply(viewer, line);
+    }
+
+    /**
+     * 把剩余张数摊成记牌行的各格（纯文字渲染版）。
+     *
+     * <p>【原字形版已改为文字渲染】：不再依赖资源包字形字符（原来走
+     * {@link PackAssets#counterRankChar} / {@link PackAssets#counterDigitChar}），
+     * 改用原生 MiniMessage 颜色标签直接输出：
+     * 上方白字显示点数标签（{@link CardRank#label()}），
+     * 下方灰字显示剩余张数，格间以竖线 {@code │} 分隔，视觉上呈网格（绘制格子）。
+     *
+     * <p>【亮暗而不是隐藏】：出完的点数改用 {@code <dark_gray>} 渲染（dim 效果），
+     * 格子照常占宽，与原字形版 {@code dim=true} 的视觉行为一致。只有配置显式要求
+     * {@code hideWhenExhausted} 时才留空位，宽度仍照报，后面的格子不左移。
+     *
+     * <p>前进量（advancePixels）基于 Minecraft 默认字体的经验估算
+     * （普通字符约 6px，竖线 │ 约 4px），与原来资源包字形精确像素值不同；
+     * 若排版出现视觉偏差，可通过 {@code trick-hud.counter.gap} 微调。
+     *
+     * @param downOffsetTier    暂时保留，当前文字版未使用（原字形版用于按偏移档选字体）
+     * @param hideWhenExhausted 出完的点数是否只留空位不画内容
+     */
+    private List<TrickHudView.CounterCell> counterCells(
+        Map<CardRank, Integer> remainingCounts,
+        boolean hideWhenExhausted,
+        int downOffsetTier
+    ) {
+        if (remainingCounts.isEmpty()) {
+            return List.of();
+        }
+        // 纯文字格子格式：│<white>点数标签</white><gray>剩余张数</gray>
+        // 每普通字符按 6px 估算前进量，竖线 │ 按 4px 估算；
+        // 与资源包字形的精确像素对齐方式不同，排版偏差可用 trick-hud.counter.gap 补偿。
+        final int CHAR_WIDTH = 6;  // 普通字符估算宽度（px）
+        final int SEP_WIDTH = 4;   // │ 竖线估算宽度（px）
+        List<TrickHudView.CounterCell> cells = new ArrayList<>();
+        for (CardRank rank : CardRank.values()) {
+            Integer left = remainingCounts.get(rank);
+            if (left == null) {
+                continue;
+            }
+            boolean exhausted = left == 0;
+            String label = rank.label();
+            String digits = Integer.toString(left);
+            int advance = SEP_WIDTH + label.length() * CHAR_WIDTH + digits.length() * CHAR_WIDTH;
+            // 出完的点数：格子照样占宽，只是不画内容 —— 让后面的格子不左移，
+            // 这一点由 TrickHudView 的空格子分支负责。
+            if (hideWhenExhausted && exhausted) {
+                cells.add(new TrickHudView.CounterCell("", advance));
+                continue;
+            }
+            // 出完的点数改用暗灰色渲染（dim），与原字形版 dim=true 的视觉效果一致
+            String rankTag = exhausted ? "dark_gray" : "white";
+            String countTag = exhausted ? "dark_gray" : "gray";
+            String text = "<dark_gray>│</dark_gray>"
+                + "<" + rankTag + ">" + label + "</" + rankTag + ">"
+                + "<" + countTag + ">" + digits + "</" + countTag + ">";
+            cells.add(new TrickHudView.CounterCell(text, advance));
+        }
+        return cells;
+    }
+
+    /**
+     * 点数字形的前进量。「10」与双王画的是双宽图，其余是单宽。
+     *
+     * <p>这个分档必须与构建期 {@code rankGlyphWidth} 的判定一致，否则行宽算歪、整行居中偏移。
+     */
+    private static int counterRankAdvance(CardRank rank) {
+        return switch (rank) {
+            case TEN, SMALL_JOKER, BIG_JOKER -> PackTiers.COUNTER_GLYPH_WIDE_WIDTH;
+            default -> PackTiers.COUNTER_GLYPH_WIDTH;
+        };
+    }
+
+    /**
+     * 偏移服务不可用时，给这名玩家提示一次。
+     *
+     * <p>每人只发一次：render 挂在每秒的倒计时广播上，不去重会变成刷屏。
+     * 用 ActionBar 而不是聊天栏，理由同上——每秒一条聊天记录会把屏幕冲满。
+     */
+    private void warnOffsetsUnavailableOnce(Player viewer) {
+        if (!offsetWarnedViewers.add(viewer.getUniqueId())) {
+            return;
+        }
+        viewer.sendActionBar(MuzTheme.danger(
+            "出牌 HUD 不可用：CraftEngine 字体偏移没就绪，请检查资源包是否加载成功"));
+        plugin.getLogger().warning("出牌 HUD 因 CraftEngine 字体偏移不可用而未显示，"
+            + "常见原因是资源包配置解析失败（例如 configuration 下某个 yml 超过 SnakeYAML "
+            + "单文档上限）。修好后执行 /muz reload 即可重试，不必重启。");
     }
 
     /** 收起该观看者的 HUD（离桌、游戏结束、或这一轮被重置）。 */
@@ -573,8 +803,8 @@ final class TrickHudService {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }
-        // 【戴不戴王冠不影响这里】：withCrown 是把王冠盖在头顶那两行上，不改矩阵尺寸，
-        // 所以地主和农民的宽高完全一致。之前那版王冠往上加两行，宽度就得跟着分叉，
+        // 【戴不戴王冠不影响这里】：王冠走独立字形家族、画在脸上方，画完净位移为零，
+        // 所以地主和农民的槽宽完全一致。之前那版王冠往上加两行，宽度就得跟着分叉，
         // 还会把地主的脸压低两像素 —— 三个头像并排时一眼看出没对齐。
         if (rendered != null) {
             // 【宽度必须和渲染那边同源】：advanceWidth 就是 renderMiniMessage 的净前进量，

@@ -316,7 +316,7 @@ public final class MuzTheme {
     }
 
     private static TextColor mix(TextColor start, TextColor end, float progress) {
-        float clamped = Math.max(0.0f, Math.min(1.0f, progress));
+        float clamped = Math.clamp(progress, 0.0f, 1.0f);
         int red = Math.round(start.red() + (end.red() - start.red()) * clamped);
         int green = Math.round(start.green() + (end.green() - start.green()) * clamped);
         int blue = Math.round(start.blue() + (end.blue() - start.blue()) * clamped);

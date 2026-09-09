@@ -11,8 +11,10 @@ import linmumua.doudizhu.model.DoudizhuDeck;
 import linmumua.doudizhu.model.MoveAdvisor;
 import linmumua.doudizhu.model.PatternAnalyzer;
 import linmumua.doudizhu.room.TableLevel;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.ui.MuzTheme;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.time.Duration;
@@ -50,6 +52,20 @@ public final class GameTable {
     private final Map<UUID, List<DoudizhuCard>> hands = new HashMap<>();
     private final Map<UUID, Set<Integer>> selections = new HashMap<>();
     private final Map<UUID, Integer> playedHandCounts = new HashMap<>();
+
+    /**
+     * 记牌器的数据源：每个点数还剩几张没被打出来。
+     *
+     * <p>【为什么记「剩余」而不是「已出」】：HUD 要显示的就是剩余张数，
+     * 存已出还得每次减一遍，两处算式容易走岔。发牌时按整副牌初始化，
+     * 出牌时扣减，读的时候直接给。
+     *
+     * <p>【底牌为什么不在这里单独扣减】：底牌会被
+     * {@link #appendBottomCardsToLandlord} 并进地主手牌，将来由地主打出去，
+     * 走的是 {@link #applyMoveResolution} 那唯一一处扣减。明牌时若再扣一次，
+     * 同一张牌会被算掉两回，记牌器就会少牌。
+     */
+    private final Map<CardRank, Integer> remainingRankCounts = new EnumMap<>(CardRank.class);
     private final Map<UUID, String> botNames = new LinkedHashMap<>();
     private final List<Component> recentLobbyEntries = new ArrayList<>();
     private final List<RecentTrickEntry> recentTrickEntries = new ArrayList<>();
@@ -81,6 +97,10 @@ public final class GameTable {
     private CardPattern currentPattern;
     private List<DoudizhuCard> currentTrickCards = List.of();
     private int botActionEpoch = 0;
+    // 真人无可压等待任务使用独立 token，不能只依赖 Bukkit 任务取消。
+    private MuzScheduler.TaskHandle pendingNoResponsePassTask;
+    private long noResponsePassToken;
+    private int noResponsePassEpoch;
     private long roundStartedAtMillis = -1L;
     private long turnDeadlineMillis = -1L;
     private int lastCountdownSecond = Integer.MIN_VALUE;
@@ -549,8 +569,10 @@ public final class GameTable {
         }
         Component leaveMessage = MuzTheme.field("离桌", MuzTheme.danger(reason));
         if (phase != GamePhase.LOBBY) {
-            announceAction(displayName(playerId) + " 离桌", leaveMessage);
+            // 先回到大厅并清掉上一帧自定义 hotbar，再发送离桌提示，避免 resetRound
+            // 把本应显示给玩家的普通 ActionBar 一并清掉。
             resetRound();
+            announceAction(displayName(playerId) + " 离桌", leaveMessage);
         } else {
             Component update = compactLobbyEvent(playerId, MuzTheme.muted("离桌"), null);
             announceAction(displayName(playerId) + " 离桌", update);
@@ -748,6 +770,7 @@ public final class GameTable {
         UUID playerId = player.getUniqueId();
         List<DoudizhuCard> chosen = selectedCardsForPlay(playerId);
         ensureSelectedMoveCanBeatCurrentPattern(playerId, chosen);
+        cancelPendingNoResponsePass();
 
         MoveResolution resolution = applyMoveResolution(playerId, chosen, true, "这牌型出不了。");
         CeActionExecutor.executePlayProfile(
@@ -800,6 +823,7 @@ public final class GameTable {
         if (leadPlayer == null || Objects.equals(leadPlayer, playerId)) {
             throw new IllegalStateException("这轮你先出，不能过。");
         }
+        cancelPendingNoResponsePass();
         finalizePass(playerId, displayName(playerId) + " 不要", MuzTheme.muted("不要"), "这轮先不压牌");
     }
 
@@ -808,8 +832,14 @@ public final class GameTable {
             throw new IllegalStateException("这桌还没开局。");
         }
         stopMusicAll();
-        announceAction(sender.getName() + " 强制结束", actorUpdate(senderIdentity(sender, NamedTextColor.WHITE), MuzTheme.danger("强制结束"), "这一局先提前结束了"));
+        Component forceEndMessage = actorUpdate(
+            senderIdentity(sender, NamedTextColor.WHITE),
+            MuzTheme.danger("强制结束"),
+            "这一局先提前结束了"
+        );
+        // 先退出 PLAYING 并清掉自定义 hotbar，再以普通 ActionBar 显示强制结束提示。
         resetRound();
+        announceAction(sender.getName() + " 强制结束", forceEndMessage);
     }
 
     public List<Component> buildStatusLines() {
@@ -982,15 +1012,21 @@ public final class GameTable {
 
     public void shutdown() {
         debugAutoLoop = false;
+        cancelPendingNoResponsePass();
         plugin.getHandGuiService().closeHands(this);
         resetRound();
     }
 
     public void forceClose(String reason) {
         debugAutoLoop = false;
+        cancelPendingNoResponsePass();
         plugin.getHandGuiService().closeHands(this);
         stopMusicAll();
         trickHud.hideAll();
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
+        if (hotbarHud != null) {
+            hotbarHud.clearTable(this);
+        }
         detachAllSeatsForForceClose(reason);
         clearTableStateForForceClose();
     }
@@ -1003,13 +1039,17 @@ public final class GameTable {
             broadcastLobbyActionBarIfVisible();
             return;
         }
-
+        boolean noResponsePassPending = pendingNoResponsePassTask != null;
         int remaining = remainingCountdownSeconds();
         if (handleExpiredHumanTurn(remaining)) {
             return;
         }
         updateCountdownSoundState(remaining);
         broadcastPersistentActionBar(remaining);
+        if (noResponsePassPending) {
+            // 当前真人额外显示无可压提示；其他玩家仍沿用正常 ActionBar 与倒计时。
+            sendNoResponseHintIfPending();
+        }
     }
 
     private void dealFreshRound() {
@@ -1066,6 +1106,8 @@ public final class GameTable {
         hands.clear();
         selections.clear();
         playedHandCounts.clear();
+        // 开局按整副牌填满：此刻 54 张都还没打出去。
+        resetRemainingRankCounts();
         currentPattern = null;
         currentTrickCards = List.of();
         leadPlayer = null;
@@ -1168,6 +1210,7 @@ public final class GameTable {
 
     private void broadcastStickyOutcomeActionBar(List<UUID> winners) {
         lobbyUiResumeAtMillis = System.currentTimeMillis() + 5500L;
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (int index = 0; index < 5; index++) {
             long delay = index * 20L;
             plugin.scheduler().runLater(delay, () -> {
@@ -1179,15 +1222,27 @@ public final class GameTable {
                     if (player == null) {
                         continue;
                     }
-                    player.sendActionBar(winners.contains(seat) ? MuzTheme.success("胜利") : MuzTheme.danger("失利"));
+                    Component bar = winners.contains(seat) ? MuzTheme.success("胜利") : MuzTheme.danger("失利");
+                    if (hotbarHud != null && hotbarHud.isEnabled()) {
+                        // 每次闪动持续约 1.25 秒（25 格刻），5 次共 5.5 秒覆盖 lobbyUiResumeAt 窗口
+                        hotbarHud.showOverlay(seat, bar, 25);
+                    } else {
+                        player.sendActionBar(bar);
+                    }
                 }
             });
         }
     }
 
     private void resetRound() {
+        cancelPendingNoResponsePass();
         stopMusicAll();
         trickHud.hideAll();
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
+        if (hotbarHud != null) {
+            // phase 切回 LOBBY 前主动清掉最后一帧字形，避免等待下一次周期 tick。
+            hotbarHud.clearTable(this);
+        }
         resetRoundStateForLobby();
         plugin.getHandGuiService().closeHands(this);
         refreshPhysicalTable();
@@ -1209,6 +1264,7 @@ public final class GameTable {
     }
 
     private void clearTableStateForForceClose() {
+        cancelPendingNoResponsePass();
         seats.clear();
         readyPlayers.clear();
         totalScores.clear();
@@ -1250,6 +1306,8 @@ public final class GameTable {
         hands.clear();
         selections.clear();
         playedHandCounts.clear();
+        // 回大厅时清空：没有牌局，记牌器不该显示上一局的残留。
+        remainingRankCounts.clear();
         for (UUID botId : botNames.keySet()) {
             readyPlayers.add(botId);
         }
@@ -1301,11 +1359,14 @@ public final class GameTable {
     }
 
     private void promptPlayTurn() {
-        // 先判断是否“手里根本没有能压的牌”，有的话直接自动跳过
+        // 新的出牌提示会使旧的真人无可压等待失效，避免旧任务在新回合误触发。
+        cancelPendingNoResponsePass();
+        botActionEpoch++;
+        // 机器人仍沿用原有立即不要流程；真人无可压则只安排一次 20 tick 延迟。
         skipIfNoResponse();
         refreshPhysicalTable();
-        botActionEpoch++;
         armTurnCountdown();
+        scheduleNoResponsePassIfNeeded();
         tickActionBar();
         // 【不要在这里补一次 refreshPrivateHand】：上面的 refreshPhysicalTable() 已经刷过手牌，
         // 而 renderPrivateHand 自己从不写签名表，直接调等于绕过签名闸门无条件整手重建。
@@ -1354,13 +1415,54 @@ public final class GameTable {
     // refreshPhysicalTable()，删掉后手牌照旧会刷新，只是变成一次而不是两次。
 
     private void skipIfNoResponse() {
-        while (shouldAutoPassCurrentTurn()) {
+        while (shouldAutoPassCurrentTurn() && isBot(currentTurn)) {
             UUID stuckPlayer = currentTurn;
             performAutoSkippedPass(stuckPlayer);
             if (Objects.equals(currentTurn, leadPlayer)) {
                 return;
             }
         }
+    }
+
+    private void scheduleNoResponsePassIfNeeded() {
+        Player scheduledPlayer = currentTurn == null ? null : GameTable.this.onlinePlayer(currentTurn);
+        if (!shouldAutoPassCurrentTurn() || currentTurn == null || isBot(currentTurn)
+            || !(scheduledPlayer != null && scheduledPlayer.isOnline())) {
+            return;
+        }
+        UUID playerId = currentTurn;
+        UUID scheduledLeadPlayer = leadPlayer;
+        CardPattern scheduledPattern = currentPattern;
+        int scheduledEpoch = botActionEpoch;
+        int scheduledNoResponseEpoch = noResponsePassEpoch;
+        long token = ++noResponsePassToken;
+        pendingNoResponsePassTask = plugin.scheduler().runLater(20L, () -> {
+            if (token == noResponsePassToken) {
+                pendingNoResponsePassTask = null;
+            }
+            Player onlinePlayer = GameTable.this.onlinePlayer(playerId);
+            if (
+                !canScheduleTasks()
+                    || token != noResponsePassToken
+                    || scheduledNoResponseEpoch != noResponsePassEpoch
+                    || scheduledEpoch != botActionEpoch
+                    || phase != GamePhase.PLAYING
+                    || !Objects.equals(currentTurn, playerId)
+                    || !Objects.equals(leadPlayer, scheduledLeadPlayer)
+                    || !Objects.equals(currentPattern, scheduledPattern)
+                    || isBot(playerId)
+                    || !(onlinePlayer != null && onlinePlayer.isOnline())
+                    || !shouldAutoPassCurrentTurn()
+            ) {
+                return;
+            }
+            noResponsePassToken++;
+            performAutoSkippedPass(playerId);
+            // 只完成当前真人的一次自动不要；下一位由正常回合链路继续处理，避免同一调用栈连续跳过真人。
+            // performAutoSkippedPass(..., false) 已推进 currentTurn，promptPlayTurn 是唯一正常续接入口。
+            promptPlayTurn();
+            runBotActionIfNeeded();
+        });
     }
 
     private boolean shouldAutoPassCurrentTurn() {
@@ -1375,6 +1477,32 @@ public final class GameTable {
         }
         List<DoudizhuCard> hand = hands.getOrDefault(currentTurn, List.of());
         return !MoveAdvisor.hasAnyBeatingMove(hand, currentPattern);
+    }
+
+    private void sendNoResponseHintIfPending() {
+        if (currentTurn == null || isBot(currentTurn) || !shouldAutoPassCurrentTurn()) {
+            return;
+        }
+        Player player = onlinePlayer(currentTurn);
+        if (!(player != null && player.isOnline())) {
+            return;
+        }
+        Component hint = MuzTheme.warning("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。");
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
+        if (hotbarHud != null && hotbarHud.isEnabled()) {
+            hotbarHud.showOverlay(currentTurn, hint);
+        } else {
+            player.sendActionBar(hint);
+        }
+    }
+
+    private void cancelPendingNoResponsePass() {
+        noResponsePassToken++;
+        noResponsePassEpoch++;
+        if (pendingNoResponsePassTask != null) {
+            pendingNoResponsePassTask.cancel();
+            pendingNoResponsePassTask = null;
+        }
     }
 
     private void performAutoSkippedPass(UUID playerId) {
@@ -1425,9 +1553,15 @@ public final class GameTable {
 
     private void broadcastActionBar(Component message) {
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID seat : seats) {
             Player player = onlinePlayer(seat);
-            if (player != null) {
+            if (player == null) {
+                continue;
+            }
+            if (hotbarHud != null && hotbarHud.isEnabled()) {
+                hotbarHud.showOverlay(seat, actionBar);
+            } else {
                 player.sendActionBar(actionBar);
             }
         }
@@ -1608,10 +1742,16 @@ public final class GameTable {
     }
 
     private void broadcastPersistentActionBar(int remainingSeconds) {
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID playerId : seats) {
-            Player player = Bukkit.getPlayer(playerId);
-            if (player != null) {
-                player.sendActionBar(buildPersistentActionBar(playerId, remainingSeconds));
+            Player player = onlinePlayer(playerId);
+            if (player != null && player.isOnline()) {
+                Component bar = buildPersistentActionBar(playerId, remainingSeconds);
+                if (hotbarHud != null && hotbarHud.isEnabled()) {
+                    hotbarHud.showOverlay(playerId, bar);
+                } else {
+                    player.sendActionBar(bar);
+                }
                 sendTrickHud(player);
             }
         }
@@ -1634,7 +1774,7 @@ public final class GameTable {
             return;
         }
         List<TrickHudService.Seat> trio = trickHudSeats();
-        trickHud.render(viewer, trio.get(0), trio.get(1), trio.get(2), currentTrickCards);
+        trickHud.render(viewer, trio.get(0), trio.get(1), trio.get(2), currentTrickCards, getRemainingCounts());
     }
 
     /**
@@ -1837,6 +1977,41 @@ public final class GameTable {
             .filter(seat -> !seat.equals(landlord))
             .mapToInt(this::playedHands)
             .sum();
+    }
+
+    /**
+     * 按点数逐张扣减剩余张数。
+     *
+     * <p>【为什么单独抽出来】：这是记牌器读数唯一的写入算式。内联在
+     * {@link #applyMoveResolution} 里的话，测试就只能复写一份同形的副本来验证，
+     * 而副本不会随生产代码改动而失败，等于没守住。
+     *
+     * <p>下界压在 0：真实对局同一点数最多出 4 张扣不成负数，但托管代打与机器人
+     * 共用这条路径，上游一旦重复提交，负数会直接显示成「剩 -1 张」。
+     */
+    private void decrementRemainingRankCounts(List<DoudizhuCard> move) {
+        for (DoudizhuCard card : move) {
+            remainingRankCounts.computeIfPresent(card.rank(), (rank, left) -> left > 0 ? left - 1 : 0);
+        }
+    }
+
+    /**
+     * 把剩余张数恢复成一副完整牌：13 个点数各 4 张，大小王各 1 张。
+     */
+    private void resetRemainingRankCounts() {
+        remainingRankCounts.clear();
+        for (CardRank rank : CardRank.values()) {
+            remainingRankCounts.put(rank, rank.isJoker() ? 1 : 4);
+        }
+    }
+
+    /**
+     * 记牌器读数：每个点数还剩几张没被打出来。
+     *
+     * <p>牌局没开始时返回空表，调用方据此判断「现在没什么可记的」。
+     */
+    public Map<CardRank, Integer> getRemainingCounts() {
+        return Map.copyOf(remainingRankCounts);
     }
 
     private boolean hasSpring(boolean landlordWin) {
@@ -2389,8 +2564,12 @@ public final class GameTable {
         List<DoudizhuCard> hand = hands.getOrDefault(playerId, List.of());
         CardPattern pattern = PatternAnalyzer.analyze(move)
             .orElseThrow(() -> new IllegalStateException(invalidMessage));
+        cancelPendingNoResponsePass();
         hand.removeAll(move);
         hand.sort(DoudizhuCard.ORDER);
+        // 唯一扣减点：人类出牌、机器人出牌、托管代打三条路都汇到这儿，
+        // 所以记牌器只需要在这里扣一次，不会漏也不会重。
+        decrementRemainingRankCounts(move);
         if (clearSelectionFirst) {
             clearSelection(playerId);
         }
@@ -2456,6 +2635,7 @@ public final class GameTable {
     }
 
     private void finalizePass(UUID playerId, String title, Component badge, String detail) {
+        cancelPendingNoResponsePass();
         clearSelection(playerId);
         playEffectAll(PackSounds.autoPass());
         announceAction(title, actorUpdate(playerId, badge, detail));
@@ -2480,7 +2660,6 @@ public final class GameTable {
             return;
         }
         promptPlayTurn();
-        refreshPhysicalTable();
         runBotActionIfNeeded();
     }
 

@@ -483,4 +483,57 @@ public final class HandCardPickGeometry {
     public static boolean occluded(Hit hit, double blockDistance) {
         return hit != null && blockDistance < hit.distance();
     }
+
+    /**
+     * 手牌两端「边缘瓦片」的宽度（格）：拾取包络半宽减去捕获器半宽。
+     *
+     * <h2>这条缺口是怎么来的</h2>
+     *
+     * <p>铺牌步长与捕获器宽度用的是<b>同一个公式</b>（{@code Math.max(0.02, handSpacing)}），
+     * 于是 N 个捕获器恰好首尾相接，并集是 {@code [P₀−capHalf, P_{N−1}+capHalf]}。
+     * 但拾取包络的半宽取的是 {@code max(静止态牌面半宽, 放大态牌面半宽, 通道半宽)}，
+     * 默认配置下由<b>放大态牌面</b>（0.1215）胜出，比通道半宽（0.05）大得多。
+     *
+     * <p>两个跨度于是差出 {@code envHalf − capHalf}，<b>两端各差这么多</b>。
+     * 默认配置下是 0.0715 格，占末张完整可见牌面（0.243）的 29.4%。
+     * 中间的牌不受影响：牌 i 的可见条被牌 i−1 的捕获器盖住（错位但连续），
+     * <b>只有最两端没有邻居补位</b>。
+     *
+     * <h2>为什么不是把捕获器改宽</h2>
+     *
+     * <p>{@code handCardCapturerWidth} 必须严格等于通道宽，否则「命中捕获器 ⟹ 几乎必然
+     * 命中拾取包络」这条性质就破了，那圈胖出来的部分会点得到事件却求交判不中 ——
+     * 正是当年 Interaction 被删掉的那个死区。而 Interaction 横截面是正方形，
+     * 宽度同时就是深度，改宽还会让盒子在深度方向鼓出去挡桌面。
+     * 所以补覆盖只能靠新增瓦片，且瓦片宽度<b>比现有捕获器更窄</b>（0.0715 &lt; 0.1），
+     * 深度鼓出反而更小。
+     *
+     * @param envelopeHalfWidth 拾取包络半宽（{@code unifiedHandCardEnvelopes()[0].halfWidth()}）
+     * @param capturerWidth 现有捕获器宽度（{@code handCardCapturerWidth(handSpacing)}）
+     * @return 瓦片宽度；缺口不为正时返回 0（表示不需要瓦片）
+     */
+    public static double edgeTileWidth(double envelopeHalfWidth, double capturerWidth) {
+        double gap = envelopeHalfWidth - capturerWidth * 0.5;
+        return gap > 0.0 ? gap : 0.0;
+    }
+
+    /**
+     * 边缘瓦片中心相对端点牌中心的偏移量（格，取绝对值，左端取负、右端取正）。
+     *
+     * <p>瓦片要正好填满 {@code [P₀−envHalf, P₀−capHalf]} 这一段，
+     * 因此中心落在这一段的中点：{@code capHalf + gap/2}。
+     * 这样瓦片与端点牌自己的捕获器<b>零重叠</b>，并集外沿又<b>零超出</b>包络 ——
+     * 超出去的部分是「点得到事件但求交判不中」的浪费区，虽然会被
+     * {@code handleHandCardClick} 判 null 后放行、不至于变成死区，但没有必要造出来。
+     *
+     * @param capturerWidth 现有捕获器宽度
+     * @param tileWidth {@link #edgeTileWidth} 的结果
+     * @return 偏移量；{@code tileWidth} 为 0 时返回 0
+     */
+    public static double edgeTileCenterOffset(double capturerWidth, double tileWidth) {
+        if (tileWidth <= 0.0) {
+            return 0.0;
+        }
+        return capturerWidth * 0.5 + tileWidth * 0.5;
+    }
 }
