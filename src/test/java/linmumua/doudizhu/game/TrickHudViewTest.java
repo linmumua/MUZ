@@ -501,31 +501,21 @@ class TrickHudViewTest {
     }
 
     /**
-     * 记牌器行宽必须【逐格累加各格自报的宽度】，不能按「格数 × 某个固定宽」算。
-     *
-     * <p><b>守的是哪个 bug。</b>各格位数天然不等：某点数剩 4 张是一位数、剩 10 张以上是两位数，
-     * 宽度就差一个数字的宽。若行宽用乘法估算，算出来的值和实际画出来的宽度不一致，
-     * 会同时打坏两件事：一是 containerAdvance 取错最大值、整块 HUD 的居中基准偏掉；
-     * 二是行尾「补到容器宽」的补偿量算错，净前进量不再恒等于 W，
-     * 客户端按错误总宽居中，三行会各自错开而不是叠成一列。
-     *
-     * <p>这里故意让三格宽度互不相同（7/13/7），只要实现里出现任何等宽假定，
-     * 期望值就对不上 —— 乘法估算无论取哪一格当基准都会偏。
+     * 记牌器行宽由固定 34px 格子和格间距组成，不能随标签或数字位数变化。
      */
     @Test
-    void 记牌器行宽按各格实际宽度逐个累加而不是假定等宽() {
+    void 记牌器行宽按固定34像素格子累加() {
         List<TrickHudView.CounterCell> counters = List.of(
-            counterCell(7),
-            counterCell(13),
-            counterCell(7)
+            counterCell(),
+            counterCell(),
+            counterCell()
         );
         int gap = 2;
 
         int advance = TrickHudView.containerAdvance(0, 0, 0, 0, 0, counters, gap);
 
-        // 7 + 13 + 7 = 27 个格子宽，外加两个间距 = 31。
-        // 若按「3 格 × 7」算得 25、按「3 格 × 13」算得 43，都与此不符。
-        assertEquals(27 + 2 * gap, advance, "行宽必须是各格宽度之和加格间距");
+        assertEquals(3 * TrickHudView.CounterCell.ADVANCE_PIXELS + 2 * gap, advance,
+            "行宽必须是 3 个固定 34 像素格子加格间距");
     }
 
     /**
@@ -541,7 +531,7 @@ class TrickHudViewTest {
      */
     @Test
     void 记牌器行与其余两行共用原点且净前进量等于容器宽() {
-        List<TrickHudView.CounterCell> counters = List.of(counterCell(7), counterCell(7));
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(), counterCell());
         int gap = 2;
         int slot = 40;
         int avatarGap = 4;
@@ -559,10 +549,11 @@ class TrickHudViewTest {
         // 记牌器行的第一格左沿 = (W - 行宽) / 2，即这一行自己也是居中的。
         List<Integer> counterLefts = new ArrayList<>();
         walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
-        int rowWidth = 7 + 7 + gap;
+        int rowWidth = 2 * TrickHudView.CounterCell.ADVANCE_PIXELS + gap;
         assertEquals(2, counterLefts.size(), "两格都要画出来");
         assertEquals((expected - rowWidth) / 2, counterLefts.get(0), "记牌器行必须自己居中");
-        assertEquals(counterLefts.get(0) + 7 + gap, counterLefts.get(1), "第二格紧随第一格加间距");
+        assertEquals(counterLefts.get(0) + TrickHudView.CounterCell.ADVANCE_PIXELS + gap,
+            counterLefts.get(1), "第二格紧随第一格加间距");
     }
 
     /**
@@ -576,8 +567,8 @@ class TrickHudViewTest {
     void 空格子照样前进自报宽度以免后续格子左移() {
         int gap = 2;
         List<TrickHudView.CounterCell> counters = List.of(
-            new TrickHudView.CounterCell("", 7),
-            counterCell(7)
+            new TrickHudView.CounterCell("", TrickHudView.CounterCell.ADVANCE_PIXELS),
+            counterCell()
         );
 
         String line = TrickHudView.buildMiniMessage(
@@ -587,13 +578,31 @@ class TrickHudViewTest {
         List<Integer> counterLefts = new ArrayList<>();
         walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
         assertEquals(1, counterLefts.size(), "空格子不产出可见片段");
-        // 第二格左沿必须是 7 + gap；若空格子被跳过则会变成 0。
-        assertEquals(7 + gap, counterLefts.get(0), "空格子必须占位，后续格子不得左移");
-        assertEquals(7 + gap + 7, netAdvance(line), "行宽必须包含空格子占的宽度");
+        // 第二格左沿必须是 34 + gap；若空格子被跳过则会变成 0。
+        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS + gap, counterLefts.get(0),
+            "空格子必须占位，后续格子不得左移");
+        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS + gap
+                + TrickHudView.CounterCell.ADVANCE_PIXELS,
+            netAdvance(line), "行宽必须包含空格子占的宽度");
     }
 
-    private static TrickHudView.CounterCell counterCell(int advance) {
-        return new TrickHudView.CounterCell("<counter:" + advance + ">", advance);
+    private static TrickHudView.CounterCell counterCell() {
+        return new TrickHudView.CounterCell(
+            List.of("<counter:34>"), TrickHudView.CounterCell.ADVANCE_PIXELS);
+    }
+
+    /** 三层 glyph 叠加后仍只净前进一个固定格宽。 */
+    @Test
+    void 分层片段用负34偏移叠加且净前进仍为34() {
+        TrickHudView.CounterCell layered = new TrickHudView.CounterCell(
+            List.of("<counter:34>", "<counter:34>", "<counter:34>"),
+            TrickHudView.CounterCell.ADVANCE_PIXELS);
+        String line = TrickHudView.buildMiniMessage(
+            null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(layered), 0);
+
+        assertEquals(34, netAdvance(line), "三层叠加必须保持一个 34px 格子的净前进量");
+        assertTrue(line.contains("<off:-34>"), "每个后续层必须用 offset(-34) 拉回同一格");
     }
 
     /**
@@ -606,7 +615,7 @@ class TrickHudViewTest {
     @Test
     void perRowOffsetMovesOnlyThatRow() {
         List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
-        List<TrickHudView.CounterCell> counters = List.of(counterCell(10), counterCell(12));
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(), counterCell());
 
         List<Integer> baseCards = new ArrayList<>();
         List<Integer> baseAvatars = new ArrayList<>();
@@ -639,7 +648,7 @@ class TrickHudViewTest {
     @Test
     void perRowOffsetsAreIndependentAndPreserveNetAdvance() {
         List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
-        List<TrickHudView.CounterCell> counters = List.of(counterCell(10), counterCell(12));
+        List<TrickHudView.CounterCell> counters = List.of(counterCell(), counterCell());
         String base = rowOffsetLine(hand, counters, TrickHudView.RowXOffsets.NONE);
 
         List<Integer> baseCards = new ArrayList<>();
@@ -665,7 +674,7 @@ class TrickHudViewTest {
     @Test
     void perRowOffsetStacksOnGlobalOffset() {
         List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
-        List<TrickHudView.CounterCell> counters = List.of(counterCell(10));
+        List<TrickHudView.CounterCell> counters = List.of(counterCell());
 
         List<Integer> onlyRow = new ArrayList<>();
         walk(TrickHudView.buildMiniMessage(SMALL, BIG, SMALL, SLOT, GAP, hand, STEP, OFFSETS,

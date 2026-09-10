@@ -321,7 +321,7 @@ public final class DoudizhuCommand implements TabExecutor {
                         for (int index = 1; index <= count; index++) {
                             String tableName = "debug-" + batchId + "-" + index;
                             Location anchor = center.clone().add(debugGridOffset(index - 1, count));
-                            GameTable table = plugin.getPhysicalTableManager().placeNewTableAt(player, tableName, TableLevel.FUN, anchor, yaw);
+                            GameTable table = plugin.getPhysicalTableManager().placeDebugTableAt(player, tableName, TableLevel.FUN, anchor, yaw);
                             table.enableDebugAutoLoop();
                             table.addBot("DbgA-" + index);
                             table.addBot("DbgB-" + index);
@@ -464,7 +464,7 @@ public final class DoudizhuCommand implements TabExecutor {
             lines.add("/muz admin - 打开管理员全局配置菜单");
             lines.add("/muz admin remove <牌桌id> - 忽略占用状态强制删表");
             lines.add("/muz forceend - 强制结束当前对局");
-            lines.add("/muz debug add [数量] - 在你附近生成会自己打牌的观察桌");
+            lines.add("/muz debug add [数量] - 在你附近生成会自己打牌的观察桌（测试用，跳过桌面/椅子方块占用检测）");
             lines.add("/muz debug remove [1-50|all] - 移除最近的观察桌，或全部移除");
             lines.add("/muz debug bot 信息 [bot数字id] [消息] - 查看 bot 信息，或直接和 bot 聊天测试 DeepSeek");
             lines.add("/muz give counter - 给自己一个记牌器，带在身上就显示记牌行");

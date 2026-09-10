@@ -57,7 +57,7 @@
 
 ## 版本与发布约定
 
-- 版本号写在 `build.gradle.kts` 的 `version`，当前 `1.10.11`。`paper-plugin.yml` 用 `${version}` 占位，不要手写。
+- 版本号写在 `build.gradle.kts` 的 `version`，当前 `1.10.15`。`paper-plugin.yml` 用 `${version}` 占位，不要手写。
 - 构建目标由 `MuzTarget` 表驱动，通过 `-PmuzTarget=<id>` 选择，默认 `paper-26.2`。产物落在 `build/<targetId>/`，**不是** `build/`。
 - 禁止无版本号变化地替换已发布构建。改了行为就升版本。
 
@@ -104,8 +104,8 @@ messages:
 | `craftengine-items` | CraftEngine 物品 id 映射 |
 | `render` | 桌面、手牌、悬停动画等渲染参数 |
 | `trick-hud` | 悬浮 HUD 的档位、头像、记牌器 |
-| `hotbar-hud` | 仅 `GamePhase.PLAYING` 在线真人座位使用的热键栏 HUD 开关与定位参数；其余阶段/玩家保留原版 9 槽（`offset-x` 运行期即时生效；`offset-y` 走覆盖层需重下资源包；`glyph-ascent` / `slot-count` 是纯文档键，运行期不读） |
-| `cards` / `audio` / `actionbar` | 牌面、音效、动作栏 |
+| `hotbar-hud` | 仅 `GamePhase.PLAYING` 在线真人座位使用的热键栏 HUD 开关与定位参数；其余阶段/玩家保留原版 9 槽（`offset-x` 运行期即时生效；`offset-y` 走覆盖层需重下资源包；`glyph-ascent` / `slot-count` 是纯文档键，运行期不读）。自定义底图固定为 182×22 的完整 9 槽纯色块，不覆盖 `minecraft` 原版 sprite |
+| `cards` / `audio` / `actionbar` | 牌面、音效、动作栏；资源包内 125 个 OGG 逐个使用 ffmpeg 压缩，保持相对路径、文件名与 OGG Vorbis，仅以有效且更小的结果替换 |
 | `bot` / `ai` | 机器人行为与 AI 网关 |
 | `hints` | 提示按钮最大方案数等 |
 | `debug` | 观察桌间距等调试开关 |
@@ -126,14 +126,16 @@ messages:
 
 - `DoudizhuPlugin`：插件入口与全局装配。**注意：当前已超过 5500 行，是事实上的 God Class。** 禁止继续往里堆新逻辑，新功能应落到对应 service。
 - `GameTable`（`game`）：单桌对局状态机，持有座位、手牌、出牌历史、剩余张数统计。出牌阶段真人跟牌若 `MoveAdvisor` 判定无可压，会保留 `currentTurn` 等待 20 tick；等待期间可用现有「不要」手动跳过，在线真人仍未响应才由独立 epoch/token 二次校验后自动不要。等待期间 `tickActionBar` 仍广播其他玩家的正常 ActionBar 与倒计时，只给当前真人追加无可压提示；在线判断统一使用 `onlinePlayer != null && isOnline()`。自动不要回调只调用一次正常回合续接链路，不重复 `refreshPhysicalTable`。机器人无可压继续沿用现有立即处理，不等待 1 秒；先手不能过与 `TimedOutPlayCoordinator` 的超时托管语义不变。
-- `TrickHudService` / `TrickHudView`（`game`）：正式 Trick HUD 的数据组装与字形渲染分离，由牌桌对局状态、配置和玩家级调试棒行覆盖共同驱动；Service 产出 cell，View 负责 advance 宽度与居中算式。`/muz give debug` 保留为个人 HUD 调试棒：玩家未进牌桌时可显示与 Debug Web 对照的游戏内 Trick HUD；右键循环牌行、头像行、记牌行，Shift+右键隐藏。调试棒只影响持有者个人，不写入运行期正式配置；`/muz debug show|stick|hud` 继续移除。Debug Web 仅负责回环地址上的运行期 HUD 参数预览与配置。**记牌器行（counter row）使用纯文本 MiniMessage 渲染**：每格上行白字显示点数名、下行灰字显示剩余张数，格间用格子分隔线（详见「记牌器文字渲染」）。
-- `HotbarHudService`（`game`）：热键栏 HUD，管理 hotbar 字形渲染与 Action Bar 推送。`GameTable` 的 ActionBar 路由走此 service，独立于 TrickHudService。自定义 5 槽的显示契约是：仅在 `hotbar-hud.enabled: true`、牌桌处于 `GamePhase.PLAYING` 正式出牌阶段、且座位为在线真人时显示。每 2 tick 从 `TableManager.getTables()` 筛选符合条件的非 bot 座位并推送一张 182×22 的不透明遮罩字形：遮罩完整盖住原版 9 槽背景，中央 5 槽使用红/橙/黄/绿/蓝调试配色；`LOBBY`、`BIDDING`、`DOUBLING`、结算、离桌、停服、关闭开关以及不在牌桌的普通玩家一律保持或恢复原版 9 槽物品栏。资源包不得覆盖 `minecraft` 原版 `hotbar.png` / `hotbar_selection.png`，因为该覆盖是客户端全局状态，无法只对牌桌玩家启用。所有非 `PLAYING` 阶段的对局提示仍走普通 ActionBar。水平偏移 `hotbar-hud.offset-x` 由 `setOffsetX` 注入（独立 setter，因为 `reloadEnabled(boolean, boolean)` 的签名被 `DoudizhuRuntimeSyncTest` 按文本锁死）。
-- `DebugWebServer`（`debug/` 包）：内嵌 HTTP 服务器，监听 `debug.web-ui.port`（默认 2000）且仅绑定回环地址。提供可编辑 HUD 配置页；启用条件为 `debug.web-ui.enabled: true`，默认关闭。页面只编辑运行期配置键，不修改构建期 hotbar 字形参数。`/api/save` 与 `/api/reload` 通过 `HudWebApplyCoordinator` 串行执行：HTTP 线程先完成方法、Token、Content-Type、JSON 与大小校验，只提交任务；单线程异步阶段写 `config.yml` 和当前唯一的 hotbar CE overlay，写完后切主线程 dispatch `ce reload pack`，再执行专用 `reloadTrickHudSettings + syncHotbarHudRuntime`，最后才发布 Snapshot；空 patch 不触发资源流程，任一步失败都不报成功。协调器关闭后拒绝新任务，已排队任务在主线程入口再次检查 `closed/generation` 后失效。
+- `TrickHudService` / `TrickHudView`（`game`）：正式 Trick HUD 的数据组装与字形渲染分离，由牌桌对局状态、配置和玩家级调试棒行覆盖共同驱动；Service 产出 cell，View 负责 advance 宽度与居中算式。`/muz give debug` 保留为个人 HUD 调试棒：玩家未进牌桌时可显示与 Debug Web 对照的游戏内 Trick HUD；右键循环牌行、头像行、记牌行，Shift+右键隐藏。调试棒只影响持有者个人，不写入运行期正式配置；`/muz debug show|stick|hud` 继续移除。Debug Web 仅负责回环地址上的运行期 HUD 参数预览与配置。**记牌器行（counter row）显示本局累计已出张数**：固定 15 格，使用资源包分层位图 glyph 叠加牌类、矩形框和数字三层，不再使用纯文本 MiniMessage 作为正式记牌器渲染（详见「记牌器分层字形渲染」）。
+- `HotbarHudService`（`game`）：热键栏 HUD，管理 hotbar 字形渲染与 Action Bar 推送。`GameTable` 的 ActionBar 路由走此 service，独立于 TrickHudService。自定义底图的显示契约是：仅在 `hotbar-hud.enabled: true`、牌桌处于 `GamePhase.PLAYING` 正式出牌阶段、且座位为在线真人时显示。每 2 tick 从 `TableManager.getTables()` 筛选符合条件的非 bot 座位并推送一张 182×22 的不透明完整九槽纯色块字形：9 个槽固定绘制于同一底图，不新增动态选中槽语义；`LOBBY`、`BIDDING`、`DOUBLING`、结算、离桌、停服、关闭开关以及不在牌桌的普通玩家一律保持或恢复原版 9 槽物品栏。资源包不得覆盖 `minecraft` 原版 `hotbar.png` / `hotbar_selection.png`，因为该覆盖是客户端全局状态，无法只对牌桌玩家启用。所有非 `PLAYING` 阶段的对局提示仍走普通 ActionBar。水平偏移 `hotbar-hud.offset-x` 由 `setOffsetX` 注入（独立 setter，因为 `reloadEnabled(boolean, boolean)` 的签名被 `DoudizhuRuntimeSyncTest` 按文本锁死）。
+- `DebugWebServer`（`debug/` 包）：内嵌 HTTP 服务器，监听 `debug.web-ui.port`（默认 2000）且仅绑定回环地址。提供可编辑 HUD 配置页；启用条件为 `debug.web-ui.enabled: true`，默认关闭。页面只编辑运行期配置键，不修改构建期 hotbar 字形参数。`/api/save` 与 `/api/reload` 通过 `HudWebApplyCoordinator` 串行执行：HTTP 线程先完成方法、Token、Content-Type、JSON 与大小校验，只提交任务；单线程异步阶段写 `config.yml` 和当前唯一的 hotbar CE overlay，主线程启动 `CraftEngineHudResourceBridge` 的真实 reload Future，再异步生成并验证 ZIP，最后执行专用 `reloadTrickHudSettings + syncHotbarHudRuntime` 并发布 Snapshot；空 patch 不触发资源流程，任一步失败都不报成功。`HudWebApplyLease` 按插件数据目录共享独占租约：120 秒只废弃本次结果，底层任务真正结束前不取消、不释放占用，后续请求在写盘前拒绝；关闭或超时后不应用迟到结果；`HudWebApplyTaskGate` 在 raw 真正结束后才释放租约并执行实例收尾，最终主线程应用使用原子闸门避免 close/timeout 竞态。HTTP 外层等待 125 秒且不取消底层任务。
 - Web 保存与磁盘重载共用插件提供的 HUD 配置锁，形成 Web 自身的配置快照边界；配置文件 I/O 保持在异步线程，不放回主线程。该锁不等同于全局配置事务：现有管理菜单及其它非 Web 配置入口尚未全部接入，若它们并发改写共享 `MuzYamlConfig`，仍存在既有竞态，后续需统一配置层处理。
-- `DebugHudConfigController`（`debug/` 包）：维护 Web HUD 白名单（19 键）、类型/档位校验、增量保存与不可变配置快照。保存只写用户提交的键，并通过 `saveWithComments()` 保留模板注释。当前全部 HUD 没有独立的运行期 CE 字形资源，Trick HUD 由运行时配置与玩家级调试棒行覆盖应用，不能臆造 Trick HUD 字形；运行期 CE 资源只有 hotbar overlay。`currentGeometry()` 由 Controller 统一从 `PackAssets`、`PlayerHeadRenderer`、`HotbarDebugOverlayWriter` 生成 `Snapshot.geometry`；前端只消费这份 geometry，不复算字形表。记牌器这次只共享水平 advance，垂直仍沿用现有普通 MiniMessage 预览语义。
-- `HotbarDebugOverlayWriter`（`debug/` 包）：把 `hotbar-hud.offset-y` 写成 CraftEngine 覆盖层资源（`plugins/CraftEngine/resources/muz_hotbar_debug/`），实现 hotbar 底图垂直位置的**连续**调整。只生成 `pack.yml` + `configuration/images/hotbar_debug.yml`，**不生成 PNG**——贴图直接引用 bundle 的 `muz:font/hotbar_slots.png`，所以绘图逻辑仍只有构建期一份。其 `GLYPH_HEIGHT` / `BASE_ASCENT` / `minOffsetY()` / `maxOffsetY()` 直接作为 `PreviewGeometry` 的 hotbar 字段来源。写在独立命名空间目录是刻意的：`CraftEngineBundleExporter` 的清理与覆盖只作用于 `resources/muz` 子树，写进那里的运行期产物活不过下一次导出。文件 I/O 异步且由单线程协调器串行，写完切主线程触发 `ce reload pack`，确保客户端 `resource_pack.zip` 重新生成；客户端必须重新下载资源包才能看到新的纵向位置；若发现现有 ZIP 仍残留旧版全局 hotbar 条目，先备份并移走 `plugins/CraftEngine/generated/resource_pack.zip`，再执行该命令，最后检查 ZIP 条目确认清理结果。
-- `PackAssets`（`assets`）：插件侧复算资源包字形码位与字体名，零文件 IO。必须与 `build.gradle.kts` 生成逻辑严格对齐，两侧不一致会导致游戏内显示豆腐块。
+- `DebugHudConfigController`（`debug/` 包）：维护 Web HUD 白名单（19 键）、类型/档位校验、增量保存与不可变配置快照。保存只写用户提交的键，并通过 `saveWithComments()` 保留模板注释。当前 Trick HUD 的运行期资源契约按批准计划使用分层位图 glyph；不能臆造未确认的其他 Trick HUD 字形资源。`currentGeometry()` 由 Controller 统一从 `PackAssets`、`PlayerHeadRenderer`、`HotbarDebugOverlayWriter` 生成 `Snapshot.geometry`；前端只消费这份 geometry，不复算字形表。记牌器 geometry 固定提供 15 格及分层 cell 的服务端几何，前端不自行推导字体宽度。
+- `HotbarDebugOverlayWriter`（`debug/` 包）：把 `hotbar-hud.offset-y` 写成 CraftEngine 覆盖层资源（`plugins/CraftEngine/resources/muz_hotbar_debug/`），实现 hotbar 底图垂直位置的**连续**调整。只生成 `pack.yml` + `configuration/images/hotbar_debug.yml`，**不生成 PNG**——贴图直接引用 bundle 的 `muz:font/hotbar_slots.png`，所以绘图逻辑仍只有构建期一份。其 `GLYPH_HEIGHT` / `BASE_ASCENT` / `minOffsetY()` / `maxOffsetY()` 直接作为 `PreviewGeometry` 的 hotbar 字段来源。写在独立命名空间目录是刻意的：`CraftEngineBundleExporter` 的清理与覆盖只作用于 `resources/muz` 子树，写进那里的运行期产物活不过下一次导出。文件 I/O 异步且由资源协调器串行，写完由 `CraftEngineHudResourceBridge` 等待真实重载 Future、生成并校验 `resource_pack.zip`；Writer 本身不再分发 CE 命令。客户端必须重新下载资源包才能看到新的纵向位置。旧包错配应先备份，再完整重载 CE（`/ce reload all`），检查实际 ZIP 内容、上传证据和客户端应用；单独 `reload pack` 不保证重读新增 YAML。
+- `PackAssets`（`assets`）：插件侧复算资源包字形码位与字体名，零文件 IO。必须与 `build.gradle.kts` 生成逻辑严格对齐，两侧不一致会导致游戏内显示豆腐块；记牌器按牌类、矩形框、数字三层 glyph 和固定 15 格几何对齐，hotbar 按 182×22 完整 9 槽纯色块对齐。
 - `CraftEngineBundleExporter`（`compat`）：导出内置 CraftEngine bundle，并在指纹提前返回前无条件删除旧版本遗留的 `resourcepack/assets/minecraft/textures/gui/sprites/hud/hotbar.png` 与 `hotbar_selection.png`。这两张旧文件会全局影响客户端物品栏，不能因为 bundle 指纹已是最新而跳过清理。
+- `CraftEngineHudResourceBridge`（`compat`）：仅在 CE 可用时创建，直接使用已核对的公开 `reloadPlugin(Executor, Executor, false)` / `ReloadResult.success()`，接着异步调用 `packManager().generateResourcePack()`。编译依赖 0.0.67 未提供 `issues()`，失败详情使用 `toString()`；缺失或签名不兼容时明确失败，不通过命令返回值推测完成。不声称隔离管理员自行发起的 CE 重载。
+- `HudResourcePackVerifier`（`compat`）：异步从实际 ZIP 中央目录读取 HUD 白名单内容，核对解压长度/CRC、内置 SnakeYAML 声明的 font/char/file/height/ascent、22 张记牌器 PNG、hotbar PNG 和覆盖层；拒绝旧字体分页、旧大号数字映射和原版 hotbar 覆盖。生成路径与 CE 上传源文件路径须一致或逐字节一致。服务端内容校验、远端上传完成、客户端应用是三件事，后两者无回执时保持未确认。
 - `PackTiers`（构建期生成）：档位容量常量，插件侧只读引用，**不要手改**。
 - `MuzYamlConfig`（`config`）：SnakeYAML 读写封装。
 - `model`：`CardRank`、牌型定义等纯数据对象，不含 IO 与 Bukkit 依赖。
@@ -154,14 +156,15 @@ messages:
 - 负责：Display Entity 生命周期、坐标与朝向、字形拼装、宽度居中算式、悬停动画。
 - 不负责：对局规则、配置校验、玩家数据持久化。
 
-#### 记牌器文字渲染
+#### 记牌器分层字形渲染
 
-记牌器行（counter row）改用**纯文本 MiniMessage**，不再依赖资源包字形字符：
+记牌器行（counter row）显示**本局累计已出张数**，不是当前剩余张数：
 
-- 每格两行（借助 offset service 叠层）：**上行白字**显示点数标签（`3 4 5 6 7 8 9 10 J Q K A 小 大`），**下行灰字**显示剩余张数。
-- 格与格之间用 `│` 等格子分隔线，视觉上呈网格。
-- 出完的点数（剩 0 张）灰色半透明，不隐藏格子位置（与原来的 `dim` 字形行为一致）。
-- 此渲染不依赖 `PackAssets.counterRankChar` / `counterDigitChar`，资源包未加载时仍可显示。
+- 固定按 `CardRank.values()` 输出 15 格；普通点数按初始 4 张、小王/大王按初始 1 张，由剩余数推导累计已出数。`GameTable.getPlayedCounts()` 返回钳制到合法范围的只读快照，不维护第二份可变计数。
+- 码位按每档 22 个声明排列：标签 `0..14`、数字 `15..19`、普通/耗尽框 `20..21`，默认 201 档为 `0xE900..0xFA45`。码位排列与运行期绘制顺序是不同概念；基础 PNG 仅 22 张，偏移档只增加 provider 声明。
+- 每格使用资源包分层位图 glyph 按 `label → frame → digit` 顺序叠加三层：上方牌类 glyph、通用矩形框 glyph、下方数字 glyph；不生成“点数×数量×亮暗”的组合 PNG。images.yml 的垂直契约固定为 `label ascent=16-downOffset`、`frame ascent=-4-downOffset`、`digit ascent=-7-downOffset`；View 对后两层使用 `offset(-34)`，不改变每格净前进量。
+- 每格水平 advance 固定为 `34px`，默认 `counter.gap=2` 时 15 格总宽固定为 `538px`；label/digit PNG 右下角保留不可见 alpha=1 锚点，确保 Minecraft BitmapProvider 按 33px 实际宽度扫描；耗尽或隐藏时仍保留格子占位，后续格子不左移。
+- 记牌器使用固定几何与服务端下发的分层 cell 数据，不依赖 MiniMessage 默认字体的中文或分隔线宽度。资源契约测试还会逐张检查 15 个 label 与 5 个 digit PNG 的 33px 宽度和 alpha=1 右下角锚点。
 
 ### 8. Debug Web 调试面板（`debug/` 包）
 
@@ -169,17 +172,17 @@ messages:
 - 启用条件：`debug.web-ui.enabled: true`（默认 `false`，生产环境不启动）。浏览器在服务端本机访问 `http://127.0.0.1:2000` 或 `http://localhost:2000`。
 - 页面可编辑字段仅限 HUD 运行期配置，共 **19 个**：`trick-hud.enabled`、`trick-hud.avatar-scale`、`trick-hud.avatar-gap`、`trick-hud.card-step`、`trick-hud.card-height`、`trick-hud.offset-down`、`trick-hud.avatar-offset-down`、`trick-hud.offset-x`、`trick-hud.card-offset-x`、`trick-hud.avatar-offset-x`、`trick-hud.avatar-outline.enabled`、`trick-hud.avatar-outline.color`、`trick-hud.counter.enabled`、`trick-hud.counter.gap`、`trick-hud.counter.hide-exhausted`、`trick-hud.counter.offset-x`、`hotbar-hud.enabled`、`hotbar-hud.offset-x`、`hotbar-hud.offset-y`。
 - 牌高、牌行下移、头像行下移等档位字段按当前资源包的合法档位白名单校验；非法值由后端拒绝保存，不静默改写成相邻档位。
-- 页面右侧的预览按 **Minecraft 像素坐标系**绘制，屏幕几何由服务端固定下发：`screenWidth=640`、`screenHeight=360`、`bossBarBaselineY=20`、`actionBarBottomY=360`。各行宽度与字形前进量由 `DebugHudConfigController.currentGeometry()` 汇总 `PackAssets`、`PlayerHeadRenderer`、`HotbarDebugOverlayWriter` 后随 `Snapshot.geometry` 下发，前端**只消费 `PreviewGeometry` 数组**（`cards[{tier,height,width,advance}]` / `avatars[{scale,plainAdvance,outlinedAdvance,rowHeight}]` / `counters[{label,remaining,advance}]` + hotbar 六项），不复算任何字形表（避免把「两处手写表不同步」的问题搬到前端）。预览复刻了游戏内的居中规则并**用整数 MC 像素**执行：`W = max(cardRowWidth, avatarRowWidth, counterRowWidth)`，`baseLeft = floor((screenWidth - W)/2)`，每行前再垫 `floor((W - 行宽)/2)`。BossBar 上的牌行/头像行走 `baseline - ascent` 公式（`cardAscent = card.height - offset-down`、`avatarAscent = avatar.rowHeight - avatar-offset-down`，`top = bossBarBaselineY - ascent`，因此 `offset-down` 增大会让行下移）。Hotbar 走 `hbY = actionBarBottomY - hotbarHeight + (hotbarBaseAscent - (hotbarBaseAscent - offset-y))`、`hbX = floor((screenWidth - hotbarAdvance)/2) + offset-x`。记牌行只共享每格水平 `advance` 用于精确定位，垂直仍沿用现有普通 MiniMessage 预览语义（不引入 `counterCellHeight` / `counterLineHeight` / `counterBaselineY` 字段）。GUI 缩放由页面选择器控制（2/3/4，默认 3），只影响 CSS 放大倍数，不影响下发的 MC 像素值。
+- 页面右侧的预览按 **Minecraft 像素坐标系**绘制，屏幕几何由服务端固定下发：`screenWidth=640`、`screenHeight=360`、`bossBarBaselineY=20`、`actionBarBottomY=360`。各行宽度与字形前进量由 `DebugHudConfigController.currentGeometry()` 汇总 `PackAssets`、`PlayerHeadRenderer`、`HotbarDebugOverlayWriter` 后随 `Snapshot.geometry` 下发，前端**只消费 `PreviewGeometry` 数组**（`cards[{tier,height,width,advance}]` / `avatars[{scale,plainAdvance,outlinedAdvance,rowHeight}]` / `counters` 的固定 15 格分层 cell 几何 + hotbar 六项），不复算任何字形表（避免把「两处手写表不同步」的问题搬到前端）。预览复刻了游戏内的居中规则并**用整数 MC 像素**执行：`W = max(cardRowWidth, avatarRowWidth, counterRowWidth)`，`baseLeft = floor((screenWidth - W)/2)`，每行前再垫 `floor((W - 行宽)/2)`。BossBar 上的牌行/头像行走 `baseline - ascent` 公式（`cardAscent = card.height - offset-down`、`avatarAscent = avatar.rowHeight - avatar-offset-down`，`top = bossBarBaselineY - ascent`，因此 `offset-down` 增大会让行下移）。Hotbar 走 `hbY = actionBarBottomY - hotbarHeight + (hotbarBaseAscent - (hotbarBaseAscent - offset-y))`、`hbX = floor((screenWidth - hotbarAdvance)/2) + offset-x`；预览中的完整 9 槽固定为 182×22，槽块 18×20，位置为 `x=2,22...162`，颜色严格为 `#E03A3A,#E06A2A,#E08A2A,#D8D030,#3CC050,#30C0A8,#3888E0,#7050D8,#C04AA0`。记牌行使用服务端下发的固定 15 格分层 cell 几何，数字显示 `playedCount` 累计已出张数；GUI 缩放由页面选择器控制（2/3/4，默认 3），只影响 CSS 放大倍数，不影响下发的 MC 像素值。
 - **预览各层可鼠标拖动**：牌行、头像行、记牌行、hotbar 各有一个拖动层，拖动位移按 `CSS 位移 ÷ 预览缩放` 换算回 MC 像素后写入对应偏移键（档位型字段会吸附到资源包实际生成的最近合法档，避免写出后端必然拒绝的值）。页面提供真正可操作的 `snapToggle` Minecraft 风格吸附开关，默认开启；它只改变当前页面的拖动行为，不属于 19 个 HUD patch，阈值按实际 layer 几何使用 MC 像素。中心线与 Alt 首次有效位移锁轴状态仍保留。真实指针拖动期间只改当前层的 CSS `transform`，不重建预览 DOM；`pointerup`/`pointercancel` 后才完整 `renderPreview()`。拖动只标记 dirty，须点「保存并应用」才写回 `config.yml`。
-- 「保存并应用」只写回本次提交的白名单键并应用到当前运行态；保存仍严格执行“异步 config I/O + hotbar overlay YAML → 主线程 `ce reload pack` → 主线程 `applyHudRuntimeStateFromWeb()` → 发布结果”的顺序，空 patch 不触发资源流程，任一步失败不得报成功。「重新读取配置」只从磁盘重新载入现有 `config.yml`，会丢弃页面上尚未保存的改动。
+- 「保存并应用」只写回本次提交的白名单键并应用到当前运行态；保存严格执行“异步 config I/O + hotbar overlay YAML → 主线程启动 CE 真实 reload Future → 异步生成与 ZIP 内容校验 → 主线程 `applyHudRuntimeStateFromWeb()` → 发布结果”的顺序，空 patch 不触发资源流程，任一步失败不得报成功。「重新读取配置」只从磁盘重新载入现有 `config.yml`，会丢弃页面上尚未保存的改动。
 - hotbar overlay 的 `pack.yml` 与 `hotbar_debug.yml` 均先写临时文件再原子替换，异步阶段不访问 Bukkit PluginManager；协调器每次提交在主线程重新解析 CraftEngine overlay 路径，关闭后拒绝新任务且已排队任务会失效，避免关闭后继续应用。
-- Hotbar 是否推送由 `hotbar-hud.enabled`、`GamePhase.PLAYING` 正式出牌阶段、牌桌座位是否为在线真人共同决定；只有三项同时满足才进入自定义 5 槽推送集合。`LOBBY`、`BIDDING`、`DOUBLING`、结算、离桌、停服及普通玩家保持原版 9 槽，非 `PLAYING` 对局提示走普通 ActionBar。资源包不得生成或覆盖 `minecraft` 原版 `hotbar.png` / `hotbar_selection.png`。**注意语义已变更**：`HotbarHudService.reloadEnabled(configuredEnabled, suspended)` 的 `suspended` 参数（Debug Web 接管标记）原先会直接 `stop()` 推送，现在改为「Web 接管定位参数」——符合 PLAYING 条件时推送照常，只把字形从 bundle 固定 ascent 的码位（`0xEF00`）切到覆盖层可拖 ascent 的码位（`0xEF01`）。改回「接管即停推送」会让拖动 hotbar 时游戏内看不到任何变化，`DoudizhuRuntimeSyncTest.DebugWeb接管时Hotbar仍继续推送` 守这条。
+- Hotbar 是否推送由 `hotbar-hud.enabled`、`GamePhase.PLAYING` 正式出牌阶段、牌桌座位是否为在线真人共同决定；只有三项同时满足才进入自定义完整 9 槽纯色块推送集合。`LOBBY`、`BIDDING`、`DOUBLING`、结算、离桌、停服及普通玩家保持原版 9 槽，非 `PLAYING` 对局提示走普通 ActionBar。资源包不得生成或覆盖 `minecraft` 原版 `hotbar.png` / `hotbar_selection.png`。**注意语义已变更**：`HotbarHudService.reloadEnabled(configuredEnabled, suspended)` 的 `suspended` 参数（Debug Web 接管标记）原先会直接 `stop()` 推送，现在改为「Web 接管定位参数」——符合 PLAYING 条件时推送照常，只把字形从 bundle 固定 ascent 的码位（`0xEF00`）切到覆盖层可拖 ascent 的码位（`0xEF01`）。改回「接管即停推送」会让拖动 hotbar 时游戏内看不到任何变化，`DoudizhuRuntimeSyncTest.DebugWeb接管时Hotbar仍继续推送` 守这条。
 - **hotbar 定位的两个方向机制完全不同，不要混谈**：
   - `hotbar-hud.offset-x` 走 CraftEngine 负空格，**运行期即时生效**，任意整数像素，不需要重新构建或重下资源包。渲染侧必须首尾对称抵消偏移量（见 `HotbarHudService.buildActionBar` 注释），否则客户端按总宽居中会把偏移吃掉一半。
-  - `hotbar-hud.offset-y` 必须落在位图字形的 `ascent` 上，属于**客户端资源内容**。由 `HotbarDebugOverlayWriter` 运行期写出覆盖层（`ascent = -128 - offset-y`，`height` 恒 22 保证 1:1 不缩放），再自动执行 `ce reload pack` 重新打包，**客户端需重新下载资源包才能看到**。所以纵向调整不是即时的，每改一次都要走一轮重打包。
-- 仍然禁止通过运行期配置修改构建期烘焙参数：`hotbar-hud.glyph-ascent`、`hotbar-hud.slot-count` 这两个键**运行期从未被读取**（纯文档键，记录构建期约定）。当前 hotbar 遮罩字形固定为 **182×22**、advance 为 **183**，中央 5 槽占 108px、左右各 37px 为不透明遮罩；尺寸、码位与 advance 必须同时修改 `build.gradle.kts` 和 `PackAssets`。要调垂直位置请用 `offset-y` 走覆盖层，不要改这些构建期约定。
+  - `hotbar-hud.offset-y` 必须落在位图字形的 `ascent` 上，属于**客户端资源内容**。由 `HotbarDebugOverlayWriter` 运行期写出覆盖层（`ascent = -128 - offset-y`，`height` 恒 22 保证 1:1 不缩放），再通过 CE API 重读配置、生成与验证 ZIP，**客户端需重新下载资源包才能看到**。所以纵向调整不是即时的，每改一次都要走一轮重打包。
+- 仍然禁止通过运行期配置修改构建期烘焙参数：`hotbar-hud.glyph-ascent`、`hotbar-hud.slot-count` 这两个键**运行期从未被读取**（纯文档键，记录构建期约定）。当前 hotbar 字形固定为 **182×22**、advance 为 **183**，底图完整绘制 9 个 `18×20px` 纯色块，槽间距与左右外边距均为 `2px`，不画白色边框；尺寸、码位与 advance 必须同时修改 `build.gradle.kts` 和 `PackAssets`。要调垂直位置请用 `offset-y` 走覆盖层，不要改这些构建期约定。
 - `onDisable` 必须 `stop()` HttpServer，避免端口占用导致下次启动失败。
-- `DebugWebServerTest` 已覆盖 geometry schema、15 格记牌器 fixture、PackAssets/PlayerHeadRenderer/HotbarDebugOverlayWriter 资源 API 对齐、旧几何魔数消失，以及 pointermove 拖动期间不重建 DOM、松手后再刷新。
+- `DebugWebServerTest` 现有覆盖 geometry schema、资源 API 对齐、旧几何魔数消失，以及 pointermove 拖动期间不重建 DOM、松手后再刷新；本次测试计划还应覆盖固定 15 格分层记牌器 fixture、三层记牌器 glyph 的文件/尺寸/码位/YAML 对齐、15 格固定 advance、完整 9 槽 hotbar 的逐像素尺寸/颜色/透明度/间隙与原版 sprite 禁止项；音频契约测试覆盖 125 个 OGG 的数量闭合、非空、Vorbis 流和资源索引引用。1.10.13 新增前端交互改进测试：粘性操作栏 sticky 定位、Ctrl+S/Ctrl+R 键盘快捷键、focus-visible 焦点环样式、成功消息 msg-fade 自动淡出、窄屏溢出防护（main minmax(0,...)、.panel min-width:0、.key word-break:break-all、input min-width:0、.preview max-width:100%，500px 以下字段堆叠）。溢出防护靠 minmax(0,...)/min-width:0/word-break 从源头约束子元素尺寸，不在 body 或 .panel 上用 overflow:hidden 裁切——裁切会创建新的滚动容器导致 .actions sticky 失效；测试通过提取 .panel 和 body 的 CSS 规则内容精确断言不含 overflow:hidden/auto/scroll，防止 sticky 祖先链回归。
 - 游戏内通过 `/muz debug web [start|stop]`（需 `muz.admin` 权限）查看状态或手动启停；不带子参数时显示运行状态与访问地址。`/muz give debug` 必须保留，用于发放个人 HUD 调试棒：玩家未进牌桌时可显示与 Debug Web 对照的游戏内 Trick HUD，右键循环牌行、头像行、记牌行，Shift+右键隐藏；调试棒只影响持有者个人，不写入运行期正式配置。旧 `/muz debug show`、`/muz debug stick`、`/muz debug hud` 入口继续移除，不得恢复为正式 HUD 控制路径。
 - `DebugWebServer.getPort()` 返回当前监听端口（未运行时为 0）。
 - **`/muz reload` 会同步 `debugWebServer` 生命周期**：`reloadVisualState()` 里检测 `debug.web-ui.enabled` 变化——`enabled` 由 false→true 时自动新建并启动，由 true→false 时自动停止并置 null。因此修改 config.yml 后执行 `/muz reload` 即可生效，无需重启服务端。
@@ -271,6 +274,35 @@ linmumua.doudizhu
 | 可选依赖 | CraftEngine 0.0.67、PlaceholderAPI 2.12.2、VaultAPI 1.7 | 全部 `compileOnly` |
 | 构建 | Gradle + Kotlin DSL + `com.gradleup.shadow:9.3.0` | 产物在 `build/<targetId>/` |
 | 测试 | JUnit 5（junit-bom 5.13.4），94 个测试文件 | 仓库路径含中文时 Gradle 测试 worker 会报 `ClassNotFoundException`，需改用独立 JUnit Launcher 实跑（classpath 用 argfile 传，避免 MSYS2 搅坏 `;` 分隔符） |
+
+### 1.10.12 构建与验证记录（2026-09-09）
+
+- 三个目标 `paper-1.21.11`、`paper-26.1.2`、`paper-26.2` 均串行执行 `clean shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml`；单独执行 `shadowJar` 不会生成两种 ZIP，必须显式调用 ZIP 任务。
+- 26.2 独立 JUnit 实跑资源契约 49 项、HUD/对局/Debug Web/overlay/旧 hotbar 清理契约 93 项，均成功且无跳过；这是定向回归，不代表全仓库测试已运行。
+- 独立 Launcher 必须检查发现数非零、容器失败数和成功数；Windows 下 UTF-8 argfile 中的中文路径可能仍导致类加载失败，本轮通过 Python `subprocess.run` 参数列表直接传入完整 classpath。版本属性使用 `1.10.12` / `26.2` / 资源包格式 `88`，不能把 Java 版本 `25` 当作资源包格式。
+- 已逐个核对 9 个 JAR/ZIP：版本与目标 API、Java 字节码级别、125 个 OGG 源字节一致性、22 张记牌器 PNG 的尺寸与最右列有效宽度、20 张 label/digit 的 alpha=1 锚点、完整 9 槽逐像素颜色、禁止原版 hotbar 覆盖，以及内嵌与独立 CraftEngine bundle 字节一致性。三个目标的插件 JAR 已额外复制到 `C:\PluginLibs`，副本 SHA-256 与构建产物一致；未覆盖其他版本文件。
+- 游戏内显示、边缘点击及 legacy 皮肤 hat 决策仍待确认；本轮未部署或重启测试服。记牌器物品 lore 仅同步为累计已出语义，仍沿用既有硬编码文本，不扩展为全量文本外置。
+
+### 1.10.15 修复取证（2026-09-10，实施中）
+
+- 现场 2000 端口属于 Leaf 26.1.2，日志确认运行 MUZ 1.10.12；工作区版本号不等于已部署版本。
+- CE 资源目录已是每档 22 个声明的三层记牌器，但 `generated/resource_pack.zip` 仍保存 2026-09-09 的旧 48px 字体。偏移 50 时 `U+EB35` 应为数字 0，旧 ZIP 却对应 `rank_3_dim.png`，造成灰色大号 3 重叠；不能通过改玩家偏移或缩小新版字形掩盖此错配。
+- 现场 ZIP 与 28 个相关资源文件已备份到 `C:\Users\Admin\AppData\Local\Temp\muz-hud-parity-backup-op1pbk92`，29 份副本哈希一致；ZIP SHA-256 为 `a0937b7b292cc7d9afb03e515dd549e09ab132248c0ed08f72d5edb13ea52ac6`。
+- 已安装 CE 26.8 的 `reload pack` 只生成包，不先重读 YAML；`reload all` 才先重读再生成。JDK `ZipFile` 可读取现场受保护 ZIP，已核对字体 JSON 的长度与 CRC；Python 本地头名称不一致错误不代表 Minecraft 无法加载。
+- 已实际强制执行 26.1.2 `compileJava compileTestJava processResources`，六项 Gradle 任务均执行成功；编译保留既有 `Unsafe` 弃用警告。独立 JUnit 首轮 87 项中 80 项通过，补齐 PlaceholderAPI 运行时依赖后为 83 项通过、4 项失败；修正校验器映射错误分类、资源生成失败保留、测试插件数据目录夹具及过时源码断言后，最终 87/87 通过、无跳过、无失败容器。真实 Chromium 浏览器控制通道已打开生成页面，验证 19 个字段、5 张同源样例牌、15 格记牌器、9 槽 hotbar、640×360 MC 视口、dirty 往返、保存成功/失败、保存期间禁用与 Ctrl+S/Ctrl+R 防重复、重新读取丢弃未保存值；页面无应用 JS 错误，唯一控制台错误是 fixture 静态服务缺少 favicon 的 404。Playwright 直启脚本因 Windows/Git Bash 下 Chromium `process_title` 断言未执行，不能据此宣称已完成多 viewport Playwright 验收。现场完整重载和客户端重新下载单独验收，不与网页 mock 验证混称完成。验收截图归档于 `docs/screenshots/muz-hud-debug-web-initial.png` 与 `docs/screenshots/muz-hud-debug-web-final.png`。最终干净构建 `1.10.15 / paper-26.1.2` 的 `shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml` 均成功；JAR SHA-256 为 `f997eba7be218aeb5d83b416f837aa1d31c2cf3bba1c9f078e28738f5bc61870`，资源包 ZIP 为 `1acf28d8cb773f9f5d0668f7d7d757d3e01d2c6eaf0d7953aa1378d8f47351dd`，CraftEngine ZIP 为 `6a5bdaaef930fbfc6c31cf2d071a3914cecd11decad86915e38eb89d62f4631c`；三者均无原版 `hotbar.png` / `hotbar_selection.png` 覆盖，JAR 已复制至 `C:\PluginLibs` 且副本哈希一致。
+
+### 1.10.14 变更记录
+
+- `/muz debug add [数量]` 改用 `PhysicalTableManager.placeDebugTableAt` 专用调试放桌入口，仅绕过桌面/椅子方块占用检测（`placementObstruction`），仍保留玩家已在其他桌、重复桌名、区块预加载、残留实体清理与实体生成等保护；`debug-` 测试桌沿用现有持久化入口但由 `isDebugTableName` 隔离，不写入数据库。正式入口 `placeNewTableAt` 不受影响，继续做完整的方块占用检测。
+- `/muz debug add 99` 可一次生成 99 张自动对局观察桌，仅供测试，可能产生大量 Display Entity 并造成主线程卡顿；执行前应确认测试服可承受该负载。
+- 新增契约测试 `DebugPlacementBypassTest`（10 项），源码扫描守护调试入口与正式入口的边界不退化，并确认调试桌不会写入数据库。
+- 本轮已完成 `compileJava`、`compileTestJava` 与独立定向回归，结果见下方 1.10.14 验证记录。
+
+### 1.10.13 前端验证记录（2026-09-09）
+
+- `paper-26.2` 的 `compileJava`、`compileTestJava` 已实际执行成功；独立 JUnit 资源契约 **49/49**、HUD/对局/Debug Web/overlay/旧 hotbar 清理 **94/94**，合计 **143/143**，无跳过、无失败容器。未运行全仓库测试。
+- 使用当前 `buildHtml` 和真实服务端 geometry 导出本地页面，在 Chromium 中检查 1440、1024、900、768、501、375、320px 七种宽度：页面无横向溢出、表单控件不被裁切、操作栏吸附有效；GUI 缩放到 4 时预览仍在面板内横滚。19 个字段、15 格记牌器与 9 槽 hotbar 数量保持。
+- 浏览器验证了增量 patch、Token、Ctrl+S/Ctrl+R、撤销、成功淡出、错误常驻与耗尽隐藏保留占位；HTTP 响应使用 mock，不代表测试服联调。2000 端口当前未监听，未部署或重启测试服，未构建本版本三目标发布 JAR/ZIP；上方 1.10.12 九个产物记录仍属于历史版本。
 
 ## 开发优先级建议
 

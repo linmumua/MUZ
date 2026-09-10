@@ -295,6 +295,47 @@ public final class PhysicalTableManager {
         return table;
     }
 
+    /**
+     * 调试批量放桌的专用入口，仅绕过桌面/椅子方块占用检测（placementObstruction），
+     * 保留重复桌名保护、区块预加载、残留实体清理与实体生成等完整流程。
+     *
+     * <p>与 {@link #placeNewTableAt} 的唯一区别是跳过了方块占用检测，使 {@code /muz debug add 99}
+     * 等大批量调试放桌不会因为相邻桌位的方块碰撞而失败。正式入口 placeNewTableAt 不受影响，
+     * 继续做完整的 placementObstruction 检测。
+     *
+     * <p>调试桌沿用持久化调用，但 {@code debug-} 名称会被插件持久化层隔离，因此不会写入数据库；
+     * 该桌只在当前运行期和 reload 重建流程中存在，重启后不会恢复。若需要无 {@code debug-} 语义的诊断桌请用 {@link #placeDiagnosticTable}。
+     *
+     * @param owner 触发放桌的玩家（记录归属，并检查该玩家是否已在其他桌）
+     * @param name 牌桌名
+     * @param roomLevel 房间等级
+     * @param anchor 放置基准点
+     * @param yaw 朝向
+     * @return 创建出来的牌桌
+     */
+    public GameTable placeDebugTableAt(Player owner, String name, TableLevel roomLevel, Location anchor, float yaw) {
+        String key = normalize(name);
+        if (placedTables.containsKey(key)) {
+            throw new IllegalArgumentException("这儿已经有张桌子了。");
+        }
+        if (plugin.getTableManager().getTableOf(owner) != null) {
+            throw new IllegalArgumentException("你已经坐在别的桌了。");
+        }
+        // 调试放桌仅跳过 placementObstruction 方块占用检测：
+        // 批量放桌时相邻桌位的桌面/椅子区域可能重叠，跳过这一项才能连续生成；
+        // 玩家已在其他桌的保护仍然保留，避免调试命令把同一玩家同时挂到多张桌。
+        GameTable table = plugin.getTableManager().getTable(name);
+        if (table == null) {
+            table = plugin.getTableManager().createTable(name, roomLevel);
+        }
+        ensureChunkReady(anchor);
+        purgeResidualWorldArtifacts(anchor, yaw);
+        placedTables.put(key, spawnTable(table, anchor.clone(), yaw, owner.getUniqueId(), owner.getName()));
+        plugin.persistDoudizhuTable(table.getName(), table.getRoomLevel(), anchor, yaw, owner.getUniqueId(), owner.getName());
+        refresh(table);
+        return table;
+    }
+
     public float placementYaw(Player owner) {
         // HARD-CODED TABLE FACING:
         // The player's own side must stay open when placing a 斗地主 table.

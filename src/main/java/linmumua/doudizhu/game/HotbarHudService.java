@@ -20,11 +20,11 @@ import java.util.UUID;
 
 /**
  * 底部物品栏 HUD 服务：每 2 格刻只向处于 {@link GamePhase#PLAYING} 的真人玩家发送
- * ActionBar，通过字形负 ascent 把 5 个槽位背景渲染在屏幕底部（原版物品栏区域）。
+ * ActionBar，通过字形负 ascent 把完整 9 个槽位背景渲染在屏幕底部（原版物品栏区域）。
  *
  * <p>资源包【不再】透明覆盖原版 {@code hotbar.png} / {@code hotbar_selection.png}：
  * 那两张贴图一旦进资源包就是客户端全局状态，无法按牌桌阶段切换，会导致没打牌的玩家
- * 也只剩悬空物品。现在只有正式出牌阶段持续推送自定义 5 槽字形；等待、叫地主、加倍、
+ * 也只剩悬空物品。现在只有正式出牌阶段持续推送自定义 完整 9 槽字形；等待、叫地主、加倍、
  * 结算、离桌及普通游玩时都不推送，原版 9 槽物品栏保持可见。
  *
  * <p>消息叠加机制：出牌阶段消息（倍率、剩余秒数等）作为 ActionBar 正文渲染在
@@ -59,7 +59,7 @@ public final class HotbarHudService {
     private BukkitTask task;
 
     /**
-     * 上一轮 tick 实际收到过自定义 5 槽 HUD 的玩家。
+     * 上一轮 tick 实际收到过自定义 完整 9 槽 HUD 的玩家。
      *
      * <p>离开 {@link GamePhase#PLAYING} 后必须主动发一次空 ActionBar；否则客户端会让
      * 最后一帧字形继续停留到原生淡出结束，看起来像「结算/回大厅后还替换了几秒」。
@@ -194,7 +194,7 @@ public final class HotbarHudService {
                 continue;
             }
 
-            // 只有正式出牌阶段才把消息和自定义 5 槽底图合成；叫地主、加倍、结算
+            // 只有正式出牌阶段才把消息和自定义 完整 9 槽底图合成；叫地主、加倍、结算
             // 等阶段仍然必须显示普通 ActionBar，不能因为全局开关开启就把提示吞掉。
             boolean playing = isPlayingPlayer(player);
             if (!enabled || !offsetService.isAvailable() || !playing) {
@@ -244,7 +244,7 @@ public final class HotbarHudService {
         TableManager tableManager = plugin.getTableManager();
         if (tableManager != null) {
             // 从牌桌状态出发，而不是扫描全服在线玩家：只有正式出牌阶段的真人座位
-            // 才能收到自定义 5 槽字形，机器人 UUID 没有 Bukkit Player，自然不会发送。
+            // 才能收到自定义 完整 9 槽字形，机器人 UUID 没有 Bukkit Player，自然不会发送。
             for (GameTable table : tableManager.getTables()) {
                 if (table.getPhase() != GamePhase.PLAYING) {
                     continue;

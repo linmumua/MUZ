@@ -1,12 +1,18 @@
 package linmumua.doudizhu.resources;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +24,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
@@ -393,11 +401,47 @@ class CraftEngineBundleResourcesTest {
         assertTrue(cardModel.contains("\"west\": {\"uv\": [6.88608, 2.53165, 13.96835, 16]"));
     }
 
+    /**
+     * 斗地主音频资源必须在源包、客户端资源索引、CraftEngine sounds.yml 与 classpath bundle 里完全闭合。
+     *
+     * <p>这条不靠 ffmpeg，也不只做字符串命中：每个 OGG 都验 OggS 页头、Vorbis identification packet
+     * 和可解析的声道/采样率/码率字段，再比对 sounds.json / sounds.yml 的引用集合与源文件集合完全相等。
+     * 这样能同时守住「漏进包」「索引写错路径」「压缩后不是 Vorbis」「bundle 字节被二次改写」四类问题。
+     */
     @Test
-    void generatedResourcePackContainsSoundRegistry() throws IOException {
-        String sounds = read("craftengine/muz/resourcepack/assets/muz/sounds.json");
-        assertTrue(sounds.contains("\"doudizhu.pass1\""));
-        assertTrue(sounds.contains("\"doudizhu/voice/v1\""));
+    void doudizhuSoundResourcesAreClosedOggVorbisContracts() throws IOException {
+        Map<String, byte[]> sourceSounds = sourceOggSounds();
+        Map<String, byte[]> bundleSounds = bundleOggSounds();
+        assertEquals(125, sourceSounds.size(), "源码资源包应当恰好保留 125 个斗地主 OGG 源文件");
+        assertEquals(sourceSounds.keySet(), bundleSounds.keySet(),
+            "classpath CraftEngine bundle 里的 OGG 集合必须与源码 resourcepack 完全一致，不许漏文件或多旧文件");
+
+        for (Map.Entry<String, byte[]> entry : sourceSounds.entrySet()) {
+            String relative = entry.getKey();
+            byte[] sourceBytes = entry.getValue();
+            byte[] bundleBytes = bundleSounds.get(relative);
+            assertTrue(sourceBytes.length > 0, relative + " 是空文件");
+            assertArrayEquals(sourceBytes, bundleBytes,
+                relative + " 源字节与 classpath bundle 字节不一致；构建期只允许按同路径复制已压缩好的 OGG");
+
+            OggVorbisInfo info = parseOggVorbisInfo(sourceBytes, relative);
+            assertTrue(info.channels() > 0, relative + " 的 Vorbis 声道数不可解析");
+            assertTrue(info.sampleRate() > 0, relative + " 的 Vorbis 采样率不可解析");
+            assertTrue(
+                info.nominalBitrate() != 0 || info.upperBitrate() != 0 || info.lowerBitrate() != 0,
+                relative + " 的 Vorbis 码率字段全为 0，identification packet 可能没有被正确解析"
+            );
+        }
+
+        Set<String> expectedNames = sourceSounds.keySet();
+        assertEquals(expectedNames, soundNamesFromSoundsJson(),
+            "resourcepack/assets/muz/sounds.json 引用集合必须与 125 个源 OGG 一一对应");
+        assertEquals(expectedNames, soundNamesFromSoundsYml(),
+            "configuration/sounds.yml 引用集合必须与 125 个源 OGG 一一对应");
+
+        Set<String> indexedSounds = indexedBundleOggSounds();
+        assertEquals(expectedNames, indexedSounds,
+            "_bundle_index.txt 中记录的 OGG 集合必须与源码和 classpath bundle 完全一致");
     }
 
     @Test
@@ -1519,43 +1563,87 @@ class CraftEngineBundleResourcesTest {
     }
 
     /**
-     * PLAYING 阶段的自定义 5 槽字形必须是与原版 hotbar 等宽的全不透明遮罩。
-     *
-     * <p>182×22 与全不透明都是业务契约，不只是两侧常量「彼此相等」：若生成侧和
-     * PackAssets 一起退回 108px，普通一致性断言仍会通过，但原版外围四槽会露出来，
-     * 视觉上就不是 5 槽替换。只改生成器或只改常量则会让负空格归零横向串位。
+     * label/digit 的最右下角 alpha=1 锚点必须保留，避免 Minecraft BitmapProvider 按透明边界
+     * 把 33px PNG 的实际 advance 缩短；文字 shader 会丢弃该不可见像素，因此不改变视觉。
      */
     @Test
-    void hotbarSlotsTextureIsFullOpaqueOriginalWidthMask() throws IOException {
+    void counterLabelAndDigitTexturesKeepInvisibleRightEdgeAnchors() throws IOException {
+        for (String file : new String[] {
+            "label_3", "label_4", "label_5", "label_6", "label_7", "label_8", "label_9", "label_10",
+            "label_j", "label_q", "label_k", "label_a", "label_2", "label_small", "label_big",
+            "digit_0", "digit_1", "digit_2", "digit_3", "digit_4"
+        }) {
+            String path = "craftengine/muz/resourcepack/assets/muz/textures/font/counter/" + file + ".png";
+            BufferedImage image = readImage(path);
+            assertEquals(33, image.getWidth(), path + " 的视觉盒宽度必须是 33px");
+            int anchor = image.getRGB(image.getWidth() - 1, image.getHeight() - 1);
+            assertEquals(1, (anchor >>> 24) & 0xFF,
+                path + " 缺少右下角 alpha=1 宽度锚点；BitmapProvider 会缩短该字形 advance");
+        }
+    }
+
+    /**
+     * PLAYING 阶段的自定义九槽字形必须是与原版 hotbar 等宽的全不透明纯色遮罩。
+     *
+     * <p>业务契约固定为 182×22、底色 #121216，九个 18×20 色块位于
+     * x=2,22,...,162、y=1..20，槽块之间和左右边缘均为 2px，不得生成白边框。
+     */
+    @Test
+    void hotbarSlotsTextureIsNineOpaqueColorBlocks() throws IOException {
         String path = "craftengine/muz/resourcepack/assets/muz/textures/font/hotbar_slots.png";
         BufferedImage texture = readImage(path);
         assertEquals(182, PackAssets.HOTBAR_HUD_GLYPH_WIDTH,
-            "Hotbar 遮罩必须等宽覆盖原版 9 槽背景，不能退回只画中央 108px");
+            "Hotbar 遮罩必须等宽覆盖原版 9 槽背景");
         assertEquals(22, PackAssets.HOTBAR_HUD_GLYPH_HEIGHT,
-            "Hotbar 遮罩高度必须保持原版背景的 22px");
+            "Hotbar 遮罩高度必须保持 22px");
+        assertEquals(9, PackAssets.HOTBAR_HUD_SLOT_COUNT,
+            "Hotbar 资源契约必须生成九个槽位");
         assertEquals(PackAssets.HOTBAR_HUD_GLYPH_WIDTH, texture.getWidth(),
-            path + " 的真实宽度与 PackAssets.HOTBAR_HUD_GLYPH_WIDTH 不一致");
+            path + " 的真实宽度与 PackAssets 不一致");
         assertEquals(PackAssets.HOTBAR_HUD_GLYPH_HEIGHT, texture.getHeight(),
-            path + " 的真实高度与 PackAssets.HOTBAR_HUD_GLYPH_HEIGHT 不一致");
+            path + " 的真实高度与 PackAssets 不一致");
+
+        int background = 0xFF121216;
+        int[] slotColors = {
+            0xFFE03A3A, 0xFFE06A2A, 0xFFE08A2A, 0xFFD8D030, 0xFF3CC050,
+            0xFF30C0A8, 0xFF3888E0, 0xFF7050D8, 0xFFC04AA0
+        };
+        Set<Integer> seenColors = new HashSet<>();
         for (int y = 0; y < texture.getHeight(); y++) {
             for (int x = 0; x < texture.getWidth(); x++) {
-                assertEquals(255, (texture.getRGB(x, y) >>> 24) & 0xFF,
-                    path + " 在 (" + x + "," + y + ") 不是全不透明，原版物品栏会从下面透出来");
+                int argb = texture.getRGB(x, y);
+                assertEquals(255, (argb >>> 24) & 0xFF,
+                    path + " 在 (" + x + "," + y + ") 不是全不透明");
+                boolean inSlot = y >= 1 && y < 21 && x >= 2 && x < 180 && (x - 2) % 20 < 18;
+                if (!inSlot) {
+                    assertEquals(background, argb,
+                        path + " 非槽位区域必须保持 #121216，发现白边或透明像素于 (" + x + "," + y + ")");
+                }
             }
         }
-        assertEquals(
-            PackAssets.HOTBAR_HUD_GLYPH_WIDTH + 1,
-            PackAssets.HOTBAR_HUD_GLYPH_ADVANCE,
-            "Minecraft 位图字形前进量必须始终是 PNG 宽度 + 1；不能只改 WIDTH 不改 ADVANCE"
-        );
+        for (int slot = 0; slot < PackAssets.HOTBAR_HUD_SLOT_COUNT; slot++) {
+            int startX = 2 + slot * 20;
+            for (int y = 1; y < 21; y++) {
+                for (int x = startX; x < startX + 18; x++) {
+                    int argb = texture.getRGB(x, y);
+                    assertEquals(slotColors[slot], argb,
+                        "槽 " + slot + " 必须是无边框纯色块，位置 (" + x + "," + y + ") 不一致");
+                    seenColors.add(argb);
+                }
+            }
+        }
+        assertEquals(PackAssets.HOTBAR_HUD_SLOT_COUNT, seenColors.size(),
+            "九个槽必须使用九种固定调试颜色");
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_WIDTH + 1, PackAssets.HOTBAR_HUD_GLYPH_ADVANCE,
+            "位图字形前进量必须是 PNG 宽度 + 1");
 
         Map<String, String> fields = glyphEntries().get("hotbar_slots");
         assertNotNull(fields, "images/hotbar_hud.yml 缺少 muz:hotbar_slots 字形声明");
         assertEquals("muz:font/hotbar_slots.png", fields.get("file"),
-            "Hotbar 字形声明没有引用被测的 hotbar_slots.png，宽度断言会失去实际意义");
+            "Hotbar 字形声明没有引用被测 hotbar_slots.png");
         assertTrue(read("craftengine/muz/_bundle_index.txt").lines()
                 .anyMatch(line -> line.trim().equals("resourcepack/assets/muz/textures/font/hotbar_slots.png")),
-            "hotbar_slots.png 未进入 bundle 索引，运行期即使发送正确码位也只会显示豆腐块");
+            "hotbar_slots.png 未进入 bundle 索引");
     }
 
     /**
@@ -1638,6 +1726,184 @@ class CraftEngineBundleResourcesTest {
         return matcher.group(1).trim();
     }
 
+    private record OggVorbisInfo(int channels, int sampleRate, int upperBitrate, int nominalBitrate, int lowerBitrate) {
+    }
+
+    private static Map<String, byte[]> sourceOggSounds() throws IOException {
+        Path root = RESOURCE_PACK_SOURCE.resolve("assets/doudizhupaper/sounds");
+        assertTrue(Files.isDirectory(root), "源码资源包缺少 sounds 目录：" + root);
+        Map<String, byte[]> sounds = new TreeMap<>();
+        try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+            paths
+                .filter(Files::isRegularFile)
+                .filter(path -> path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".ogg"))
+                .forEach(path -> {
+                    String relative = root.relativize(path).toString().replace('\\', '/').replaceFirst("\\.ogg$", "");
+                    try {
+                        sounds.put(relative, Files.readAllBytes(path));
+                    } catch (IOException exception) {
+                        throw new java.io.UncheckedIOException(exception);
+                    }
+                });
+        } catch (java.io.UncheckedIOException exception) {
+            throw exception.getCause();
+        }
+        return sounds;
+    }
+
+    private static Map<String, byte[]> bundleOggSounds() throws IOException {
+        Map<String, byte[]> sounds = new TreeMap<>();
+        for (String path : bundleOggPaths()) {
+            String relative = path
+                .substring("resourcepack/assets/muz/sounds/".length())
+                .replaceFirst("\\.ogg$", "");
+            sounds.put(relative, readBytes("craftengine/muz/" + path));
+        }
+        return sounds;
+    }
+
+    private static Set<String> indexedBundleOggSounds() throws IOException {
+        Set<String> sounds = new TreeSet<>();
+        for (String path : bundleOggPaths()) {
+            sounds.add(path.substring("resourcepack/assets/muz/sounds/".length()).replaceFirst("\\.ogg$", ""));
+        }
+        return sounds;
+    }
+
+    private static List<String> bundleOggPaths() throws IOException {
+        List<String> paths = new ArrayList<>();
+        for (String line : read("craftengine/muz/_bundle_index.txt").split("\\R")) {
+            String path = line.trim();
+            if (path.startsWith("resourcepack/assets/muz/sounds/") && path.endsWith(".ogg")) {
+                paths.add(path);
+            }
+        }
+        assertFalse(paths.isEmpty(), "_bundle_index.txt 里没有任何 OGG 音频资源");
+        return paths;
+    }
+
+    private static Set<String> soundNamesFromSoundsJson() throws IOException {
+        JsonObject root = JsonParser.parseString(read("craftengine/muz/resourcepack/assets/muz/sounds.json")).getAsJsonObject();
+        Set<String> names = new TreeSet<>();
+        for (Map.Entry<String, JsonElement> entry : root.entrySet()) {
+            JsonObject soundEvent = entry.getValue().getAsJsonObject();
+            assertFalse(soundEvent.get("replace").getAsBoolean(), entry.getKey() + " 不应替换原版同名声音事件");
+            JsonArray sounds = soundEvent.getAsJsonArray("sounds");
+            assertEquals(1, sounds.size(), entry.getKey() + " 必须只引用一个同名 OGG，避免一对多掩盖漏资源");
+            JsonObject sound = sounds.get(0).getAsJsonObject();
+            assertTrue(sound.get("stream").getAsBoolean(), entry.getKey() + " 必须按 stream 声明，避免长 BGM 整段预载");
+            String name = sound.get("name").getAsString();
+            assertEquals(soundEventId(name), entry.getKey(), entry.getKey() + " 的事件名没有按音频相对路径推导");
+            assertTrue(names.add(name), "sounds.json 重复引用音频：" + name);
+        }
+        return names;
+    }
+
+    private static Set<String> soundNamesFromSoundsYml() throws IOException {
+        Object loaded = new org.yaml.snakeyaml.Yaml().load(read("craftengine/muz/configuration/sounds.yml"));
+        assertTrue(loaded instanceof Map<?, ?>, "configuration/sounds.yml 根节点必须是对象");
+        Object soundsNode = ((Map<?, ?>) loaded).get("sounds");
+        assertTrue(soundsNode instanceof Map<?, ?>, "configuration/sounds.yml 缺少 sounds 对象");
+        Set<String> names = new TreeSet<>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) soundsNode).entrySet()) {
+            String eventId = String.valueOf(entry.getKey());
+            assertTrue(eventId.startsWith("muz:"), "CraftEngine 声音事件必须带 muz 命名空间：" + eventId);
+            assertTrue(entry.getValue() instanceof Map<?, ?>, eventId + " 的配置节点必须是对象");
+            Map<?, ?> soundEvent = (Map<?, ?>) entry.getValue();
+            assertEquals(Boolean.FALSE, soundEvent.get("replace"), eventId + " 不应替换原版同名声音事件");
+            Object listNode = soundEvent.get("sounds");
+            assertTrue(listNode instanceof List<?>, eventId + " 缺少 sounds 列表");
+            List<?> sounds = (List<?>) listNode;
+            assertEquals(1, sounds.size(), eventId + " 必须只引用一个同名 OGG，避免一对多掩盖漏资源");
+            assertTrue(sounds.get(0) instanceof Map<?, ?>, eventId + " 的 sounds[0] 必须是对象");
+            Map<?, ?> sound = (Map<?, ?>) sounds.get(0);
+            assertEquals(Boolean.TRUE, sound.get("stream"), eventId + " 必须按 stream 声明，避免长 BGM 整段预载");
+            String name = String.valueOf(sound.get("name"));
+            assertTrue(name.startsWith("muz:"), eventId + " 的音频引用必须带 muz 命名空间：" + name);
+            String relative = name.substring("muz:".length());
+            assertEquals("muz:" + soundEventId(relative), eventId, eventId + " 的事件名没有按音频相对路径推导");
+            assertTrue(names.add(relative), "sounds.yml 重复引用音频：" + relative);
+        }
+        return names;
+    }
+
+    private static String soundEventId(String relativePath) {
+        String normalized = relativePath.replaceFirst("\\.ogg$", "");
+        if (normalized.startsWith("doudizhu/effect/")) {
+            return "doudizhu." + normalized.substring("doudizhu/effect/".length());
+        }
+        if (normalized.startsWith("doudizhu/voice/")) {
+            return "doudizhu." + normalized.substring("doudizhu/voice/".length());
+        }
+        if (normalized.startsWith("doudizhu/")) {
+            return "doudizhu." + normalized.substring("doudizhu/".length());
+        }
+        return normalized.replace('/', '.');
+    }
+
+    private static OggVorbisInfo parseOggVorbisInfo(byte[] bytes, String name) {
+        assertTrue(bytes.length >= 27, name + " 太短，不足以包含 Ogg 页头");
+        assertOggCapture(bytes, 0, name);
+        assertEquals(0, bytes[4] & 0xFF, name + " 的 Ogg bitstream version 必须为 0");
+        assertTrue((bytes[5] & 0x02) != 0, name + " 的第一页必须标记 beginning-of-stream");
+        assertTrue((bytes[5] & 0x01) == 0, name + " 的第一页不应标记 continued packet");
+
+        ByteArrayOutputStream packet = new ByteArrayOutputStream();
+        for (int offset = 0; offset < bytes.length;) {
+            assertOggCapture(bytes, offset, name);
+            int segmentCount = bytes[offset + 26] & 0xFF;
+            int headerEnd = offset + 27 + segmentCount;
+            assertTrue(headerEnd <= bytes.length, name + " 的 Ogg segment table 越界");
+            int cursor = headerEnd;
+            for (int index = 0; index < segmentCount; index++) {
+                int segmentLength = bytes[offset + 27 + index] & 0xFF;
+                int segmentEnd = cursor + segmentLength;
+                assertTrue(segmentEnd <= bytes.length, name + " 的 Ogg packet body 越界");
+                packet.write(bytes, cursor, segmentLength);
+                cursor = segmentEnd;
+                if (segmentLength < 255) {
+                    return parseVorbisIdentificationPacket(packet.toByteArray(), name);
+                }
+            }
+            offset = cursor;
+        }
+        throw new AssertionError(name + " 没有完整的 Vorbis identification packet");
+    }
+
+    private static void assertOggCapture(byte[] bytes, int offset, String name) {
+        assertTrue(offset + 27 <= bytes.length, name + " 的 OggS 页头越界");
+        assertEquals('O', bytes[offset] & 0xFF, name + " 缺少 OggS header 的 O");
+        assertEquals('g', bytes[offset + 1] & 0xFF, name + " 缺少 OggS header 的第一个 g");
+        assertEquals('g', bytes[offset + 2] & 0xFF, name + " 缺少 OggS header 的第二个 g");
+        assertEquals('S', bytes[offset + 3] & 0xFF, name + " 缺少 OggS header 的 S");
+    }
+
+    private static OggVorbisInfo parseVorbisIdentificationPacket(byte[] packet, String name) {
+        assertTrue(packet.length >= 30, name + " 的 Vorbis identification packet 太短");
+        assertEquals(1, packet[0] & 0xFF, name + " 的第一个 Vorbis packet 必须是 identification 类型");
+        assertEquals("vorbis", new String(packet, 1, 6, StandardCharsets.US_ASCII),
+            name + " 的 identification packet 缺少 vorbis 标识");
+        assertEquals(0, littleEndianInt(packet, 7), name + " 的 Vorbis version 必须为 0");
+        int channels = packet[11] & 0xFF;
+        int sampleRate = littleEndianInt(packet, 12);
+        int upperBitrate = littleEndianInt(packet, 16);
+        int nominalBitrate = littleEndianInt(packet, 20);
+        int lowerBitrate = littleEndianInt(packet, 24);
+        int blocksize = packet[28] & 0xFF;
+        int blocksize0 = blocksize & 0x0F;
+        int blocksize1 = (blocksize >>> 4) & 0x0F;
+        assertTrue(blocksize0 < blocksize1, name + " 的 Vorbis blocksize 指数字段不可解析");
+        assertTrue((packet[29] & 0x01) == 1, name + " 的 Vorbis framing bit 必须为 1");
+        return new OggVorbisInfo(channels, sampleRate, upperBitrate, nominalBitrate, lowerBitrate);
+    }
+
+    private static int littleEndianInt(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xFF)
+            | ((bytes[offset + 1] & 0xFF) << 8)
+            | ((bytes[offset + 2] & 0xFF) << 16)
+            | ((bytes[offset + 3] & 0xFF) << 24);
+    }
+
     private static BufferedImage readImage(String path) throws IOException {
         InputStream stream = CraftEngineBundleResourcesTest.class.getClassLoader().getResourceAsStream(path);
         assertNotNull(stream, "Missing resource " + path);
@@ -1682,12 +1948,16 @@ class CraftEngineBundleResourcesTest {
             .replaceAll("(?m)//.*$", "");
     }
 
-    private static String read(String path) throws IOException {
+    private static byte[] readBytes(String path) throws IOException {
         InputStream stream = CraftEngineBundleResourcesTest.class.getClassLoader().getResourceAsStream(path);
         assertNotNull(stream, "Missing resource " + path);
         try (stream) {
-            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            return stream.readAllBytes();
         }
+    }
+
+    private static String read(String path) throws IOException {
+        return new String(readBytes(path), StandardCharsets.UTF_8);
     }
 }
 

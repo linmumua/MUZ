@@ -64,6 +64,23 @@ class GameTableRemainingCountsTest {
 
         assertEquals(2, table.getRemainingCounts().get(CardRank.THREE).intValue(),
             "打出一对 3 之后应剩 2 张，按手数扣只会剩 3 张");
+        assertEquals(2, table.getPlayedCounts().get(CardRank.THREE).intValue(),
+            "打出一对 3 之后累计已出应为 2 张");
+    }
+
+    /** 已出数量由剩余数量推导，且不产生第二份可变计数状态。 */
+    @Test
+    void 已出数量由剩余数量推导并返回不可变快照() throws Exception {
+        GameTable table = freshTable();
+        invokeReset(table);
+        decrement(table, List.of(CardRank.THREE, CardRank.BIG_JOKER));
+
+        Map<CardRank, Integer> played = table.getPlayedCounts();
+        assertEquals(1, played.get(CardRank.THREE).intValue());
+        assertEquals(1, played.get(CardRank.BIG_JOKER).intValue());
+        assertEquals(0, played.get(CardRank.FOUR).intValue());
+        assertThrows(UnsupportedOperationException.class,
+            () -> played.put(CardRank.THREE, 99), "已出快照必须不可变");
     }
 
     /**

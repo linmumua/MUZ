@@ -1,6 +1,9 @@
 package linmumua.doudizhu.debug;
 
+import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.config.MuzYamlConfig;
+import linmumua.doudizhu.game.TrickHudPreview;
+import linmumua.doudizhu.model.CardRank;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -125,5 +128,140 @@ public class DebugHudConfigControllerTest {
 
         assertEquals(1, warnings.size());
         assertTrue(warnings.get(0).contains("重叠"));
+    }
+
+    @Test
+    void avatarLayoutGeometryCoversEveryScaleAndOutlineCombination() {
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+
+        assertEquals((PackAssets.AVATAR_PIXEL_MAX_SCALE - PackAssets.AVATAR_PIXEL_MIN_SCALE + 1) * 2,
+            geometry.avatarLayouts().size());
+        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            final int selectedScale = scale;
+            for (boolean outlined : new boolean[]{false, true}) {
+                final boolean selectedOutlined = outlined;
+                DebugHudConfigController.PreviewGeometry.AvatarLayoutGeometry layout = geometry.avatarLayouts().stream()
+                    .filter(candidate -> candidate.middleScale() == selectedScale && candidate.outlined() == selectedOutlined)
+                    .findFirst()
+                    .orElseThrow();
+                assertEquals(3, layout.slots().size());
+                assertEquals(layout.slotWidth() * 3 + 2 * 0, layout.slots().stream()
+                    .mapToInt(DebugHudConfigController.PreviewGeometry.AvatarSlotGeometry::slotWidth)
+                    .sum(), "三槽必须使用同一服务端 slotWidth");
+                assertEquals(scale, layout.slots().get(1).scale());
+                assertEquals(4, layout.slots().get(0).scale());
+                assertEquals(4, layout.slots().get(2).scale());
+                assertTrue(layout.rowHeight() >= layout.slots().get(1).rowHeight());
+                assertTrue(layout.slots().get(1).crowned());
+            }
+        }
+    }
+
+    @Test
+    void counterGeometryUsesFixedLayeredCellAndCumulativeState() {
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+
+        assertEquals(PackAssets.COUNTER_CELL_WIDTH, geometry.counterCellWidth());
+        assertEquals(PackAssets.COUNTER_CELL_HEIGHT, geometry.counterCellHeight());
+        assertEquals(PackAssets.COUNTER_CELL_ADVANCE, geometry.counterAdvance());
+        assertEquals(PackAssets.COUNTER_LABEL_HEIGHT, geometry.counterLabelHeight());
+        assertEquals(PackAssets.COUNTER_FRAME_HEIGHT, geometry.counterFrameHeight());
+        assertEquals(PackAssets.COUNTER_DIGIT_HEIGHT, geometry.counterDigitHeight());
+        assertEquals(PackAssets.COUNTER_LABEL_ASCENT, geometry.counterLabelAscent());
+        assertEquals(PackAssets.COUNTER_FRAME_TOP_DELTA, geometry.counterFrameTopDelta());
+        assertEquals(PackAssets.COUNTER_DIGIT_INSET, geometry.counterDigitInset());
+
+        TrickHudPreview.CounterSnapshot fixture = TrickHudPreview.counterSnapshot();
+        assertEquals(CardRank.values().length, geometry.counters().size());
+        for (CardRank rank : CardRank.values()) {
+            DebugHudConfigController.PreviewGeometry.CounterGeometry cell = geometry.counters().get(rank.ordinal());
+            assertEquals(fixture.remaining(rank), cell.remaining(), rank + " 的 Web fixture 剩余数必须和调试棒一致");
+            assertEquals(fixture.played(rank), cell.playedCount(), rank + " 的 Web fixture 已出数必须和调试棒一致");
+            assertEquals(fixture.exhausted(rank), cell.exhausted(), rank + " 的 Web fixture 耗尽状态必须和调试棒一致");
+        }
+        assertEquals(0, geometry.counters().get(CardRank.THREE.ordinal()).playedCount(), "fixture 必须覆盖 0 已出");
+        assertEquals(1, geometry.counters().get(CardRank.FOUR.ordinal()).playedCount(), "fixture 必须覆盖 1 已出");
+        assertEquals(4, geometry.counters().get(CardRank.FIVE.ordinal()).playedCount(), "fixture 必须覆盖普通牌 4 已出");
+        assertEquals(0, geometry.counters().get(CardRank.SMALL_JOKER.ordinal()).playedCount(), "fixture 必须覆盖小王未出");
+        assertEquals(1, geometry.counters().get(CardRank.BIG_JOKER.ordinal()).playedCount(), "fixture 必须覆盖大王已出");
+    }
+
+    @Test
+    void sampleCardsFixtureHasFiveCardsMatchingDebugStick() {
+        // TrickHudPreview 公开的 5 张固定牌——调试棒与 Web 预览同源
+        List<linmumua.doudizhu.model.DoudizhuCard> cards = TrickHudPreview.sampleCards();
+        assertEquals(5, cards.size(), "必须恰好 5 张牌：10/J/Q/小王/大王");
+        assertEquals(CardRank.TEN, cards.get(0).rank(), "第 1 张必须是 10");
+        assertEquals(CardRank.JACK, cards.get(1).rank(), "第 2 张必须是 J");
+        assertEquals(CardRank.QUEEN, cards.get(2).rank(), "第 3 张必须是 Q");
+        assertEquals(CardRank.SMALL_JOKER, cards.get(3).rank(), "第 4 张必须是小王");
+        assertEquals(CardRank.BIG_JOKER, cards.get(4).rank(), "第 5 张必须是大王");
+    }
+
+    @Test
+    void sampleCardFixturesInGeometryMatchTrickHudPreview() {
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+        List<DebugHudConfigController.PreviewGeometry.CardFixture> fixtures = geometry.sampleCards();
+
+        assertEquals(5, fixtures.size(), "几何中的样例牌必须恰好 5 张");
+        List<linmumua.doudizhu.model.DoudizhuCard> source = TrickHudPreview.sampleCards();
+        for (int i = 0; i < 5; i++) {
+            DebugHudConfigController.PreviewGeometry.CardFixture fixture = fixtures.get(i);
+            assertEquals(source.get(i).displayLabel(), fixture.label(),
+                "fixture[" + i + "].label 必须和 TrickHudPreview 同源");
+            assertEquals(source.get(i).rank().label(), fixture.rank(),
+                "fixture[" + i + "].rank 必须和 TrickHudPreview 同源");
+        }
+    }
+
+    @Test
+    void avatarLayoutsProvideAllScaleOutlineCombinations() {
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+        List<DebugHudConfigController.PreviewGeometry.AvatarLayoutGeometry> layouts = geometry.avatarLayouts();
+
+        int expectedScales = PackAssets.AVATAR_PIXEL_MAX_SCALE - PackAssets.AVATAR_PIXEL_MIN_SCALE + 1;
+        // 每个 scale 都有 outlined=true 和 outlined=false 两种组合
+        assertEquals(expectedScales * 2, layouts.size(),
+            "avatarLayouts 必须覆盖所有合法 scale × outline 组合");
+
+        for (DebugHudConfigController.PreviewGeometry.AvatarLayoutGeometry layout : layouts) {
+            assertEquals(3, layout.slots().size(), "每个 layout 必须有 3 个槽");
+            assertTrue(layout.slotWidth() > 0, "slotWidth 必须为正数");
+            assertTrue(layout.rowHeight() > 0, "rowHeight 必须为正数");
+            // 三槽统一宽度
+            for (DebugHudConfigController.PreviewGeometry.AvatarSlotGeometry slot : layout.slots()) {
+                assertEquals(layout.slotWidth(), slot.slotWidth(),
+                    "三个槽的 slotWidth 必须相同");
+            }
+            // 左右 side 固定 scale=4
+            assertEquals(4, layout.slots().get(0).scale(), "左槽固定 scale=4");
+            assertEquals(4, layout.slots().get(2).scale(), "右槽固定 scale=4");
+            // 中间 scale 必须等于 layout 的 middleScale
+            assertEquals(layout.middleScale(), layout.slots().get(1).scale(),
+                "中间槽 scale 必须等于 layout.middleScale");
+            // 中间必须有王冠
+            assertTrue(layout.slots().get(1).crowned(), "中间槽必须标记 crowned");
+        }
+    }
+
+    @Test
+    void avatarSlotGeometryUsesPlayerHeadRendererAdvance() {
+        // 验证 contentAdvance 与 PlayerHeadRenderer.advanceWidth 对齐
+        // 使用 avatarLayouts 表（包含所有 scale/outline 组合），不调用私有方法
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+        for (DebugHudConfigController.PreviewGeometry.AvatarLayoutGeometry layout : geometry.avatarLayouts()) {
+            int scale = layout.middleScale();
+            boolean outlined = layout.outlined();
+            List<DebugHudConfigController.PreviewGeometry.AvatarSlotGeometry> slots = layout.slots();
+            assertEquals(3, slots.size());
+            // 中间槽
+            int expectedMiddle = linmumua.doudizhu.assets.PlayerHeadRenderer.advanceWidth(scale, outlined);
+            assertEquals(expectedMiddle, slots.get(1).contentAdvance(),
+                "中间槽(scale=" + scale + ",outlined=" + outlined + ") contentAdvance 必须等于 PlayerHeadRenderer.advanceWidth");
+            // 侧边 scale=4
+            int expectedSide = linmumua.doudizhu.assets.PlayerHeadRenderer.advanceWidth(4, outlined);
+            assertEquals(expectedSide, slots.get(0).contentAdvance(),
+                "侧边槽(outlined=" + outlined + ") contentAdvance 必须等于 PlayerHeadRenderer.advanceWidth(4, " + outlined + ")");
+        }
     }
 }

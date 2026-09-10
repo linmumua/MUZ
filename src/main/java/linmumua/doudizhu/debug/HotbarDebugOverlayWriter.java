@@ -47,12 +47,6 @@ import java.util.Objects;
 public final class HotbarDebugOverlayWriter {
     private static final String CRAFT_ENGINE_PLUGIN = "CraftEngine";
 
-    /**
-     * CraftEngine 26.x 的无参数 {@code ce reload} 只重载配置，不会重建客户端资源包。
-     * 覆盖层改了字形 ascent，直接请求 {@code pack} 才会生成新的 resource_pack.zip。
-     */
-    static final String CRAFT_ENGINE_RELOAD_COMMAND = "ce reload pack";
-
     /** 覆盖层的命名空间与目录名，刻意与 bundle 的 {@code muz} 区分开。 */
     private static final String OVERLAY_NAMESPACE = "muz_hotbar_debug";
 
@@ -160,39 +154,22 @@ public final class HotbarDebugOverlayWriter {
      * 在指定异步执行器中等待写出覆盖层资源。调用方负责后续在主线程触发 CraftEngine 重载。
      */
     public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
-                                                                        java.util.concurrent.Executor executor) {
-        int clamped = clampOffsetY(offsetY);
-        return java.util.concurrent.CompletableFuture.supplyAsync(() -> writeNow(root, clamped), executor);
+                                                                       java.util.concurrent.Executor executor) {
+        return writeAsync(root, offsetY, executor, () -> true);
     }
 
     /**
-     * 异步写出覆盖层资源，写完后切回主线程触发 CraftEngine 重载。
-     *
-     * <p>【必须异步】：这里有建目录与两次文件写入，主线程 I/O 是明令禁止的。
-     * 回调里的 {@code /ce reload pack} 又必须在主线程执行（Bukkit 命令分发不是线程安全的），
-     * 所以是「异步写盘 → 切主线程重载资源包并重建客户端 ZIP」两段。
-     *
-     * @param offsetY   垂直偏移，正数向下；内部会钳位
-     * @param onApplied 主线程回调，参数是实际采用的（钳位后的）offsetY；可为 null
+     * 带任务有效性检查的异步写出。检查放在真正文件 I/O 所在线程，并且紧邻 writeNow，
+     * 这样关闭或超时后已经排队但尚未开始的写盘不会继续落地旧状态。
      */
-    public void writeAsync(int offsetY, java.util.function.IntConsumer onApplied) {
+    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
+                                                                       java.util.concurrent.Executor executor,
+                                                                       java.util.function.BooleanSupplier active) {
         int clamped = clampOffsetY(offsetY);
-        // 先在主线程解析 CraftEngine 数据目录，异步阶段只接触已解析 Path。
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            Path root = overlayRoot();
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                boolean written = writeNow(root, clamped);
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (written) {
-                        reloadCraftEngine();
-                    }
-                    if (onApplied != null) {
-                        onApplied.accept(clamped);
-                    }
-                });
-            });
-        });
+        return java.util.concurrent.CompletableFuture.supplyAsync(
+            () -> active.getAsBoolean() && writeNow(root, clamped), executor);
     }
+
 
     /**
      * 同步写出覆盖层资源；仅保留给旧调用点，实际异步流程必须先在主线程解析 Path。
@@ -236,7 +213,7 @@ public final class HotbarDebugOverlayWriter {
             plugin.getLogger().info("hotbar 调试覆盖层已写出，offset-y=" + clampOffsetY(offsetY)
                 + "（ascent=" + ascentFor(offsetY) + "）：" + root);
             return true;
-        } catch (IOException exception) {
+        } catch (Exception exception) {
             try {
                 if (packTemp != null) {
                     Files.deleteIfExists(packTemp);
@@ -244,7 +221,7 @@ public final class HotbarDebugOverlayWriter {
                 if (imagesTemp != null) {
                     Files.deleteIfExists(imagesTemp);
                 }
-            } catch (IOException cleanupException) {
+            } catch (Exception cleanupException) {
                 plugin.getLogger().warning("清理 hotbar 调试覆盖层临时文件失败：" + cleanupException.getMessage());
             }
             // 不吞异常：写失败时垂直偏移不会生效，必须让服主看到原因
@@ -276,33 +253,4 @@ public final class HotbarDebugOverlayWriter {
         return craftEngine.getDataFolder().toPath().resolve("resources").resolve(OVERLAY_NAMESPACE);
     }
 
-    /**
-     * 触发 CraftEngine 重新加载并重打包资源包。
-     *
-     * <p>走控制台命令分发而不是反射调 CraftEngine 内部 API：命令是它的公开契约，
-     * 内部类名在版本间会变。这个模式仓库里已有先例（{@code CeActionExecutor} 执行
-     * 配置里的命令时也是 {@code dispatchCommand(getConsoleSender(), ...)}）。
-     *
-     * <p>【必须在主线程调用】。重载完成后客户端还需要重新下载资源包才能看到新 ascent，
-     * 是否需要玩家手动重新接受取决于 CraftEngine 的下发设置。
-     */
-    /** 在主线程触发 CraftEngine 完整重载，并返回命令分发结果。 */
-    boolean reloadCraftEngineOnMainThread() {
-        try {
-            boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), CRAFT_ENGINE_RELOAD_COMMAND);
-            if (dispatched) {
-                plugin.getLogger().info("已触发 CraftEngine 完整重载并重建客户端资源包，客户端可能需要重新下载才能看到新的垂直偏移。");
-            } else {
-                plugin.getLogger().warning("CraftEngine 重载命令未被接受，未应用 HUD 运行态。");
-            }
-            return dispatched;
-        } catch (RuntimeException exception) {
-            plugin.getLogger().warning("触发 CraftEngine 完整重载失败，请手动执行 /ce reload all：" + exception.getMessage());
-            return false;
-        }
-    }
-
-    private void reloadCraftEngine() {
-        reloadCraftEngineOnMainThread();
-    }
 }

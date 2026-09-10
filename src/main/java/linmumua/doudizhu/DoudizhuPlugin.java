@@ -2467,7 +2467,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         ItemMeta meta = item.getItemMeta();
         meta.displayName(MuzTheme.accent("MUZ 记牌器"));
         meta.lore(List.of(
-            MuzTheme.muted("带在身上时，HUD 底部显示每个点数还剩几张。"),
+            MuzTheme.muted("带在身上时，HUD 底部显示每个点数累计已出几张。"),
             MuzTheme.muted("放在背包任意位置都生效，不影响同桌其他人。"),
             MuzTheme.muted("想临时关闭时移出背包即可。")
         ));

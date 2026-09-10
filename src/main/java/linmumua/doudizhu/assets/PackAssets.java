@@ -107,27 +107,66 @@ public final class PackAssets {
     public static final String AVATAR_CROWN_FONT = "minecraft:muz_avatar_crown";
 
     /**
-     * 记牌行字形族的基础字体名。
+     * 记牌器分层字形族的基础字体名。
      *
-     * <p>一档 50 个码位，从 {@link #COUNTER_GLYPH_CODEPOINT_START}（{@code 0xE900}）起，
-     * 共 201 档。一张字体从 0xE900 起能装 {@code (0xFFFD - 0xE900 + 1) / 50 = 117} 档，
-     * 201 档切成 2 张（{@code muz_counter}、{@code muz_counter_2}），末码位 {@code 0xFFD9}，
-     * 名字规则同其他族。
+     * <p>每档固定 22 个码位：15 个点数标签、0..4 五个数字、普通框、耗尽框。
+     * 码位从 {@link #COUNTER_GLYPH_CODEPOINT_START}（{@code 0xE900}）起，按
+     * {@code tier * 22 + layerIndex} 连续分配；构建期与运行期使用同一算式。
      */
     public static final String COUNTER_GLYPH_FONT = "minecraft:muz_counter";
 
-    /**
-     * 记牌行字形族的码位起点。
-     *
-     * <p>与构建期 {@code counterGlyphCodepointStart = 0xE900} 保持一致；
-     * {@link #counterGlyphFont} 和 {@link #counterGlyphChar} 用它做偏移基准。
-     */
+    /** 记牌器分层字形族的码位起点，必须与 build.gradle.kts 的 counterGlyphCodepointStart 一致。 */
     public static final int COUNTER_GLYPH_CODEPOINT_START = 0xE900;
+
+    /** 记牌器每档的标签层数量；顺序必须保持 CardRank 枚举序。 */
+    public static final int COUNTER_LABEL_COUNT = PackTiers.COUNTER_RANK_GLYPHS;
+
+    /** 记牌器数字层只生成累计已出张数 0..4。 */
+    public static final int COUNTER_DIGIT_COUNT = PackTiers.COUNTER_DIGIT_GLYPHS;
+
+    /** 标签层视觉尺寸（像素），必须与构建期 PNG 和 images.yml 同源。 */
+    public static final int COUNTER_LABEL_WIDTH = PackTiers.COUNTER_LABEL_WIDTH;
+    public static final int COUNTER_LABEL_HEIGHT = PackTiers.COUNTER_LABEL_HEIGHT;
+
+    /** 数字层视觉尺寸（像素），必须与构建期 PNG 和 images.yml 同源。 */
+    public static final int COUNTER_DIGIT_WIDTH = PackTiers.COUNTER_DIGIT_WIDTH;
+    public static final int COUNTER_DIGIT_HEIGHT = PackTiers.COUNTER_DIGIT_GLYPH_HEIGHT;
+
+    /** 普通框/耗尽框视觉尺寸（像素），必须与构建期 PNG 和 images.yml 同源。 */
+    public static final int COUNTER_FRAME_WIDTH = PackTiers.COUNTER_FRAME_WIDTH;
+    public static final int COUNTER_FRAME_HEIGHT = PackTiers.COUNTER_FRAME_HEIGHT;
+
+    /** 分层记牌器 ascent 基准：label=16、frame=-4、digit=-7，均再减头像下移档。 */
+    public static final int COUNTER_LABEL_ASCENT = PackTiers.COUNTER_LABEL_ASCENT;
+    public static final int COUNTER_FRAME_ASCENT = PackTiers.COUNTER_FRAME_ASCENT;
+    public static final int COUNTER_DIGIT_ASCENT = PackTiers.COUNTER_DIGIT_ASCENT;
+
+    /** 记牌器三层字形统一的水平前进量（像素）。 */
+    public static final int COUNTER_GLYPH_ADVANCE = PackTiers.COUNTER_GLYPH_ADVANCE;
+
+    /** 记牌器每档字形数量：标签 15 + 普通/耗尽框 2 + 数字 5。 */
+    public static final int COUNTER_GLYPHS_PER_TIER = PackTiers.COUNTER_GLYPHS_PER_TIER;
+
+    /** 记牌器框层数量：普通框与耗尽框，必须与构建期生成表同源。 */
+    public static final int COUNTER_FRAME_COUNT = PackTiers.COUNTER_FRAME_GLYPHS;
+
+    /** 数字层在每档中的下标为 15..19，与 build.gradle.kts 的码位表一致。 */
+    public static final int COUNTER_DIGIT_START_INDEX = COUNTER_LABEL_COUNT;
+
+    /** 框层下标为 20..21；码位表顺序不限制 View 按 label → frame → digit 绘制。 */
+    public static final int COUNTER_FRAME_START_INDEX = COUNTER_LABEL_COUNT + COUNTER_DIGIT_COUNT;
+
+    /** 固定 cell 几何供 View 与 Debug Web 共用，全部由生成的层尺寸及 ascent 推导。 */
+    public static final int COUNTER_CELL_WIDTH = COUNTER_LABEL_WIDTH;
+    public static final int COUNTER_CELL_ADVANCE = COUNTER_GLYPH_ADVANCE;
+    public static final int COUNTER_FRAME_TOP_DELTA = COUNTER_LABEL_ASCENT - COUNTER_FRAME_ASCENT;
+    public static final int COUNTER_DIGIT_INSET = COUNTER_FRAME_ASCENT - COUNTER_DIGIT_ASCENT;
+    public static final int COUNTER_CELL_HEIGHT = COUNTER_FRAME_TOP_DELTA + COUNTER_FRAME_HEIGHT;
 
     /**
      * 底部物品栏 HUD 字形族的字体名与码位。
      *
-     * <p>单张静态字形（无偏移档），用于在 ActionBar 中渲染 5 个物品槽背景，
+     * <p>单张静态字形（无偏移档），用于在 ActionBar 中渲染 9 个物品槽背景，
      * 通过负 ascent 把贴图压到屏幕底部物品栏区域显示。
      *
      * <p>必须与 build.gradle.kts 里的 {@code hotbarHudFont} 和 {@code hotbarHudCodepoint}
@@ -140,13 +179,13 @@ public final class PackAssets {
     /** 底部物品栏字形码位（对应贴图文件 {@code muz:font/hotbar_slots.png}）。 */
     public static final int HOTBAR_HUD_CODEPOINT = 0xEF00;
 
-    /** PLAYING 阶段中央显示的彩色调试槽数；必须与构建期绘图常量一致。 */
-    public static final int HOTBAR_HUD_SLOT_COUNT = 5;
+    /** PLAYING 阶段显示的九个彩色调试槽；必须与构建期绘图常量一致。 */
+    public static final int HOTBAR_HUD_SLOT_COUNT = 9;
 
     /**
      * 底部物品栏遮罩字形的贴图宽度，固定为原版 9 槽 hotbar 的 182px。
      *
-     * <p>中央 5 槽占 108px（5 × 20px + 4 × 2px），左右各 37px 为不透明深色遮罩。
+     * <p>九个槽块各为 18×20px，位于 x=2,22,...,162；底色填满 182×22 遮罩。
      * 该遮罩只由 PLAYING 阶段 ActionBar 推送，不修改 minecraft 原版 hotbar sprite。
      */
     public static final int HOTBAR_HUD_GLYPH_WIDTH = 182;
@@ -276,18 +315,14 @@ public final class PackAssets {
     }
 
     /**
-     * 记牌行字形在这一档该用哪张字体。
+     * 记牌行字形使用的字体。
      *
-     * <p>记牌族复用【头像的偏移档表】（{@link #avatarDownOffsetAt}）—— 记牌行和头像行
-     * 在同一片 HUD 上按同一套锚点下沉，共用一张表才不会上下错开。
-     *
-     * <p>一档 50 个码位、117 档/张，201 档切成 2 张。调用方【必须用这个方法取字体名】，
-     * 不能写死 {@link #COUNTER_GLYPH_FONT} —— 那只是第 0 张的名字。
+     * <p>记牌器按 {@code 0xE900 + tier * 22 + layerIndex} 直接分配码位，当前资源档位
+     * 全部位于同一张 {@code muz_counter} 字体中；字体名必须与构建期 YAML 同源。
      */
     public static String counterGlyphFont(int downOffsetTier) {
-        return fontNameOf(
-            COUNTER_GLYPH_FONT, downOffsetTier,
-            PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START);
+        avatarDownOffsetAt(downOffsetTier);
+        return COUNTER_GLYPH_FONT;
     }
 
     public static final int CARD_GLYPH_CODEPOINT_START = 0xE100;
@@ -904,57 +939,118 @@ public final class PackAssets {
         return "avatar_crown_" + scale + "_" + row + "_d" + avatarDownOffsetAt(downOffsetTier);
     }
 
-    /**
-     * 记牌行点数字形字符（默认档，不下移）。
-     *
-     * <p>返回的是裸字符，调用方需套 {@code <font:} {@link #counterGlyphFont}(0) {@code >} 标签。
-     *
-     * @param rank 牌的点数
-     * @param dim  {@code true} 表示已出完（暗版），{@code false} 表示亮版
-     */
-    public static String counterRankChar(CardRank rank, boolean dim) {
-        return counterRankChar(rank, dim, 0);
+    /** 记牌器标签层字形字符（默认头像下移档）。 */
+    public static String counterRankChar(CardRank rank) {
+        return counterRankChar(rank, 0);
     }
 
     /**
-     * 记牌行点数字形字符（指定向下偏移档）。
+     * 记牌器标签层字形字符。
      *
-     * <p>下标布局：亮版 = {@code rank.ordinal()}，暗版 = {@code rank.ordinal() + RANK}。
-     * 复用头像偏移档表（{@link #avatarDownOffsetAt}），记牌行与头像行按同一套锚点下沉。
+     * <p>每档标签层只占 15 个码位，顺序严格沿用 {@link CardRank#ordinal()}；耗尽状态
+     * 不再复制一套暗色标签，而是由调用方叠加 {@link #counterFrameChar(boolean, int)}。
      */
-    public static String counterRankChar(CardRank rank, boolean dim, int downOffsetTier) {
-        int index = rank.ordinal() + (dim ? PackTiers.COUNTER_RANK_GLYPHS : 0);
-        avatarDownOffsetAt(downOffsetTier); // 越界校验
-        return new String(Character.toChars(
-            tierCodepointBase(downOffsetTier, PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START)
-                + index));
-    }
-
-    /**
-     * 记牌行数字字形字符（默认档，不下移）。
-     *
-     * @param digit 0~9
-     * @param dim   {@code true} 表示暗版
-     */
-    public static String counterDigitChar(int digit, boolean dim) {
-        return counterDigitChar(digit, dim, 0);
-    }
-
-    /**
-     * 记牌行数字字形字符（指定向下偏移档）。
-     *
-     * <p>下标布局：亮数字起点 = {@code 2 * RANK}，暗数字再加 {@code DIGIT}。
-     */
-    public static String counterDigitChar(int digit, boolean dim, int downOffsetTier) {
-        if (digit < 0 || digit > 9) {
-            throw new IllegalArgumentException("数字字形下标越界（0..9）：" + digit);
+    public static String counterRankChar(CardRank rank, int downOffsetTier) {
+        if (rank == null) {
+            throw new IllegalArgumentException("记牌器点数不能为空");
         }
-        int base = 2 * PackTiers.COUNTER_RANK_GLYPHS;
-        int index = base + (dim ? PackTiers.COUNTER_DIGIT_GLYPHS : 0) + digit;
-        avatarDownOffsetAt(downOffsetTier); // 越界校验
+        avatarDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(rank.ordinal(), downOffsetTier);
+    }
+
+    /** 记牌器数字层字形字符（仅支持累计已出张数 0..4）。 */
+    public static String counterDigitChar(int digit) {
+        return counterDigitChar(digit, 0);
+    }
+
+    /** 记牌器数字层字形字符（指定头像下移档）。 */
+    public static String counterDigitChar(int digit, int downOffsetTier) {
+        if (digit < 0 || digit >= COUNTER_DIGIT_COUNT) {
+            throw new IllegalArgumentException("记牌器数字下标越界（0.." + (COUNTER_DIGIT_COUNT - 1) + "）：" + digit);
+        }
+        avatarDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(COUNTER_DIGIT_START_INDEX + digit, downOffsetTier);
+    }
+
+    /** 记牌器框层字形字符；exhausted=true 时使用耗尽框。 */
+    public static String counterFrameChar(boolean exhausted) {
+        return counterFrameChar(exhausted, 0);
+    }
+
+    /** 记牌器框层字形字符（指定头像下移档）。 */
+    public static String counterFrameChar(boolean exhausted, int downOffsetTier) {
+        avatarDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(COUNTER_FRAME_START_INDEX + (exhausted ? 1 : 0), downOffsetTier);
+    }
+
+    /** 分层记牌器字形在 images.yml 中的条目名。 */
+    public static String counterRankAssetName(CardRank rank, int downOffsetTier) {
+        return "counter_label_" + counterRankSlug(rank) + "_d" + avatarDownOffsetAt(downOffsetTier);
+    }
+
+    /** 分层记牌器数字字形在 images.yml 中的条目名。 */
+    public static String counterDigitAssetName(int digit, int downOffsetTier) {
+        if (digit < 0 || digit >= COUNTER_DIGIT_COUNT) {
+            throw new IllegalArgumentException("记牌器数字下标越界（0.." + (COUNTER_DIGIT_COUNT - 1) + "）：" + digit);
+        }
+        return "counter_digit_" + digit + "_d" + avatarDownOffsetAt(downOffsetTier);
+    }
+
+    /** 分层记牌器框字形在 images.yml 中的条目名。 */
+    public static String counterFrameAssetName(boolean exhausted, int downOffsetTier) {
+        return "counter_frame_" + (exhausted ? "exhausted" : "normal")
+            + "_d" + avatarDownOffsetAt(downOffsetTier);
+    }
+
+    private static String counterGlyphChar(int index, int downOffsetTier) {
         return new String(Character.toChars(
-            tierCodepointBase(downOffsetTier, PackTiers.COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START)
-                + index));
+            tierCodepointBase(downOffsetTier, COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START) + index));
+    }
+
+    private static String counterRankSlug(CardRank rank) {
+        return switch (rank) {
+            case THREE -> "3";
+            case FOUR -> "4";
+            case FIVE -> "5";
+            case SIX -> "6";
+            case SEVEN -> "7";
+            case EIGHT -> "8";
+            case NINE -> "9";
+            case TEN -> "10";
+            case JACK -> "j";
+            case QUEEN -> "q";
+            case KING -> "k";
+            case ACE -> "a";
+            case TWO -> "2";
+            case SMALL_JOKER -> "small";
+            case BIG_JOKER -> "big";
+        };
+    }
+
+    /**
+     * 兼容旧调用方式：分层资源不再生成亮/暗两套组合图，dim 仅保留参数兼容并由框层表达耗尽状态。
+     */
+    @Deprecated
+    public static String counterRankChar(CardRank rank, boolean dim) {
+        return counterRankChar(rank, 0);
+    }
+
+    /** 兼容旧调用方式；数字层仅有 0..4，dim 参数不再参与码位。 */
+    @Deprecated
+    public static String counterDigitChar(int digit, boolean dim) {
+        return counterDigitChar(digit, 0);
+    }
+
+    /** 兼容旧调用方式；数字层仅有 0..4，dim 参数不再参与码位。 */
+    @Deprecated
+    public static String counterDigitChar(int digit, boolean dim, int downOffsetTier) {
+        return counterDigitChar(digit, downOffsetTier);
+    }
+
+    /** 兼容旧调用方式；dim 参数不再参与码位。 */
+    @Deprecated
+    public static String counterRankChar(CardRank rank, boolean dim, int downOffsetTier) {
+        return counterRankChar(rank, downOffsetTier);
     }
 
     /**

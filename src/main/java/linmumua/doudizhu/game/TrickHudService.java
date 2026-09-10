@@ -1,6 +1,7 @@
 package linmumua.doudizhu.game;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -8,7 +9,6 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
-import linmumua.doudizhu.assets.PackTiers;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
 import linmumua.doudizhu.config.MuzYamlConfig;
@@ -128,8 +128,8 @@ final class TrickHudService {
      *                       有人只想要「谁出了什么」而嫌记牌器占地方或觉得降低难度，
      *                       关它不该连整条 HUD 一起关掉
      * @param counterGap     记牌器相邻两格的间距。各格自身宽度【不在这里配】：
-     *                       它由剩余张数的实际位数决定（剩 4 张一位数、剩 10 张以上两位数），
-     *                       是算出来的而不是配出来的，配一个固定宽反而会让两位数互相压字
+     *                       标签、框、数字三层位图固定为 33px 视觉宽度、34px 前进量，
+     *                       不随累计已出数量变化；固定宽度才能让 15 格位置始终稳定
      * @param counterHideExhausted 某个点数出完（剩 0 张）时是否隐藏那一格。
      *                       【隐藏的只是内容，不是位置】：那一格照样占住它的宽度，
      *                       否则后面所有格子会左移、玩家靠位置扫读的习惯就废了
@@ -488,7 +488,10 @@ final class TrickHudService {
     }
 
     /**
-     * 带记牌器读数的渲染入口。
+     * 带记牌器读数的兼容渲染入口。
+     *
+     * <p>调用方只给剩余张数时，累计已出数量必须由「初始牌数 - 剩余张数」即时推导，
+     * 不能把剩余张数复用成显示数字；这样既不引入第二份可变状态，也和 GameTable 的正式路由一致。
      *
      * @param remainingCounts 每个点数还剩几张；空表示不画记牌行
      */
@@ -500,14 +503,30 @@ final class TrickHudService {
         List<DoudizhuCard> cards,
         Map<CardRank, Integer> remainingCounts
     ) {
-        // 调试棒是玩家级覆盖：没有覆盖时插件 API 返回 7，正式 HUD 的默认语义不变。
-        render(viewer, previous, current, next, cards, remainingCounts,
+        render(viewer, previous, current, next, cards, playedCountsFromRemaining(remainingCounts), remainingCounts,
+            plugin.hudRowOverride(viewer.getUniqueId()), false);
+    }
+
+    /** 正式牌桌路由：计牌器显示累计已出数量，剩余数量仅用于耗尽/隐藏判断。 */
+    void render(
+        Player viewer,
+        Seat previous,
+        Seat current,
+        Seat next,
+        List<DoudizhuCard> cards,
+        Map<CardRank, Integer> playedCounts,
+        Map<CardRank, Integer> remainingCounts
+    ) {
+        render(viewer, previous, current, next, cards, playedCounts, remainingCounts,
             plugin.hudRowOverride(viewer.getUniqueId()), false);
     }
 
     /**
      * 调试预览专用入口：允许只显示指定行，并在不要求玩家携带记牌器时显示样例记牌数据。
      * 正式牌桌调用上面的旧入口，默认三行全开且仍要求玩家持有记牌器。
+     *
+     * <p>这里同样只接收剩余张数，显示用的累计已出数量现场推导，避免调试棒和 Web fixture
+     * 因各自维护一份 played 数据而漂移。
      */
     void render(
         Player viewer,
@@ -519,131 +538,132 @@ final class TrickHudService {
         int visibleRows,
         boolean forceCounterWithoutItem
     ) {
-        // 【整帧只读一次快照】：reload 可能在渲染中途换掉它，读两次就可能前半帧用旧 scale、
-        // 后半帧用新槽宽，画出错位的一帧。存成局部变量后这一帧一定是自洽的。
+        render(viewer, previous, current, next, cards, playedCountsFromRemaining(remainingCounts), remainingCounts,
+            visibleRows, forceCounterWithoutItem);
+    }
+
+    void render(
+        Player viewer,
+        Seat previous,
+        Seat current,
+        Seat next,
+        List<DoudizhuCard> cards,
+        Map<CardRank, Integer> playedCounts,
+        Map<CardRank, Integer> remainingCounts,
+        int visibleRows,
+        boolean forceCounterWithoutItem
+    ) {
         Snapshot current0 = snapshot;
         Settings settings = current0.settings();
         if (!settings.enabled()) {
-            // 服主主动关掉的，静默即正确行为。
             hide(viewer);
             return;
         }
         if (!offsetService.isAvailable()) {
-            // 没有负空格就没法叠牌也没法拼头像，整条 HUD 不显示，避免画出一条横到屏幕外的牌。
-            //
-            // 【这一条必须给玩家可见提示，不能和上面那种情况混在一起】：这是故障而不是
-            // 配置意图。原因写在控制台（CraftEngineOffsetService.warnOnce），玩家端却
-            // 只表现为「HUD 什么都没有」，没有任何线索指向 CraftEngine 没就绪——
-            // 实际排查时这一步耗掉的时间远超其他环节。
             warnOffsetsUnavailableOnce(viewer);
             hide(viewer);
             return;
         }
-        // 名单要在三个槽【之前】算好并整份传下去：皮肤分配必须看到同桌全部 bot 才能保证不重脸，
-        // 逐槽各算一次只能看到自己，两个 bot 就可能撞到同一张皮肤。
-        // 【为什么是「背包里有」而不是「握在主手」】：打牌全程要右键选牌、左键出牌，
-        // 要求主手握着记牌器等于让玩家在「看得到记牌」和「操作顺手」之间二选一。
-        // 背包里有就生效，拿到即可用。预览入口可显式放宽这个玩家级开关。
+        if (visibleRows == 0) {
+            hide(viewer);
+            return;
+        }
+        boolean showCards = (visibleRows & 1) != 0;
+        boolean showAvatars = (visibleRows & 2) != 0;
         boolean showCounter = settings.counterEnabled()
             && (forceCounterWithoutItem || plugin.hasCounterItem(viewer))
             && (visibleRows & 4) != 0;
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
         String line = TrickHudView.buildMiniMessage(
-            (visibleRows & 2) != 0
-                ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier)
-                : TrickHudView.Avatar.EMPTY,
-            (visibleRows & 2) != 0
-                ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier)
-                : TrickHudView.Avatar.EMPTY,
-            (visibleRows & 2) != 0
-                ? avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier)
-                : TrickHudView.Avatar.EMPTY,
-            (visibleRows & 2) != 0 ? current0.avatarSlotWidth() : 0,
+            showAvatars ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? current0.avatarSlotWidth() : 0,
             settings.avatarGap(),
-            (visibleRows & 1) != 0 ? cards : List.of(),
+            showCards ? cards : List.of(),
             settings.cardStep(),
             offsetService::offset,
             settings.heightTier(),
             settings.downOffsetTier(),
             settings.offsetX(),
             settings.rowXOffsets(),
-            showCounter ? counterCells(remainingCounts, settings.counterHideExhausted(), avatarRowDownTier) : List.of(),
+            showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(), avatarRowDownTier) : List.of(),
             settings.counterGap()
         );
         apply(viewer, line);
     }
 
     /**
-     * 把剩余张数摊成记牌行的各格（纯文字渲染版）。
+     * 把累计已出数量摊成固定 15 格分层字形。
      *
-     * <p>【原字形版已改为文字渲染】：不再依赖资源包字形字符（原来走
-     * {@link PackAssets#counterRankChar} / {@link PackAssets#counterDigitChar}），
-     * 改用原生 MiniMessage 颜色标签直接输出：
-     * 上方白字显示点数标签（{@link CardRank#label()}），
-     * 下方灰字显示剩余张数，格间以竖线 {@code │} 分隔，视觉上呈网格（绘制格子）。
+     * <p>每格按「点数标签、框、已出数字」三层生成；View 在层与层之间用
+     * {@code offset(-34)} 叠回同一格，最后一层保留严格 34 像素净前进量。
+     * 剩余数量只负责判断耗尽与是否隐藏，正式 HUD 不再把剩余数当作显示数字。
      *
-     * <p>【亮暗而不是隐藏】：出完的点数改用 {@code <dark_gray>} 渲染（dim 效果），
-     * 格子照常占宽，与原字形版 {@code dim=true} 的视觉行为一致。只有配置显式要求
-     * {@code hideWhenExhausted} 时才留空位，宽度仍照报，后面的格子不左移。
-     *
-     * <p>前进量（advancePixels）基于 Minecraft 默认字体的经验估算
-     * （普通字符约 6px，竖线 │ 约 4px），与原来资源包字形精确像素值不同；
-     * 若排版出现视觉偏差，可通过 {@code trick-hud.counter.gap} 微调。
-     *
-     * @param downOffsetTier    暂时保留，当前文字版未使用（原字形版用于按偏移档选字体）
-     * @param hideWhenExhausted 出完的点数是否只留空位不画内容
+     * @param playedCounts       每个点数累计已出数量
+     * @param remainingCounts    每个点数剩余数量，仅用于耗尽/隐藏判断
+     * @param hideWhenExhausted  出完的点数是否输出空占位
+     * @param downOffsetTier     记牌行的头像下移档
      */
     private List<TrickHudView.CounterCell> counterCells(
+        Map<CardRank, Integer> playedCounts,
         Map<CardRank, Integer> remainingCounts,
         boolean hideWhenExhausted,
         int downOffsetTier
     ) {
-        if (remainingCounts.isEmpty()) {
+        if ((playedCounts == null || playedCounts.isEmpty())
+            && (remainingCounts == null || remainingCounts.isEmpty())) {
             return List.of();
         }
-        // 纯文字格子格式：│<white>点数标签</white><gray>剩余张数</gray>
-        // 每普通字符按 6px 估算前进量，竖线 │ 按 4px 估算；
-        // 与资源包字形的精确像素对齐方式不同，排版偏差可用 trick-hud.counter.gap 补偿。
-        final int CHAR_WIDTH = 6;  // 普通字符估算宽度（px）
-        final int SEP_WIDTH = 4;   // │ 竖线估算宽度（px）
-        List<TrickHudView.CounterCell> cells = new ArrayList<>();
+        Map<CardRank, Integer> played = playedCounts == null ? Map.of() : playedCounts;
+        Map<CardRank, Integer> remaining = remainingCounts == null ? Map.of() : remainingCounts;
+        String font = PackAssets.counterGlyphFont(downOffsetTier);
+        List<TrickHudView.CounterCell> cells = new ArrayList<>(CardRank.values().length);
         for (CardRank rank : CardRank.values()) {
-            Integer left = remainingCounts.get(rank);
-            if (left == null) {
-                continue;
-            }
+            int initial = initialCount(rank);
+            int shown = clampCount(played.getOrDefault(rank, 0), initial);
+            int left = clampCount(remaining.getOrDefault(rank, initial), initial);
             boolean exhausted = left == 0;
-            String label = rank.label();
-            String digits = Integer.toString(left);
-            int advance = SEP_WIDTH + label.length() * CHAR_WIDTH + digits.length() * CHAR_WIDTH;
-            // 出完的点数：格子照样占宽，只是不画内容 —— 让后面的格子不左移，
-            // 这一点由 TrickHudView 的空格子分支负责。
             if (hideWhenExhausted && exhausted) {
-                cells.add(new TrickHudView.CounterCell("", advance));
+                cells.add(new TrickHudView.CounterCell(List.of(), TrickHudView.CounterCell.ADVANCE_PIXELS));
                 continue;
             }
-            // 出完的点数改用暗灰色渲染（dim），与原字形版 dim=true 的视觉效果一致
-            String rankTag = exhausted ? "dark_gray" : "white";
-            String countTag = exhausted ? "dark_gray" : "gray";
-            String text = "<dark_gray>│</dark_gray>"
-                + "<" + rankTag + ">" + label + "</" + rankTag + ">"
-                + "<" + countTag + ">" + digits + "</" + countTag + ">";
-            cells.add(new TrickHudView.CounterCell(text, advance));
+            String frameColor = exhausted ? "dark_gray" : "white";
+            String labelColor = exhausted ? "dark_gray" : "white";
+            String digitColor = exhausted ? "dark_gray" : "gray";
+            String frame = layer(font, PackAssets.counterFrameChar(exhausted, downOffsetTier), frameColor);
+            String label = layer(font, PackAssets.counterRankChar(rank, downOffsetTier), labelColor);
+            String digit = layer(font, PackAssets.counterDigitChar(shown, downOffsetTier), digitColor);
+            // 层顺序固定为 label → frame → digit；View 会把后两层分别用 -34 拉回同一格。
+            cells.add(new TrickHudView.CounterCell(List.of(label, frame, digit), TrickHudView.CounterCell.ADVANCE_PIXELS));
         }
         return cells;
     }
 
-    /**
-     * 点数字形的前进量。「10」与双王画的是双宽图，其余是单宽。
-     *
-     * <p>这个分档必须与构建期 {@code rankGlyphWidth} 的判定一致，否则行宽算歪、整行居中偏移。
-     */
-    private static int counterRankAdvance(CardRank rank) {
-        return switch (rank) {
-            case TEN, SMALL_JOKER, BIG_JOKER -> PackTiers.COUNTER_GLYPH_WIDE_WIDTH;
-            default -> PackTiers.COUNTER_GLYPH_WIDTH;
-        };
+    static Map<CardRank, Integer> playedCountsFromRemaining(Map<CardRank, Integer> remainingCounts) {
+        if (remainingCounts == null || remainingCounts.isEmpty()) {
+            return Map.of();
+        }
+        EnumMap<CardRank, Integer> played = new EnumMap<>(CardRank.class);
+        for (CardRank rank : CardRank.values()) {
+            int initial = initialCount(rank);
+            int left = clampCount(remainingCounts.getOrDefault(rank, initial), initial);
+            played.put(rank, initial - left);
+        }
+        return Map.copyOf(played);
+    }
+
+    private static int initialCount(CardRank rank) {
+        return rank.isJoker() ? 1 : 4;
+    }
+
+    private static int clampCount(int value, int initial) {
+        return Math.max(0, Math.min(initial, value));
+    }
+
+    private static String layer(String font, String glyph, String color) {
+        return "<" + color + "><font:" + font + ">" + glyph + "</font></" + color + ">";
     }
 
     /**

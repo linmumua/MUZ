@@ -56,9 +56,9 @@ public final class GameTable {
     /**
      * 记牌器的数据源：每个点数还剩几张没被打出来。
      *
-     * <p>【为什么记「剩余」而不是「已出」】：HUD 要显示的就是剩余张数，
-     * 存已出还得每次减一遍，两处算式容易走岔。发牌时按整副牌初始化，
-     * 出牌时扣减，读的时候直接给。
+     * <p>【为什么内部仍记「剩余」】：HUD 对外显示累计已出张数，
+     * 但内部只保留剩余张数这一份可变状态，由初始牌数减剩余数即时推导，避免两处算式走岔。
+     * 发牌时按整副牌初始化，出牌时扣减，读取时再生成两种只读快照。
      *
      * <p>【底牌为什么不在这里单独扣减】：底牌会被
      * {@link #appendBottomCardsToLandlord} 并进地主手牌，将来由地主打出去，
@@ -1774,7 +1774,14 @@ public final class GameTable {
             return;
         }
         List<TrickHudService.Seat> trio = trickHudSeats();
-        trickHud.render(viewer, trio.get(0), trio.get(1), trio.get(2), currentTrickCards, getRemainingCounts());
+        trickHud.render(
+            viewer,
+            trio.get(0),
+            trio.get(1),
+            trio.get(2),
+            currentTrickCards,
+            getPlayedCounts(),
+            getRemainingCounts());
     }
 
     /**
@@ -2006,12 +2013,33 @@ public final class GameTable {
     }
 
     /**
-     * 记牌器读数：每个点数还剩几张没被打出来。
+     * 记牌器内部快照：每个点数还剩几张没被打出来。
      *
-     * <p>牌局没开始时返回空表，调用方据此判断「现在没什么可记的」。
+     * <p>正式 HUD 显示的是累计已出张数；此方法保留给耗尽判断和兼容调用方。
+     * 牌局没开始时返回空表，调用方据此判断「现在没什么可记的」。
      */
     public Map<CardRank, Integer> getRemainingCounts() {
         return Map.copyOf(remainingRankCounts);
+    }
+
+    /**
+     * 记牌器读数：每个点数累计已经打出的张数。
+     *
+     * <p>不另存一份可变计数；由整副牌初始数量减去剩余数量推导，并把结果钳制在
+     * {@code 0..初始数量}。牌局未开始时与剩余快照一样返回空快照。
+     */
+    public Map<CardRank, Integer> getPlayedCounts() {
+        if (remainingRankCounts.isEmpty()) {
+            return Map.of();
+        }
+        EnumMap<CardRank, Integer> played = new EnumMap<>(CardRank.class);
+        for (CardRank rank : CardRank.values()) {
+            int initial = rank.isJoker() ? 1 : 4;
+            int remaining = remainingRankCounts.getOrDefault(rank, initial);
+            int count = initial - remaining;
+            played.put(rank, Math.max(0, Math.min(initial, count)));
+        }
+        return Map.copyOf(played);
     }
 
     private boolean hasSpring(boolean landlordWin) {

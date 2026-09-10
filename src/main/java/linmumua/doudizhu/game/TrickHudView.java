@@ -13,7 +13,7 @@ import linmumua.doudizhu.model.DoudizhuCard;
  * <pre>
  *         [ 牌 牌 牌 ]          上排：桌上最后打出的那手牌
  *    (小)    ( 大 )    (小)     中排：上一位 / 当前该出牌的人 / 下一位
- *   3⁴4⁴5⁴…K⁴A⁴2⁴ 小¹大¹        下排：记牌器，每个点数还剩几张
+ *   3⁰4¹5⁴…K⁰A⁰2⁰ 小⁰大¹        下排：记牌器，每个点数本局累计已出几张
  * </pre>
  *
  * <p>「两行」是靠字形自带的 ascent 实现的，不是真的换行：BossBar 标题只有一行文本，
@@ -28,8 +28,8 @@ import linmumua.doudizhu.model.DoudizhuCard;
  * BossBar 标题由客户端按【文本总宽】自动居中，负空格计入总宽，所以只要偏移量和被抵掉的
  * 前进量严格相等，客户端算出的总宽就等于实际视觉宽度，居中自然正确。
  *
- * <p>但客户端只按总宽居中【一次】：各行宽度不同（上排随张数变，中排三槽固定，
- * 下排随剩余张数的位数变），直接各自从行首画的话，窄的行会靠左。所以这里取
+     * <p>但客户端只按总宽居中【一次】：各行宽度不同（上排随张数变，中排三槽固定，
+     * 下排是固定 15 个分层 cell 加格间距），直接各自从行首画的话，窄的行会靠左。所以这里取
  * {@code W = max(各行宽)} 当容器宽，每行前面垫 {@code (W - 本行宽) / 2}、后面把光标补到 W，
  * 各行就都居中于同一条中线。首尾仍严格配对（净前进量恒等于 W），否则总宽漂移、居中跟着错位。
  */
@@ -53,24 +53,45 @@ final class TrickHudView {
     }
 
     /**
-     * 记牌器行里的一格：一个点数图标 + 它的剩余张数。
+     * 记牌器行里的一格：点数标签、通用框、数字三层 glyph，顺序固定为 label → frame → digit。
      *
-     * <p>和 {@link Avatar} 一样是【注入式】的：调用方把画好的 MiniMessage 片段和它的
-     * 前进量一起交进来，这个类只做几何。字形长什么样、剩几张要不要置灰、数字用哪套图，
-     * 全在调用方决定 —— 排版不必知道，也就不会被字形资源的进度卡住。
+     * <p>调用方把已经套好颜色与字体标签的分层片段交进来，View 只负责按
+     * {@code offset(-34)} 叠加。每格的净前进量固定为 34 像素；隐藏时层列表为空，
+     * 但仍保留同样的占位宽度，保证 15 个点数的位置永远不变。
      *
-     * <p>【宽度必须逐格自报，不能假定等宽】：剩 4 张时数字是一位数，剩 10 张以上是两位数
-     * （双王各只有 1 张，但普通点数 4 张、理论上调用方也可能传别的计数口径）。
-     * 一旦按固定宽度乘格数去算行宽，两位数的格子就会互相压字，而且行宽算错会连累居中。
-     *
-     * @param text          这一格的 MiniMessage 片段，必须自带颜色与字体标签；
-     *                      空串表示这一格不显示（比如该点数已出完且配置了出完就隐藏），
-     *                      但它的宽度仍然计入行宽，避免后面的格子整体左移
-     * @param advancePixels 画完这一格之后光标前进了多少像素；【按实际位数算好再传进来】
+     * @param text          兼容单层片段的构造入口；空串表示隐藏占位格
+     * @param advancePixels 必须严格为 34 像素
      */
-    record CounterCell(String text, int advancePixels) {
+    static final class CounterCell {
+        static final int ADVANCE_PIXELS = PackAssets.COUNTER_CELL_ADVANCE;
+
+        private final List<String> layers;
+
+        CounterCell(String text, int advancePixels) {
+            this(text == null || text.isEmpty() ? List.of() : List.of(text), advancePixels);
+        }
+
+        CounterCell(List<String> layers, int advancePixels) {
+            if (advancePixels != ADVANCE_PIXELS) {
+                throw new IllegalArgumentException("记牌器格子的净前进量必须是 " + ADVANCE_PIXELS + "：" + advancePixels);
+            }
+            this.layers = layers == null ? List.of() : List.copyOf(layers);
+        }
+
+        List<String> layers() {
+            return layers;
+        }
+
+        String text() {
+            return String.join("", layers);
+        }
+
+        int advancePixels() {
+            return ADVANCE_PIXELS;
+        }
+
         boolean isEmpty() {
-            return text == null || text.isEmpty();
+            return layers.isEmpty() || text().isEmpty();
         }
     }
 
@@ -95,8 +116,8 @@ final class TrickHudView {
      * @param xOffsetPixels  整体水平偏移，正数右移、负数左移、0 保持居中
      * @param rowXOffsets    三行【各自】的水平偏移，叠加在 {@code xOffsetPixels} 之上；
      *                       正右负左。见 {@link RowXOffsets}
-     * @param counterCells   记牌器行的各格，按显示顺序排列；null 或空表示不显示记牌器行。
-     *                       行宽是各格前进量【逐个累加】而来，所以每格可以不等宽
+     * @param counterCells   记牌器行的各格，按 CardRank.values() 顺序排列；null 或空表示不显示记牌器行。
+     *                       每格净前进量固定为 34 像素，格间距另行累加
      * @param counterGapPixels 相邻两格的间距
      */
     static String buildMiniMessage(
@@ -214,8 +235,8 @@ final class TrickHudView {
     /**
      * 记牌器行宽：各格前进量【逐个累加】，再加上格间距。
      *
-     * <p>不用「格数 × 固定宽」是因为各格位数不同（剩 4 张是一位数、剩 10 张以上是两位数），
-     * 乘法算出来的行宽会和实际画出来的不一致，居中和首尾配对会同时出错。
+     * <p>每格当前都固定为 {@link PackAssets#COUNTER_CELL_ADVANCE}，仍逐格累加是为了让
+     * {@link CounterCell} 自己的资源包契约成为唯一来源；隐藏格也会报告同样宽度，行宽不会跳。
      */
     private static int counterRowAdvance(List<CounterCell> counters, int counterGapPixels) {
         if (counters.isEmpty()) {
@@ -297,11 +318,10 @@ final class TrickHudView {
     }
 
     /**
-     * 下排：记牌器，每格一个点数图标 + 剩余张数，净前进量 = counterRowAdvance。
+     * 下排：记牌器，每格按「标签、框、数字」分层叠加，净前进量严格为 34。
      *
-     * <p>【逐格累加而不是等宽铺开】：每格宽度由调用方按实际位数算好传进来，这里只负责
-     * 依次画出并在格间补间距。空格子照样前进它自报的宽度，这样「某个点数出完就隐藏」
-     * 时后面的格子不会整体左移、行宽也不会变。
+     * <p>每个 glyph 自带 34 像素前进量；后续层先用 {@code offset(-34)} 拉回同一格，
+     * 因而三层叠完仍只前进最后一层的 34 像素。空格子没有可见层，但仍用 34 像素占位。
      */
     private static void appendCounterRow(
         StringBuilder builder,
@@ -312,10 +332,15 @@ final class TrickHudView {
         for (int index = 0; index < counters.size(); index++) {
             CounterCell cell = counters.get(index);
             if (cell.isEmpty()) {
-                // 不画内容，但要把这一格的宽度走完，否则后面所有格子左移、行宽也对不上。
                 appendOffset(builder, offsetProvider, cell.advancePixels());
             } else {
-                builder.append(cell.text());
+                List<String> layers = cell.layers();
+                for (int layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
+                    if (layerIndex > 0) {
+                        appendOffset(builder, offsetProvider, -CounterCell.ADVANCE_PIXELS);
+                    }
+                    builder.append(layers.get(layerIndex));
+                }
             }
             if (index < counters.size() - 1) {
                 appendOffset(builder, offsetProvider, counterGapPixels);

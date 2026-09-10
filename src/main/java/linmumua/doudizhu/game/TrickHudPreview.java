@@ -26,7 +26,7 @@ public final class TrickHudPreview {
         new DoudizhuCard(4, CardRank.SMALL_JOKER, CardSuit.JOKER),
         new DoudizhuCard(5, CardRank.BIG_JOKER, CardSuit.JOKER)
     );
-    private static final Map<CardRank, Integer> SAMPLE_COUNTS = buildSampleCounts();
+    private static final CounterSnapshot SAMPLE_COUNTERS = buildSampleCounters();
 
     private final DoudizhuPlugin plugin;
     private final TrickHudService hud;
@@ -51,7 +51,8 @@ public final class TrickHudPreview {
         TrickHudService.Seat next = new TrickHudService.Seat(
             BOT_RIGHT, true, PlayerRole.FARMER);
         int rows = plugin.hudRowOverride(player.getUniqueId());
-        hud.render(player, previous, current, next, SAMPLE_CARDS, SAMPLE_COUNTS, rows, true);
+        hud.render(player, previous, current, next, SAMPLE_CARDS,
+            SAMPLE_COUNTERS.playedCounts(), SAMPLE_COUNTERS.remainingCounts(), rows, true);
     }
 
     public void hide(Player player) {
@@ -68,14 +69,54 @@ public final class TrickHudPreview {
         hud.hideAll();
     }
 
-    private static Map<CardRank, Integer> buildSampleCounts() {
-        EnumMap<CardRank, Integer> counts = new EnumMap<>(CardRank.class);
+    /**
+     * 调试棒与 Debug Web 共用的五张固定牌面 fixture。
+     *
+     * <p>返回同一份不可变列表，顺序固定为 10、J、Q、小王、大王；Web 预览不能另抄一套
+     * 牌序，否则调试棒和页面会出现「都是样例但不是同一局」的假象。
+     */
+    public static List<DoudizhuCard> sampleCards() {
+        return SAMPLE_CARDS;
+    }
+
+    /**
+     * 调试棒与 Debug Web 共用的固定记牌器 fixture。
+     *
+     * <p>只维护 remaining 一份状态，played 由初始牌数减剩余张数推导：3 覆盖 0 已出，
+     * 4 覆盖 1 已出，5 覆盖普通牌 4 已出，小王/大王分别覆盖 0/1 已出。
+     */
+    public static CounterSnapshot counterSnapshot() {
+        return SAMPLE_COUNTERS;
+    }
+
+    private static CounterSnapshot buildSampleCounters() {
+        EnumMap<CardRank, Integer> remaining = new EnumMap<>(CardRank.class);
         for (CardRank rank : CardRank.values()) {
-            counts.put(rank, rank.isJoker() ? 1 : 4);
+            remaining.put(rank, rank.isJoker() ? 1 : 4);
         }
-        counts.put(CardRank.THREE, 0);
-        counts.put(CardRank.FOUR, 1);
-        counts.put(CardRank.FIVE, 12);
-        return Map.copyOf(counts);
+        remaining.put(CardRank.FOUR, 3);
+        remaining.put(CardRank.FIVE, 0);
+        remaining.put(CardRank.BIG_JOKER, 0);
+        Map<CardRank, Integer> immutableRemaining = Map.copyOf(remaining);
+        return new CounterSnapshot(immutableRemaining, TrickHudService.playedCountsFromRemaining(immutableRemaining));
+    }
+
+    public record CounterSnapshot(Map<CardRank, Integer> remainingCounts, Map<CardRank, Integer> playedCounts) {
+        public CounterSnapshot {
+            remainingCounts = Map.copyOf(remainingCounts);
+            playedCounts = Map.copyOf(playedCounts);
+        }
+
+        public int remaining(CardRank rank) {
+            return remainingCounts.getOrDefault(rank, rank.isJoker() ? 1 : 4);
+        }
+
+        public int played(CardRank rank) {
+            return playedCounts.getOrDefault(rank, 0);
+        }
+
+        public boolean exhausted(CardRank rank) {
+            return remaining(rank) == 0;
+        }
     }
 }

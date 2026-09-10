@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.11"
+version = "1.10.15"
 
 data class MuzTarget(
     val id: String,
@@ -540,90 +540,136 @@ fun renderRankGlyph(id: String, color: Color = Color.WHITE): BufferedImage {
     return out
 }
 
-/** 点数 id 转文件名片段：10 拼成 ten，字母一律小写（避免大小写不敏感文件系统上撞名）。 */
-fun counterGlyphSlug(id: String): String = if (id == "10") "ten" else id.lowercase()
-
 // ============================================================================
-// 记牌行字形族
+// 记牌行分层字形族
 //
-// 【单一尺寸，只按向下偏移分档】：牌面族要按高度分档是因为服主能调 card-height；
-// 记牌行没有这个配置项，48px 是唯一渲染高度。少一个维度让条目数从「50 × H × M」
-// 降到「50 × M」，也省掉一整套缩放贴图。
-//
-// 档位表【共用 avatarDownOffsetTiers】：记牌行与头像行同频下沉（两行一起被
-// offset-down 推走），共用一张表就不必再生成一套只有它自己用的偏移档。
+// 【每档固定 22 个 glyph】：标签下标 0..14、数字 15..19、普通/耗尽框 20..21。
+// 码位排列不等于绘制顺序；TrickHudView 按 label → frame → digit 输出，后层 -34 回退。
+// 标签/框/数字是三层独立贴图，同一档只改变 ascent，不为「每个点数 × 每个已出数」
+// 生成组合 PNG，因此不会再出现 30,150 张组合资源。所有图形都由确定性矢量笔画绘制，
+// 不依赖构建机上的系统字体。
 // ============================================================================
 val counterGlyphFont = "minecraft:${resourceNamespace}_counter"
+val counterGlyphCodepointStart = 0xE900
+val counterGlyphLabelWidth = 33
+val counterGlyphLabelHeight = 16
+val counterGlyphDigitCount = 5
+val counterGlyphFrameCount = 2
+val counterGlyphDigitWidth = 33
+val counterGlyphDigitHeight = 10
+val counterGlyphDigitAscent = -7
+val counterGlyphFrameWidth = 33
+val counterGlyphFrameHeight = 16
+val counterGlyphFrameAscent = -4
+val counterGlyphLabelAscent = 16
+val counterGlyphAdvance = 34
 
 // 0xEF00：hotbar HUD 底部物品栏字形（单字形，无档位切分）。
-// crown 占 0xE000、牌占 0xE100、头像占 0xE800、记牌器占 0xE900、bot 占 0xF910，
-// 0xEF00 处于空隙，不与任何已知字形冲突。
 // 【必须与 PackAssets.HOTBAR_HUD_FONT / HOTBAR_HUD_CODEPOINT 保持一致】
 val hotbarHudFont = "minecraft:${resourceNamespace}_hotbar"
 val hotbarHudCodepoint = 0xEF00
 val hotbarHudCharEscape = "\\uef00"
 // 原版 9 槽物品栏背景是 182×22；PLAYING 阶段用同尺寸的不透明字形完整盖住它，
-// 再在中央绘制 5 个调试槽。宽、高、槽数与前进量必须同步 PackAssets 的同名字义常量。
+// 再在 9 个槽位位置绘制九色纯色块。宽、高、槽数与前进量必须同步 PackAssets 的同名字义常量。
 val hotbarHudGlyphWidth = 182
 val hotbarHudGlyphHeight = 22
-val hotbarHudSlotCount = 5
+val hotbarHudSlotCount = 9
 val hotbarHudGlyphAdvance = hotbarHudGlyphWidth + 1
 
-// 0xE900：crown 占 0xE000、牌占 0xE100、头像占 0xE800、bot 占 0xF910，这一段空闲。
-// 201 档 × 50 码位切 2 张字体，末码位落在 0xF967，离 BMP 上界还远。
-// 与 bot 的 0xF910 数值上有重叠也不冲突 —— 各族是独立字体，码位空间互不相干。
-val counterGlyphCodepointStart = 0xE900
-
-// 点数字形的文件名，顺序【就是 CardRank 枚举序】（3..2、小王、大王）。
-// 插件侧 PackAssets.counterRankChar 直接拿 rank.ordinal() 当下标，所以这个顺序
-// 不是排版偏好而是接口契约 —— 动一项就会让整族点数图标错位。
+// 点数字形文件名，顺序【就是 CardRank 枚举序】（3..2、小、大）。中文王牌使用专用
+// 「小」「大」矢量短标签，避免依赖系统中文字体，同时保留 CardRank.ordinal() 映射契约。
 val counterRankGlyphFiles = listOf(
-    "rank_3", "rank_4", "rank_5", "rank_6", "rank_7", "rank_8", "rank_9", "rank_ten",
-    "rank_j", "rank_q", "rank_k", "rank_a", "rank_2", "rank_small_joker", "rank_big_joker"
+    "label_3", "label_4", "label_5", "label_6", "label_7", "label_8", "label_9", "label_10",
+    "label_j", "label_q", "label_k", "label_a", "label_2", "label_small", "label_big"
+)
+val counterRankGlyphSymbols = listOf(
+    "3", "4", "5", "6", "7", "8", "9", "10",
+    "J", "Q", "K", "A", "2", "small", "big"
 )
 
-/**
- * 一档内 50 个字形的排列顺序，也就是码位顺序。
- *
- * 布局：`0..14` 点数亮、`15..29` 点数暗、`30..39` 数字亮、`40..49` 数字暗。
- * 亮暗成段而不是交错，是为了让插件侧的下标算式退化成一次加法
- * （`ordinal + (dim ? 15 : 0)`），不必查表。
- */
-val counterGlyphFiles: List<String> =
-    counterRankGlyphFiles +
-        counterRankGlyphFiles.map { "${it}_dim" } +
-        (0..9).map { "digit_$it" } +
-        (0..9).map { "digit_${it}_dim" }
+/** 一档内 22 个字形的排列顺序，也就是码位顺序。 */
+val counterGlyphFiles: List<String> = counterRankGlyphFiles + (0 until counterGlyphDigitCount).map { "digit_$it" } + listOf("frame_normal", "frame_exhausted")
 
-fun writeRankGlyph(target: File, id: String) {
-    target.parentFile.mkdirs()
-    ImageIO.write(renderRankGlyph(id), "png", target)
+check(counterRankGlyphFiles.size == 15 && counterRankGlyphSymbols.size == 15) {
+    "记牌器标签必须严格保持 15 个且与 CardRank 顺序一一对应"
+}
+check(counterGlyphFiles.size == counterRankGlyphFiles.size + counterGlyphFrameCount + counterGlyphDigitCount) {
+    "记牌器每档必须严格占用 22 个字形"
 }
 
-/**
- * 置灰变体：保留 alpha，把 RGB 压成暗灰。
- *
- * 用于「这个点数已经出完」的状态——格子照样占宽，只是画成暗的。
- */
-fun writeDimmedGlyph(source: BufferedImage, target: File) {
-    val out = BufferedImage(source.width, source.height, BufferedImage.TYPE_INT_ARGB)
-    for (y in 0 until source.height) {
-        for (x in 0 until source.width) {
-            val argb = source.getRGB(x, y)
-            val alpha = argb ushr 24
-            if (alpha == 0) {
-                continue
-            }
-            // 按比例压暗而不是涂成固定灰，否则大王的红会和小王的白压成同一个颜色，
-            // 记牌行里两个「王」就完全分不出大小了。
-            val r = ((argb shr 16 and 0xFF) * 0.35f).toInt()
-            val g = ((argb shr 8 and 0xFF) * 0.35f).toInt()
-            val b = ((argb and 0xFF) * 0.35f).toInt()
-            out.setRGB(x, y, (alpha shl 24) or (r shl 16) or (g shl 8) or b)
-        }
+/** 在固定 33×16 视觉盒内描一枚确定性矢量符号。 */
+fun appendCounterSymbol(path: GeneralPath, symbol: String, ox: Float, oy: Float, width: Float, height: Float) {
+    val m = 1.5f
+    val x0 = ox + m
+    val x1 = ox + width - m
+    val y0 = oy + m
+    val y1 = oy + height - m
+    val xm = (x0 + x1) / 2f
+    val ym = (y0 + y1) / 2f
+    val w = x1 - x0
+    val h = y1 - y0
+    when (symbol) {
+        "0" -> path.append(Ellipse2D.Float(x0, y0, w, h), false)
+        "1" -> { path.moveTo(xm - w * .25f, ym - h * .25f); path.lineTo(xm, y0); path.lineTo(xm, y1) }
+        "2" -> { path.moveTo(x0, y0 + h * .25f); path.curveTo(x0, y0, x1, y0, x1, y0 + h * .25f); path.lineTo(x0, y1); path.lineTo(x1, y1) }
+        "3" -> { path.moveTo(x0, y0); path.lineTo(x1, y0); path.lineTo(xm, ym); path.lineTo(x1, y1); path.lineTo(x0, y1) }
+        "4" -> { path.moveTo(x1 - w * .2f, y1); path.lineTo(x1 - w * .2f, y0); path.lineTo(x0, ym + h * .12f); path.lineTo(x1, ym + h * .12f) }
+        "5" -> { path.moveTo(x1, y0); path.lineTo(x0, y0); path.lineTo(x0, ym); path.curveTo(x1, ym, x1, y1, x0, y1) }
+        "6" -> { path.moveTo(x1, y0); path.curveTo(x0, y0, x0, y1, x1, y1); path.curveTo(x1, ym, x0, ym, x0, ym) }
+        "7" -> { path.moveTo(x0, y0); path.lineTo(x1, y0); path.lineTo(x0 + w * .35f, y1) }
+        "8" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .52f), false); path.append(Ellipse2D.Float(x0, ym - h * .02f, w, h * .52f), false) }
+        "9" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .55f), false); path.moveTo(x1, ym); path.curveTo(x1, y1, x0, y1, x0, y1) }
+        "J" -> { path.moveTo(x1, y0); path.lineTo(x1, y1); path.curveTo(x1, y1, x0, y1, x0, ym) }
+        "Q" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .8f), false); path.moveTo(xm, ym); path.lineTo(x1, y1) }
+        "K" -> { path.moveTo(x0, y0); path.lineTo(x0, y1); path.moveTo(x1, y0); path.lineTo(x0, ym); path.lineTo(x1, y1) }
+        "A" -> { path.moveTo(x0, y1); path.lineTo(xm, y0); path.lineTo(x1, y1); path.moveTo(x0 + w * .2f, ym + h * .08f); path.lineTo(x1 - w * .2f, ym + h * .08f) }
+        // 中文王牌不用系统字体：小、大均使用固定盒内的专用短标签图形。
+        "small" -> { path.moveTo(xm, y0); path.lineTo(xm, y1); path.moveTo(xm, ym); path.lineTo(x0 + w * .2f, y0 + h * .35f); path.moveTo(xm, ym); path.lineTo(x1 - w * .2f, y0 + h * .35f); path.moveTo(x0 + w * .2f, y1); path.lineTo(x0 + w * .35f, y1 - h * .2f) }
+        "big" -> { path.moveTo(x0, y0 + h * .25f); path.lineTo(x1, y0 + h * .25f); path.moveTo(xm, y0); path.lineTo(xm, y1); path.moveTo(xm, ym); path.lineTo(x0 + w * .12f, y1); path.moveTo(xm, ym); path.lineTo(x1 - w * .12f, y1) }
+        else -> error("没有这个记牌器矢量符号：$symbol")
     }
+}
+
+/** 生成固定宽度的标签/数字矢量字形；10 标签由两个短符号并排绘制。 */
+fun renderCounterSymbol(symbol: String, height: Int): BufferedImage {
+    val out = BufferedImage(counterGlyphLabelWidth, height, BufferedImage.TYPE_INT_ARGB)
+    val g = out.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
+    g.color = Color.WHITE
+    g.stroke = BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+    val path = GeneralPath()
+    if (symbol == "10") {
+        appendCounterSymbol(path, "1", 7f, 0f, 8f, 16f)
+        appendCounterSymbol(path, "0", 17f, 0f, 9f, 16f)
+    } else {
+        appendCounterSymbol(path, symbol, 0f, 0f, counterGlyphLabelWidth.toFloat(), 16f)
+    }
+    if (height != 16) g.scale(1.0, height.toDouble() / 16.0)
+    g.draw(path)
+    g.dispose()
+    // Minecraft BitmapProvider 按 alpha 是否为 0 扫描实际 glyph 宽度，而不是读取 PNG 声明宽度。
+    // 矢量笔画可能没有触及最右列；alpha=1 锚点锁住 33px 实际宽度（advance=34px），文字 shader 会丢弃它。
+    out.setRGB(counterGlyphLabelWidth - 1, height - 1, 0x01FFFFFF)
+    return out
+}
+
+/** 生成普通框或耗尽框；框独立于标签/数字，运行期按状态选择叠加。 */
+fun renderCounterFrame(exhausted: Boolean): BufferedImage {
+    val out = BufferedImage(counterGlyphFrameWidth, counterGlyphFrameHeight, BufferedImage.TYPE_INT_ARGB)
+    val g = out.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
+    g.color = if (exhausted) Color(0x55, 0x55, 0x55, 0xCC) else Color(0xB0, 0xB0, 0xB0, 0xCC)
+    g.stroke = BasicStroke(1.0f)
+    g.drawRect(0, 0, counterGlyphFrameWidth - 1, counterGlyphFrameHeight - 1)
+    g.dispose()
+    return out
+}
+
+fun writeCounterGlyph(target: File, image: BufferedImage) {
     target.parentFile.mkdirs()
-    ImageIO.write(out, "png", target)
+    ImageIO.write(image, "png", target)
 }
 
 fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
@@ -640,12 +686,12 @@ fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
 }
 
 /**
- * 生成 PLAYING 阶段底部物品栏 HUD 遮罩：完整盖住原版 9 槽背景，中央绘制 5 个调试槽。
+ * 生成 PLAYING 阶段底部物品栏 HUD 遮罩：完整盖住原版 9 槽背景，绘制九个纯色槽块。
  *
  * <p>总尺寸固定为 182×22，等宽覆盖原版 hotbar；不生成或覆盖
  * {@code minecraft:textures/gui/sprites/hud/hotbar.png} / {@code hotbar_selection.png}。
- * 非槽区域先填充不透明深色，中央槽组宽 108px：5 槽 × 20px + 4 间距 × 2px，
- * 左右各留 37px 遮罩。每槽是 18px 内框 + 四周 1px 边框，垂直居中于 22px 高贴图。
+ * 底色为 #121216；9 个槽均为 18×20px，位于 x=2,22,...,162、y=1..20，
+ * 槽间 2px、左右各 2px，不保留白色边框。
  *
  * <p>贴图宽高来自 {@code hotbarHudGlyphWidth}/{@code hotbarHudGlyphHeight}；位图字形
  * 前进量是宽度加 1，即 {@code hotbarHudGlyphAdvance}。这些值必须与 PackAssets 同步。
@@ -653,61 +699,37 @@ fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
  * @param target 输出路径（muz:font/hotbar_slots.png）
  */
 fun writeHotbarSlotsGlyph(target: File) {
-    val slotInnerSize = 18
-    val borderWidth = 1
-    val slotTotalSize = slotInnerSize + borderWidth * 2  // 20px
+    // 原版 hotbar 是 182×22；这里完整绘制不透明底，并在 x=2,22,...,162 处放置
+    // 9 个 18×20 纯色槽块（间隙 2px、左右各 2px），不保留任何白色边框。
+    val slotWidth = 18
+    val slotHeight = 20
     val gapWidth = 2
-    val slotsWidth = hotbarHudSlotCount * slotTotalSize + (hotbarHudSlotCount - 1) * gapWidth  // 108px
-    val slotsStartX = (hotbarHudGlyphWidth - slotsWidth) / 2  // 37px
-    val slotsStartY = (hotbarHudGlyphHeight - slotTotalSize) / 2  // 1px
-    check(slotsStartX * 2 + slotsWidth == hotbarHudGlyphWidth) {
-        "hotbar HUD 槽组必须在 ${hotbarHudGlyphWidth}px 遮罩内水平居中"
+    val slotsStartX = 2
+    val slotsStartY = 1
+    check(slotsStartX + hotbarHudSlotCount * slotWidth + (hotbarHudSlotCount - 1) * gapWidth + 2 == hotbarHudGlyphWidth) {
+        "hotbar HUD 九槽布局必须正好填满 ${hotbarHudGlyphWidth}px 宽度"
     }
     val out = BufferedImage(hotbarHudGlyphWidth, hotbarHudGlyphHeight, BufferedImage.TYPE_INT_ARGB)
     check(out.width + 1 == hotbarHudGlyphAdvance) {
         "hotbar HUD 字形前进量必须等于贴图宽度加 1"
     }
-
-    // ActionBar 字形只在 PLAYING 阶段推送，因此可以用不透明深色遮罩覆盖原版 9 槽；
-    // 离开 PLAYING 后清空 ActionBar，原版物品栏自然恢复，不需要改 minecraft 原版 sprite。
     val maskColor = 0xFF_12_12_16.toInt()
-    for (y in 0 until hotbarHudGlyphHeight) {
-        for (x in 0 until hotbarHudGlyphWidth) {
-            out.setRGB(x, y, maskColor)
-        }
-    }
-
-    // 【调试配色】中央 5 槽保持红、橙、黄、绿、蓝，全部不透明，便于确认槽位与偏移。
+    for (y in 0 until hotbarHudGlyphHeight) for (x in 0 until hotbarHudGlyphWidth) out.setRGB(x, y, maskColor)
+    // 【九色调试配色】批准值按槽位顺序固定，全部不透明；颜色只用于调试定位，不覆盖原版 sprite。
     val slotColors = intArrayOf(
-        0xFF_E0_3A_3A.toInt(),  // 槽 0：红
-        0xFF_E0_8A_2A.toInt(),  // 槽 1：橙
-        0xFF_D8_D0_30.toInt(),  // 槽 2：黄
-        0xFF_3C_C0_50.toInt(),  // 槽 3：绿
-        0xFF_38_88_E0.toInt()   // 槽 4：蓝
+        0xFF_E0_3A_3A.toInt(), 0xFF_E0_6A_2A.toInt(), 0xFF_E0_8A_2A.toInt(),
+        0xFF_D8_D0_30.toInt(), 0xFF_3C_C0_50.toInt(), 0xFF_30_C0_A8.toInt(),
+        0xFF_38_88_E0.toInt(), 0xFF_70_50_D8.toInt(), 0xFF_C0_4A_A0.toInt()
     )
-    check(slotColors.size == hotbarHudSlotCount) {
-        "hotbar HUD 调试配色数量必须等于槽数 $hotbarHudSlotCount"
-    }
-    val borderColor = 0xFF_F0_F0_F0.toInt()
-
+    check(slotColors.size == hotbarHudSlotCount) { "hotbar HUD 调试配色数量必须等于槽数 $hotbarHudSlotCount" }
     for (slotIndex in 0 until hotbarHudSlotCount) {
-        val slotX = slotsStartX + slotIndex * (slotTotalSize + gapWidth)
-        val slotBg = slotColors[slotIndex]
-        for (y in slotsStartY until slotsStartY + slotTotalSize) {
-            for (x in slotX until slotX + slotTotalSize) {
-                val isTopBorder = y < slotsStartY + borderWidth
-                val isBottomBorder = y >= slotsStartY + slotTotalSize - borderWidth
-                val isLeftBorder = x < slotX + borderWidth
-                val isRightBorder = x >= slotX + slotTotalSize - borderWidth
-                out.setRGB(x, y, if (isTopBorder || isBottomBorder || isLeftBorder || isRightBorder) borderColor else slotBg)
-            }
-        }
+        val slotX = slotsStartX + slotIndex * (slotWidth + gapWidth)
+        for (y in slotsStartY until slotsStartY + slotHeight)
+            for (x in slotX until slotX + slotWidth) out.setRGB(x, y, slotColors[slotIndex])
     }
-
     target.parentFile.mkdirs()
     ImageIO.write(out, "png", target)
 }
-
 fun titleFromId(id: String): String = id.split('_').joinToString(" ") { part ->
     part.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
 }
@@ -906,7 +928,8 @@ val generatePackTiers = tasks.register("generatePackTiers") {
     inputs.property("avatarOffsetTiers", avatarDownOffsetTiers.toString())
     inputs.property("avatarScaleRange", "$avatarPixelMinScale..$avatarPixelMaxScale")
     inputs.property("counterGlyphFiles", counterGlyphFiles.toString())
-    inputs.property("counterGlyphHeight", rankGlyphHeight)
+    inputs.property("counterGlyphGeometry", "${counterGlyphLabelWidth}x${counterGlyphLabelHeight}/${counterGlyphDigitWidth}x${counterGlyphDigitHeight}/${counterGlyphFrameWidth}x${counterGlyphFrameHeight}/$counterGlyphAdvance")
+    inputs.property("counterGlyphAscents", "$counterGlyphLabelAscent/$counterGlyphFrameAscent/$counterGlyphDigitAscent")
     outputs.dir(generatedJavaDir)
 
     doLast {
@@ -956,40 +979,32 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                     ${javaArray(avatarDownOffsetTiers)}
                 };
 
-                /**
-                 * 记牌行字形一档占几个码位 —— 也就是资源包里那 50 张 PNG 的张数。
-                 *
-                 * <p>{@link PackAssets} 的码位算式用它当乘数（一档一个连续窗口），
-                 * 构建期用同一个数写 {@code images.yml}。这个值是【字形清单的长度】，
-                 * 不是拍出来的：增删任何一个记牌字形都会自动跟着变。
-                 */
+                /** 记牌器每档占用的分层字形数：15 个标签、普通/耗尽框 2 个、0..4 数字 5 个。 */
                 public static final int COUNTER_GLYPHS_PER_TIER = ${counterGlyphFiles.size};
-
-                /**
-                 * 记牌行点数字形的个数（含双王），也就是亮版点数在一档内的下标区间上界。
-                 *
-                 * <p>下标布局：{@code [0, RANK)} 亮点数、{@code [RANK, 2*RANK)} 暗点数、
-                 * 其后 10 个亮数字、最后 10 个暗数字。点数部分按 {@code CardRank} 的
-                 * 声明顺序排，所以 {@code rank.ordinal()} 直接就是亮版下标。
-                 */
+                /** 记牌器标签字形数，顺序与 CardRank 枚举严格一致。 */
                 public static final int COUNTER_RANK_GLYPHS = ${counterRankGlyphFiles.size};
-
-                /**
-                 * 记牌行数字字形的个数（0~9 共十个），也就是亮版数字在一档内的下标区间上界减起点。
-                 *
-                 * <p>下标布局：亮数字从 {@code 2 * RANK} 开始，占 {@code DIGIT} 个；
-                 * 暗数字接在其后再占 {@code DIGIT} 个。
-                 */
-                public static final int COUNTER_DIGIT_GLYPHS = 10;
-
-                /** 记牌行字形的渲染高度，单位像素。构建期按这个高度画 PNG，不缩放。 */
-                public static final int COUNTER_GLYPH_HEIGHT = $rankGlyphHeight;
-
-                /** 记牌行单宽字形（3..9、J、Q、K、A、2、数字）的渲染宽度，单位像素。 */
-                public static final int COUNTER_GLYPH_WIDTH = ${rankGlyphWidth("3")};
-
-                /** 记牌行双宽字形（10、双王）的渲染宽度，单位像素。 */
-                public static final int COUNTER_GLYPH_WIDE_WIDTH = ${rankGlyphWidth("10")};
+                /** 记牌器框字形数，顺序为普通框、耗尽框。 */
+                public static final int COUNTER_FRAME_GLYPHS = $counterGlyphFrameCount;
+                /** 记牌器数字字形数，仅生成 0..4 五个剩余张数。 */
+                public static final int COUNTER_DIGIT_GLYPHS = $counterGlyphDigitCount;
+                /** 记牌器标签/框字形的渲染高度，单位像素。 */
+                public static final int COUNTER_GLYPH_HEIGHT = $counterGlyphLabelHeight;
+                /** 记牌器每层字形的固定视觉宽度，单位像素。 */
+                public static final int COUNTER_GLYPH_WIDTH = $counterGlyphLabelWidth;
+                public static final int COUNTER_GLYPH_WIDE_WIDTH = $counterGlyphLabelWidth;
+                /** 记牌器数字层渲染高度，单位像素。 */
+                public static final int COUNTER_DIGIT_GLYPH_HEIGHT = $counterGlyphDigitHeight;
+                /** 记牌器分层 ascent：label=16-downOffset、frame=-4-downOffset、digit=-7-downOffset。 */
+                public static final int COUNTER_LABEL_ASCENT = $counterGlyphLabelAscent;
+                public static final int COUNTER_FRAME_ASCENT = $counterGlyphFrameAscent;
+                public static final int COUNTER_DIGIT_ASCENT = $counterGlyphDigitAscent;
+                /** 记牌器字形前进量，标签、数字、框三层统一为 34px。 */
+                public static final int COUNTER_GLYPH_ADVANCE = $counterGlyphAdvance;
+                public static final int COUNTER_LABEL_WIDTH = $counterGlyphLabelWidth;
+                public static final int COUNTER_LABEL_HEIGHT = $counterGlyphLabelHeight;
+                public static final int COUNTER_DIGIT_WIDTH = $counterGlyphDigitWidth;
+                public static final int COUNTER_FRAME_WIDTH = $counterGlyphFrameWidth;
+                public static final int COUNTER_FRAME_HEIGHT = $counterGlyphFrameHeight;
 
                 /** 头像放大倍数下限（资源包只生成了这个范围内的 PNG）。 */
                 public static final int AVATAR_MIN_SCALE = $avatarPixelMinScale;
@@ -1075,31 +1090,15 @@ val generateResourcePack = tasks.register("generateResourcePack") {
                 writeCardFaceGlyph(texture, outputAssetsRoot.resolve("textures/font/cards/$id.png"))
             }
 
-        // 记牌行字形：13 个点数 + 双王 + 各自的置灰变体 + 0-9 数字。
-        // 亮/暗成对生成，暗的那份直接从亮的那份压 RGB，保证轮廓逐像素一致。
+        // 记牌行分层字形：只生成 22 张基础 PNG，运行期按偏移档注册 22 个字形声明。
+        // 标签、数字、框三层独立叠加，禁止回退成「每个点数 × 每个剩余数」的组合贴图。
         val counterFontDir = outputAssetsRoot.resolve("textures/font/counter")
-        val rankGlyphIds = listOf("3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A", "2")
-        for (id in rankGlyphIds) {
-            val slug = counterGlyphSlug(id)
-            val glyph = renderRankGlyph(id)
-            counterFontDir.resolve("rank_$slug.png").parentFile.mkdirs()
-            ImageIO.write(glyph, "png", counterFontDir.resolve("rank_$slug.png"))
-            writeDimmedGlyph(glyph, counterFontDir.resolve("rank_${slug}_dim.png"))
+        counterRankGlyphFiles.forEachIndexed { index, file ->
+            writeCounterGlyph(counterFontDir.resolve("$file.png"), renderCounterSymbol(counterRankGlyphSymbols[index], counterGlyphLabelHeight))
         }
-        for (digit in 0..9) {
-            val glyph = renderRankGlyph(digit.toString())
-            counterFontDir.resolve("digit_$digit.png").parentFile.mkdirs()
-            ImageIO.write(glyph, "png", counterFontDir.resolve("digit_$digit.png"))
-            writeDimmedGlyph(glyph, counterFontDir.resolve("digit_${digit}_dim.png"))
-        }
-        // 大王红、小王白，沿用扑克惯例——两个字形形状一样，只能靠颜色区分。
-        for ((joker, color) in listOf("small_joker" to Color.WHITE, "big_joker" to Color(0xE5, 0x3A, 0x3A))) {
-            val glyph = renderRankGlyph("王", color)
-            ImageIO.write(glyph, "png", counterFontDir.resolve("rank_$joker.png"))
-            writeDimmedGlyph(glyph, counterFontDir.resolve("rank_${joker}_dim.png"))
-        }
-
-
+        for (digit in 0..4) writeCounterGlyph(counterFontDir.resolve("digit_$digit.png"), renderCounterSymbol(digit.toString(), counterGlyphDigitHeight))
+        writeCounterGlyph(counterFontDir.resolve("frame_normal.png"), renderCounterFrame(false))
+        writeCounterGlyph(counterFontDir.resolve("frame_exhausted.png"), renderCounterFrame(true))
 
         for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
             for (row in 0 until avatarOutlinedPixels) {
@@ -1124,7 +1123,7 @@ val generateResourcePack = tasks.register("generateResourcePack") {
 
 
 
-        // PLAYING 阶段底部物品栏 HUD 遮罩：182×22 不透明底覆盖原版 9 槽，中央绘制 5 个调试槽。
+        // PLAYING 阶段底部物品栏 HUD 遮罩：182×22 不透明底覆盖原版 9 槽，绘制九个纯色调试槽。
         // 贴图路径：muz:font/hotbar_slots.png；码位：0xEF00（hotbarHudCodepoint）。
         // 【宽/高/槽数/advance 必须与 PackAssets 的 HOTBAR_HUD_* 常量保持一致】
         val hotbarFontDir = outputAssetsRoot.resolve("textures/font")
@@ -1134,7 +1133,7 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         // hotbar_selection.png。资源包贴图是客户端全局状态，无法按「玩家是否正在打牌」切换，
         // 结果是不在牌桌时原版 9 槽背景也永久消失，只剩悬空物品。
         //
-        // 自定义 5 槽 HUD 现在只由 HotbarHudService 在 GamePhase.PLAYING 正式出牌阶段通过
+        // 自定义九槽 HUD 现在只由 HotbarHudService 在 GamePhase.PLAYING 正式出牌阶段通过
         // ActionBar 字形推送；等待、叫地主、加倍、结算及普通游玩时不推送，客户端自然显示原版物品栏。
         // generateResourcePack 每次先 deleteRecursively() 清空 outputRoot（见任务开头），
         // 所以删除这两次生成调用后，旧透明 sprite 不会残留进新构建。
@@ -1389,32 +1388,32 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
 
 
 
-        // 记牌行字形族。跟【头像表】而不是牌表：记牌行画在头像行下方、与头像同频下沉，
-        // 跟错表会让整行记牌器与头像上下错开。
-        //
-        // 只有偏移一个维度，所以一档就是完整的 50 个字形，档号直接等于偏移档号。
-        // 【按亮暗切分文件】而不是按偏移档：偏移档有 201 个、按它切会产生 201 个碎文件；
-        // 点数 30 条/档 × 201 档约 1.1 MiB、数字 20 条/档约 0.7 MiB，两份都离上限很远。
-        // 码位仍由整族的 index 决定（下面的 forEachIndexed 走的是完整 50 项表），
-        // 切分只影响「这一行写进哪个文件」。
-        val counterRankImages = StringBuilder()
-        val counterDigitImages = StringBuilder()
+        // 记牌行分层字形族：跟【头像表】而不是牌表，记牌行与头像行同频下沉。
+        // 每个偏移档固定 22 个声明，码位直接按 counterStart + tier*22 + index 分配；
+        // PNG 文件只保留 22 张基础图，避免为点数与剩余张数生成组合贴图。
+        val counterImages = StringBuilder()
         avatarDownOffsetTiers.forEachIndexed { downTier, downOffset ->
-            val (fontIndex, tierBase) =
-                tierFontSlot(downTier, counterGlyphFiles.size, counterGlyphCodepointStart)
-            val font = fontNameOf(counterGlyphFont, fontIndex)
+            val tierBase = counterGlyphCodepointStart + downTier * counterGlyphFiles.size
             counterGlyphFiles.forEachIndexed { index, file ->
                 val codepoint = tierBase + index
                 checkGlyphCodepoint(codepoint, "记牌", downTier)
                 val charEscape = "\\u%04x".format(codepoint)
-                // 数字字形归数字那份，其余（点数与双王）归点数那份。
-                val sink = if (file.startsWith("digit_")) counterDigitImages else counterRankImages
-                sink.appendLine("  $resourceNamespace:counter_${file}_d$downOffset:")
-                sink.appendLine("    height: $rankGlyphHeight")
-                sink.appendLine("    ascent: ${rankGlyphHeight - downOffset}")
-                sink.appendLine("    font: $font")
-                sink.appendLine("    file: $resourceNamespace:font/counter/$file.png")
-                sink.appendLine("    char: $charEscape")
+                val height = when {
+                    index < counterRankGlyphFiles.size -> counterGlyphLabelHeight
+                    index < counterRankGlyphFiles.size + counterGlyphDigitCount -> counterGlyphDigitHeight
+                    else -> counterGlyphFrameHeight
+                }
+                counterImages.appendLine("  $resourceNamespace:counter_${file}_d$downOffset:")
+                counterImages.appendLine("    height: $height")
+                val ascent = when {
+                    index < counterRankGlyphFiles.size -> counterGlyphLabelAscent - downOffset
+                    index < counterRankGlyphFiles.size + counterGlyphDigitCount -> counterGlyphDigitAscent - downOffset
+                    else -> counterGlyphFrameAscent - downOffset
+                }
+                counterImages.appendLine("    ascent: $ascent")
+                counterImages.appendLine("    font: $counterGlyphFont")
+                counterImages.appendLine("    file: $resourceNamespace:font/counter/$file.png")
+                counterImages.appendLine("    char: $charEscape")
             }
         }
 
@@ -1485,8 +1484,7 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
         val imageParts = linkedMapOf(
             "bot_avatar" to botAvatarBaseImages,
             "avatar_crown" to "images:\n" + avatarCrownImages,
-            "counter_rank" to "images:\n" + counterRankImages,
-            "counter_digit" to "images:\n" + counterDigitImages,
+            "counter" to "images:\n" + counterImages,
             // CraftEngine 位图条目没有独立 width 字段：横向尺寸取 PNG 原生宽
             // hotbarHudGlyphWidth=182；height 显式写同源常量 22，保证 1:1 不缩放。
             "hotbar_hud" to """
@@ -1551,33 +1549,17 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 )
             )
         }
-        val counterLastSlot = tierFontSlot(
-            avatarDownOffsetTiers.size - 1, counterGlyphFiles.size, counterGlyphCodepointStart
-        )
+        // 末码位直接按已生成条目总数计算，避免把「最后档起点」误当成族末码位。
+        val counterLastCodepoint = counterGlyphCodepointStart + counterEntryCount - 1
+        check(counterLastCodepoint == counterGlyphCodepointStart
+            + avatarDownOffsetTiers.size * counterGlyphFiles.size - 1) {
+            "记牌族末码位计算与生成条目数量不一致：$counterLastCodepoint"
+        }
+        val counterStartHex = Integer.toHexString(counterGlyphCodepointStart).uppercase().padStart(4, '0')
+        val counterLastHex = Integer.toHexString(counterLastCodepoint).uppercase().padStart(4, '0')
         logger.lifecycle(
-            "[muz] 字体切分：牌 %d 张、头像 %d 张、王冠 %d 张、记牌 %d 张（码位上界 0x%04X）".format(
-                tierFontSlot(
-                    cardGlyphHeightTiers.size * cardGlyphDownOffsetTiers.size - 1,
-                    cardIds.size, cardGlyphCodepointStart
-                ).first + 1,
-                tierFontSlot(
-                    avatarDownOffsetTiers.size - 1, avatarGlyphsPerTier, avatarPixelCodepointStart
-                ).first + 1,
-                tierFontSlot(
-                    avatarDownOffsetTiers.size - 1, crownGlyphsPerTier, avatarCrownCodepointStart
-                ).first + 1,
-                counterLastSlot.first + 1,
-                maxGlyphCodepoint
-            )
-        )
-        // 记牌族末码位单独打一行：0xE900 段是新占的，和 bot 族的 0xF910 在数值上邻近
-        // （不同字体命名空间，本不冲突）。把实际末码位打出来，方便下次加族时挑起点。
-        logger.lifecycle(
-            "[muz] 记牌族码位：0x%04X..0x%04X（%d 档 × %d 码位/档）".format(
-                counterGlyphCodepointStart,
-                counterLastSlot.second + counterGlyphFiles.size - 1,
-                avatarDownOffsetTiers.size, counterGlyphFiles.size
-            )
+            "[muz] 记牌族码位：0x$counterStartHex..0x$counterLastHex"
+                + "（${avatarDownOffsetTiers.size} 档 × ${counterGlyphFiles.size} 码位/档，末码位=$counterLastCodepoint）"
         )
 
         val furnitureConfig = buildString {

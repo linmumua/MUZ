@@ -8,6 +8,7 @@ import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.config.MuzYamlConfig;
+import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.model.CardRank;
 
 import java.io.IOException;
@@ -33,6 +34,9 @@ import java.util.Set;
  */
 public final class DebugHudConfigController {
     private static final Gson GSON = new Gson();
+
+    // 记牌器预览与游戏内分层 glyph 的几何全部引用 PackAssets 同源常量。
+    // 这些值由服务端统一下发，Debug Web 前端不得自行估算字体宽度。
     private final DoudizhuPlugin plugin;
 
     public DebugHudConfigController(DoudizhuPlugin plugin) {
@@ -132,7 +136,7 @@ public final class DebugHudConfigController {
             }
         }
         warnings.addAll(overlapWarnings(values));
-        return new Snapshot(values, warnings, fieldDtos(), currentGeometry(), dragSettings(config));
+        return new Snapshot(values, warnings, fieldDtos(), currentGeometry(values), dragSettings(config));
     }
 
     private static DragSettings dragSettings(MuzYamlConfig config) {
@@ -157,6 +161,33 @@ public final class DebugHudConfigController {
      * 校准值，不是配置键。
      */
     static PreviewGeometry currentGeometry() {
+        return currentGeometry(6, true);
+    }
+
+    /**
+     * 按当前运行期配置生成预览几何。视口仍是页面侧可调的校准值，头像槽位则必须随配置中的
+     * 中间头像倍数和描边开关变化；否则页面只改了表单，预览仍会拿旧的三槽宽度。
+     */
+    static PreviewGeometry currentGeometry(MuzYamlConfig config) {
+        int avatarScale = config.getInt("trick-hud.avatar-scale", 6);
+        if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
+            avatarScale = 6;
+        }
+        return currentGeometry(
+            avatarScale,
+            config.getBoolean("trick-hud.avatar-outline.enabled", true));
+    }
+
+    private static PreviewGeometry currentGeometry(Map<String, Object> values) {
+        int avatarScale = intValue(values.getOrDefault("trick-hud.avatar-scale", 6));
+        if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
+            avatarScale = 6;
+        }
+        boolean outlined = Boolean.TRUE.equals(values.getOrDefault("trick-hud.avatar-outline.enabled", true));
+        return currentGeometry(avatarScale, outlined);
+    }
+
+    private static PreviewGeometry currentGeometry(int avatarScale, boolean outlined) {
         return new PreviewGeometry(
             640,
             360,
@@ -165,6 +196,18 @@ public final class DebugHudConfigController {
             cardGeometries(),
             avatarGeometries(),
             counterGeometries(),
+            sampleCardFixtures(),
+            avatarSlotGeometries(avatarScale, outlined),
+            avatarLayoutGeometries(),
+            PackAssets.COUNTER_CELL_WIDTH,
+            PackAssets.COUNTER_CELL_HEIGHT,
+            PackAssets.COUNTER_CELL_ADVANCE,
+            PackAssets.COUNTER_LABEL_HEIGHT,
+            PackAssets.COUNTER_FRAME_HEIGHT,
+            PackAssets.COUNTER_DIGIT_HEIGHT,
+            PackAssets.COUNTER_LABEL_ASCENT,
+            PackAssets.COUNTER_FRAME_TOP_DELTA,
+            PackAssets.COUNTER_DIGIT_INSET,
             PackAssets.HOTBAR_HUD_GLYPH_WIDTH,
             PackAssets.HOTBAR_HUD_GLYPH_ADVANCE,
             HotbarDebugOverlayWriter.GLYPH_HEIGHT,
@@ -256,27 +299,65 @@ public final class DebugHudConfigController {
     }
 
     private static List<PreviewGeometry.CounterGeometry> counterGeometries() {
+        TrickHudPreview.CounterSnapshot counters = TrickHudPreview.counterSnapshot();
         List<PreviewGeometry.CounterGeometry> geometries = new ArrayList<>();
         for (CardRank rank : CardRank.values()) {
-            int remaining = switch (rank) {
-                case THREE, FOUR, FIVE, SIX, SEVEN, EIGHT, NINE -> 4;
-                case TEN -> 12;
-                case JACK, QUEEN, KING, ACE, TWO -> 1;
-                case SMALL_JOKER -> 1;
-                case BIG_JOKER -> 0;
-            };
+            // 固定预览 fixture 与游戏内调试棒共用；这里只负责下发已推导好的 played/remaining/exhausted。
             geometries.add(new PreviewGeometry.CounterGeometry(
-                rank.label(),
-                remaining,
-                previewCounterAdvance(rank.label(), String.valueOf(remaining))
+                rank.label(), counters.remaining(rank), counters.played(rank), counters.exhausted(rank)
             ));
         }
         return List.copyOf(geometries);
     }
 
-    private static int previewCounterAdvance(String label, String digits) {
-        // 这里只是预览 fixture，运行期文件不改；按现有 TrickHudService.counterCells 的经验公式复算。
-        return 4 + label.length() * 6 + digits.length() * 6;
+    private static List<PreviewGeometry.CardFixture> sampleCardFixtures() {
+        return TrickHudPreview.sampleCards().stream()
+            .map(card -> new PreviewGeometry.CardFixture(card.displayLabel(), card.rank().label(), card.suit().name()))
+            .toList();
+    }
+
+    private static List<PreviewGeometry.AvatarSlotGeometry> avatarSlotGeometries(int middleScale, boolean outlined) {
+        int sideScale = 4;
+        int sideContent = PlayerHeadRenderer.advanceWidth(sideScale, outlined);
+        int middleContent = PlayerHeadRenderer.advanceWidth(middleScale, outlined);
+        int slotWidth = Math.max(sideContent, middleContent);
+        return List.of(
+            avatarSlot("left", sideScale, slotWidth, sideContent, sideScale, false, false),
+            avatarSlot("middle", middleScale, slotWidth, middleContent, middleScale, true, false),
+            avatarSlot("right", sideScale, slotWidth, sideContent, sideScale, false, false)
+        );
+    }
+
+    /**
+     * 为每个合法的中间头像倍数和描边组合下发完整三槽几何；前端切换表单时只查这张表。
+     */
+    private static List<PreviewGeometry.AvatarLayoutGeometry> avatarLayoutGeometries() {
+        List<PreviewGeometry.AvatarLayoutGeometry> layouts = new ArrayList<>();
+        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
+             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            for (boolean outlined : new boolean[]{false, true}) {
+                List<PreviewGeometry.AvatarSlotGeometry> slots = avatarSlotGeometries(scale, outlined);
+                int slotWidth = slots.get(0).slotWidth();
+                int rowHeight = slots.stream()
+                    .mapToInt(slot -> slot.rowHeight() + (slot.crowned() ? slot.crownHeight() : 0))
+                    .max()
+                    .orElse(0);
+                layouts.add(new PreviewGeometry.AvatarLayoutGeometry(
+                    scale, outlined, slotWidth, rowHeight, slots));
+            }
+        }
+        return List.copyOf(layouts);
+    }
+
+    private static PreviewGeometry.AvatarSlotGeometry avatarSlot(
+        String position, int scale, int slotWidth, int contentWidth, int faceScale,
+        boolean crowned, boolean empty) {
+        return new PreviewGeometry.AvatarSlotGeometry(
+            position, scale, slotWidth, contentWidth,
+            PackAssets.AVATAR_OUTLINED_PIXELS * scale,
+            contentWidth,
+            PackAssets.AVATAR_CROWN_PIXELS * faceScale,
+            crowned, empty);
     }
 
     static Map<String, FieldSpec> fields() {
@@ -417,9 +498,9 @@ public final class DebugHudConfigController {
             drag = drag == null ? DragSettings.defaults() : drag;
         }
 
-        /** 兼容只关心配置值的调用方（测试、旧构造点），几何按当前资源包补齐。 */
+        /** 兼容只关心配置值的调用方（测试、旧构造点），几何按这些配置值补齐。 */
         public Snapshot(Map<String, Object> values, List<String> warnings, List<FieldDto> fields) {
-            this(values, warnings, fields, currentGeometry(), DragSettings.defaults());
+            this(values, warnings, fields, currentGeometry(values), DragSettings.defaults());
         }
 
         public Snapshot(Map<String, Object> values, List<String> warnings, List<FieldDto> fields,
@@ -447,7 +528,16 @@ public final class DebugHudConfigController {
      * @param actionBarBottomY    ActionBar 底边 Y（Debug Web 校准值，不是配置键）
      * @param cards              牌几何，按资源包档位顺序下发
      * @param avatars            头像几何，按头像倍数顺序下发
-     * @param counters           记牌器几何，按 CardRank 顺序下发
+     * @param counters           记牌器各格动态数据，按 CardRank 顺序下发
+     * @param counterCellWidth   记牌器 cell 宽度（固定 33px）
+     * @param counterCellHeight  记牌器 cell 高度（固定 36px）
+     * @param counterAdvance     记牌器 cell 前进量（固定 34px）
+     * @param counterLabelHeight 记牌器上方牌类区域高度（固定 16px）
+     * @param counterFrameHeight 记牌器闭合矩形高度（固定 16px）
+     * @param counterDigitHeight 记牌器下方数字区域高度（固定 10px）
+     * @param counterLabelAscent 记牌器标签层基准 ascent，预览按 BossBar baseline 对齐实际 provider
+     * @param counterFrameTopDelta 闭合矩形相对 cell 顶部的偏移（固定 20px）
+     * @param counterDigitInset  数字相对闭合矩形的内缩（固定 3px）
      * @param hotbarWidth        hotbar 底图贴图宽
      * @param hotbarAdvance      hotbar 底图前进量
      * @param hotbarHeight       hotbar 底图贴图高（= images.yml 的 height，1:1 渲染）
@@ -458,13 +548,53 @@ public final class DebugHudConfigController {
     public record PreviewGeometry(
         int screenWidth, int screenHeight, int bossBarBaselineY, int actionBarBottomY,
         List<CardGeometry> cards, List<AvatarGeometry> avatars, List<CounterGeometry> counters,
+        List<CardFixture> sampleCards, List<AvatarSlotGeometry> avatarSlots,
+        List<AvatarLayoutGeometry> avatarLayouts,
+        int counterCellWidth, int counterCellHeight, int counterAdvance,
+        int counterLabelHeight, int counterFrameHeight, int counterDigitHeight,
+        int counterLabelAscent, int counterFrameTopDelta, int counterDigitInset,
         int hotbarWidth, int hotbarAdvance, int hotbarHeight, int hotbarBaseAscent,
         int hotbarMinOffsetY, int hotbarMaxOffsetY) {
+        public PreviewGeometry {
+            cards = List.copyOf(cards);
+            avatars = List.copyOf(avatars);
+            counters = List.copyOf(counters);
+            sampleCards = List.copyOf(sampleCards);
+            avatarSlots = List.copyOf(avatarSlots);
+            avatarLayouts = List.copyOf(avatarLayouts);
+        }
+
         public record CardGeometry(int tier, int height, int width, int advance) {}
+
+        public record CardFixture(String label, String rank, String suit) {}
 
         public record AvatarGeometry(int scale, int plainAdvance, int outlinedAdvance, int rowHeight) {}
 
-        public record CounterGeometry(String label, int remaining, int advance) {}
+        /**
+         * 一个中间头像倍数与描边开关组合下的完整三槽布局。前端切换表单时只查找此表，
+         * 不自行复制头像 advance、槽宽或王冠盒高公式。
+         */
+        public record AvatarLayoutGeometry(int middleScale, boolean outlined, int slotWidth,
+                                           int rowHeight, List<AvatarSlotGeometry> slots) {
+            public AvatarLayoutGeometry {
+                slots = List.copyOf(slots);
+            }
+        }
+
+        /**
+         * 头像预览槽位的真实占位几何。side 槽固定为 4 倍，中间槽跟随 avatar-scale；
+         * slotWidth 是三槽统一宽度，contentAdvance 是该槽实际头像前进量，前端据此做槽内居中。
+         * crowned 与 empty 是语义字段，不能靠 CSS 颜色或高度猜地主王冠、空槽。
+         */
+        public record AvatarSlotGeometry(
+            String position, int scale, int slotWidth, int contentAdvance, int rowHeight,
+            int faceAdvance, int crownHeight, boolean crowned, boolean empty) {}
+
+        /**
+         * 记牌器 cell 的动态数据；宽度、高度与前进量由 PreviewGeometry 固定下发。
+         * playedCount 是累计已出数量，exhausted 明确表示该点数已耗尽，前端不推导状态。
+         */
+        public record CounterGeometry(String label, int remaining, int playedCount, boolean exhausted) {}
     }
 
 

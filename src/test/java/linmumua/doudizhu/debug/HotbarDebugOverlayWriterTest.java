@@ -81,10 +81,14 @@ class HotbarDebugOverlayWriterTest {
     }
 
     @Test
-    void ce重载命令必须显式重建客户端资源包() {
-        // 无参数 ce reload 只重载配置，不会重建客户端 resource_pack.zip；
-        // 这里必须固定到 ce reload pack，才能让覆盖层变更真正下发到客户端。
-        assertEquals("ce reload pack", HotbarDebugOverlayWriter.CRAFT_ENGINE_RELOAD_COMMAND,
-            "完整资源包重载命令必须是 ce reload pack，否则覆盖层不会重建并下发客户端资源包");
+    void 覆盖层写出不再分发旧的重载命令() throws Exception {
+        // 旧命令语义已过时：覆盖层写出只负责原子落盘，CraftEngine 真实 reload Future、
+        // generateResourcePack() 与实际 ZIP 校验统一由 HudResourcePackBridge 流程负责。
+        String source = java.nio.file.Files.readString(
+            java.nio.file.Path.of("src/main/java/linmumua/doudizhu/debug/HotbarDebugOverlayWriter.java"));
+        assertTrue(!source.contains("CRAFT_ENGINE_RELOAD_COMMAND"),
+            "Writer 不得恢复旧的命令分发入口");
+        assertTrue(!source.contains("dispatchCommand"),
+            "Writer 不得在异步写盘后自行分发 CraftEngine 命令");
     }
 }
