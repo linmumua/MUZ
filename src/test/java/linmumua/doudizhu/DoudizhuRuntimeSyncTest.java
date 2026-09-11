@@ -27,8 +27,8 @@ class DoudizhuRuntimeSyncTest {
         int at = source.indexOf("private void ensureConfigIntegrity()");
         assertTrue(at > 0, "ensureConfigIntegrity 应当存在");
         String body = source.substring(at, at + 700);
-        assertTrue(body.contains("boolean changed = mergeDefaultYamlConfig()"),
-            "ensureConfigIntegrity 要把默认配置合并结果纳入 changed");
+        assertTrue(body.contains("changed |= mergeDefaultYamlConfig()"),
+            "ensureConfigIntegrity 要把默认配置合并结果纳入 changed，并保留迁移结果");
         assertTrue(source.indexOf("saveYamlConfig()", at) > at,
             "changed=true 时必须保存，否则默认配置只进内存不落盘");
     }
@@ -62,10 +62,10 @@ class DoudizhuRuntimeSyncTest {
         String body = hotbar.substring(at, at + 260);
         assertTrue(body.contains("if (configuredEnabled) {"),
             "启停只能由 configuredEnabled 决定；把 suspended 也纳入判断会让面板一开就停推送");
-        assertTrue(body.contains("this.useDebugOverlayGlyph = suspended"),
-            "suspended 应当只切换字形来源（覆盖层可拖 ascent），不再用于停推送");
-        assertTrue(hotbar.contains("hotbarHudDebugGlyphText()"),
-            "接管状态下必须改用覆盖层字形，否则拖动 offset-y 在游戏内没有任何效果");
+        assertTrue(body.contains("this.useDebugOverlayGlyph = suspended && overlayReady;"),
+            "suspended 应当只在覆盖层已验证就绪时切换字形来源，不再用于停推送");
+        assertTrue(hotbar.contains("hotbarHudDebugGlyphText(scale)"),
+            "接管状态下必须改用当前缩放档的覆盖层字形，否则拖动 offset-y 在游戏内没有任何效果");
     }
 
     @Test

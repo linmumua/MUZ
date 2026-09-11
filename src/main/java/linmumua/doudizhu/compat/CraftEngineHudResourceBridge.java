@@ -1,6 +1,7 @@
 package linmumua.doudizhu.compat;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.PackAssets;
 import net.momirealms.craftengine.core.plugin.CraftEngine;
 import net.momirealms.craftengine.core.plugin.config.Config;
 
@@ -72,6 +73,12 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
     @Override
     public CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, Executor ioExecutor,
                                                              Executor mainExecutor) {
+        return reloadGenerateAndVerify(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, ioExecutor, mainExecutor);
+    }
+
+    @Override
+    public CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, int hotbarScale,
+                                                             Executor ioExecutor, Executor mainExecutor) {
         Objects.requireNonNull(ioExecutor, "ioExecutor");
         Objects.requireNonNull(mainExecutor, "mainExecutor");
 
@@ -96,13 +103,25 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
             return failedFuture(new IOException("读取 CraftEngine 状态失败：" + messageOf(exception), exception));
         }
 
+        HudResourcePackSync.Verifier syncVerifier = new HudResourcePackSync.Verifier() {
+            @Override
+            public void verify(Path packPath, int configuredOffsetY) throws IOException {
+                verifier.verify(packPath, configuredOffsetY);
+            }
+
+            @Override
+            public void verify(Path packPath, int configuredOffsetY, int configuredScale) throws IOException {
+                verifier.verify(packPath, configuredOffsetY, configuredScale);
+            }
+        };
         return HudResourcePackSync.run(
             access::reload,
             access::generateResourcePack,
             access::generatedPackPath,
             access::uploadPackPath,
-            verifier::verify,
+            syncVerifier,
             offsetY,
+            hotbarScale,
             ioExecutor,
             mainExecutor
         );
@@ -157,6 +176,11 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
     @FunctionalInterface
     interface ResourceVerifier {
         void verify(Path packPath, int offsetY) throws IOException;
+
+        /** 旧 verifier 默认按 100% hotbar 档校验；生产实现可覆盖以校验指定档位。 */
+        default void verify(Path packPath, int offsetY, int hotbarScale) throws IOException {
+            verify(packPath, offsetY);
+        }
     }
 
     interface EngineAccess {

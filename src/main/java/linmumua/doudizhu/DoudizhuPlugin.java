@@ -3,6 +3,7 @@ package linmumua.doudizhu;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.ai.OpenAiCompatibleAiChatGateway;
 
+import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineBundleExporter;
 import linmumua.doudizhu.compat.CraftEngineFurnitureService;
@@ -473,6 +474,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public HotbarHudService getHotbarHudService() {
         return hotbarHudService;
+    }
+
+    /**
+     * 由 HUD 资源协调器在主线程切换 hotbar 覆盖层就绪闸门。
+     * 只有真实 CE reload Future、ZIP 内容校验完成后才允许传 true。
+     */
+    public void setHotbarOverlayReady(boolean ready) {
+        if (hotbarHudService != null) {
+            hotbarHudService.setOverlayReady(ready);
+        }
     }
 
     /** Debug Web 调试面板实例；debug.web-ui.enabled=false 时返回 null。 */
@@ -3166,7 +3177,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private void ensureConfigIntegrity() {
-        boolean changed = mergeDefaultYamlConfig();
+        // 先迁移旧配置再合并模板：counter.offset-down 缺键时必须继承用户原有的
+        // avatar-offset-down；若先 mergeDefaultYamlConfig() 写入 122，就会丢掉这条兼容语义。
+        boolean changed = migrateMissingCounterOffsetDown();
+        changed |= mergeDefaultYamlConfig();
         changed |= migrateLegacyFurnitureConfig(FurnitureType.TABLE);
         changed |= migrateLegacyFurnitureConfig(FurnitureType.CHAIR);
         changed |= migrateLegacyRenderConfig();
@@ -3469,8 +3483,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         boolean hotbarHudEnabled = !shuttingDown && yamlConfig().getBoolean("hotbar-hud.enabled", false);
         // 水平偏移走 CE 负空格，重读即生效；垂直偏移不在这里处理，它必须落到
-        // 资源包字形的 ascent 上（见 HotbarDebugOverlayWriter）。
+        // 资源包字形的 ascent 上（见 HotbarDebugOverlayWriter）。缩放属于构建期离散档，
+        // 与底图/选中框共用同一 HotbarTier。
         hotbarHudService.setOffsetX(yamlConfig().getInt("hotbar-hud.offset-x", 0));
+        hotbarHudService.setScale(yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
         hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride);
     }
 
@@ -3492,6 +3508,21 @@ public final class DoudizhuPlugin extends JavaPlugin {
         for (GameTable table : tableManager.getTables()) {
             table.reloadTrickHudSettings();
         }
+    }
+
+    /**
+     * 迁移阶段 C 新增的独立记牌器 Y：旧配置没有该键时沿用头像行位置，避免升级后
+     * 记牌器突然跳回固定默认值。迁移只在缺键时写入，用户已有值绝不覆盖。
+     */
+    private boolean migrateMissingCounterOffsetDown() {
+        String key = "trick-hud.counter.offset-down";
+        if (yamlConfig().contains(key)) {
+            return false;
+        }
+        int inherited = yamlConfig().getInt("trick-hud.avatar-offset-down", 122);
+        yamlConfig().set(key, inherited);
+        getLogger().info("检测到旧版配置缺少 " + key + "，已继承 trick-hud.avatar-offset-down=" + inherited);
+        return true;
     }
 
     private boolean migrateLegacyFurnitureConfig(FurnitureType type) {

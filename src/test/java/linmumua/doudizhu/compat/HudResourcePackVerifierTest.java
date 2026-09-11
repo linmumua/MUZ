@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -26,9 +27,9 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * HudResourcePackVerifier 的资源契约测试。
  *
- * <p>fixture 使用当前构建资源中的 22 张记牌器 PNG，并在测试内按 PackAssets 的同一公式生成
- * 字体 JSON。这样「正确包」不是只放几个空文件，而是会真实经过 4422 个记牌器映射、hotbar
- * 覆盖层、PNG 哈希和中央目录校验；各个损坏用例只改动一个契约点，确保断言能锁住失败原因。
+ * <p>fixture 使用当前构建资源中的各 scale 记牌器 PNG，并在测试内按 PackAssets 的同一公式生成
+ * 根 bundle 与 overlay 字体 JSON。这样「正确包」不是只放几个空文件，而是会真实经过三档记牌器映射、
+ * hotbar 根/覆盖层、PNG 哈希和中央目录校验；各个损坏用例只改动一个契约点，确保断言能锁住失败原因。
  */
 class HudResourcePackVerifierTest {
     private static final int OFFSET_Y = 50;
@@ -36,6 +37,7 @@ class HudResourcePackVerifierTest {
     private static final String COUNTER_FONT = "assets/minecraft/font/muz_counter.json";
     private static final String HOTBAR_FONT = "assets/minecraft/font/muz_hotbar.json";
     private static final String HOTBAR_TEXTURE = "assets/muz/textures/font/hotbar_slots.png";
+    private static final String HOTBAR_SELECT_TEXTURE = "assets/muz/textures/font/hotbar_select.png";
     private static final String COUNTER_TEXTURE_ROOT = "assets/muz/textures/font/counter/";
     private static final List<String> COUNTER_FILES = List.of(
         "label_3.png", "label_4.png", "label_5.png", "label_6.png", "label_7.png",
@@ -51,18 +53,33 @@ class HudResourcePackVerifierTest {
     @Test
     void 正确生成包通过完整校验() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("valid.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of());
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
     }
 
     @Test
-    void packFormat84与88都通过() throws IOException {
-        Path pack = writePack(temporaryDirectory.resolve("pack-format-84.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y), Map.of(),
-            "{\"pack\":{\"pack_format\":84}}");
+    void packFormat75_84_88都通过() throws IOException {
+        // 三个目标格式（paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88）都必须被接受。
+        // 曾经硬编码只认 84/88，会把 1.21.11 的合法资源包误判为不受支持。
+        for (int format : new int[]{75, 84, 88}) {
+            Path pack = writePack(temporaryDirectory.resolve("pack-format-" + format + ".zip"), OFFSET_Y,
+                counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of(),
+                "{\"pack\":{\"pack_format\":" + format + "}}");
 
-        assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
+            assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y), "pack_format=" + format + " 应通过");
+        }
+    }
+
+    @Test
+    void 不受支持的packFormat被拒绝() throws IOException {
+        // 项目构建表之外的格式（如 100）不得放行，避免掩盖真实的版本错配。
+        Path pack = writePack(temporaryDirectory.resolve("pack-format-100.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of(),
+            "{\"pack\":{\"pack_format\":100}}");
+
+        IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
+        assertTrue(failure.getMessage().contains("pack_format 不受支持"), failure.getMessage());
     }
 
     @Test
@@ -75,7 +92,7 @@ class HudResourcePackVerifierTest {
         assertEquals(0, calls[0], "构造器不得做资源 I/O");
 
         Path pack = writePack(temporaryDirectory.resolve("lazy.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of());
         verifier.verify(pack, OFFSET_Y);
         assertTrue(calls[0] > 0, "verify 应读取内置 YAML 与 PNG");
     }
@@ -83,7 +100,7 @@ class HudResourcePackVerifierTest {
     @Test
     void 旧48像素记牌器映射被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("legacy-48.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.OLD_48_PIXEL_MAPPING), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.OLD_48_PIXEL_MAPPING), hotbarFontJson(), Map.of());
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("字体映射与 YAML 不一致"), failure.getMessage());
@@ -92,9 +109,9 @@ class HudResourcePackVerifierTest {
     @Test
     void ascent与码位错配都被拒绝() throws IOException {
         Path ascentPack = writePack(temporaryDirectory.resolve("wrong-ascent.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.WRONG_ASCENT), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.WRONG_ASCENT), hotbarFontJson(), Map.of());
         Path codepointPack = writePack(temporaryDirectory.resolve("wrong-codepoint.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.WRONG_CODEPOINT), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.WRONG_CODEPOINT), hotbarFontJson(), Map.of());
 
         IOException ascentFailure = assertThrows(IOException.class, () -> verifier().verify(ascentPack, OFFSET_Y));
         IOException codepointFailure = assertThrows(IOException.class, () -> verifier().verify(codepointPack, OFFSET_Y));
@@ -111,7 +128,7 @@ class HudResourcePackVerifierTest {
         byte[] damaged = original.clone();
         damaged[damaged.length - 1] ^= 0x01;
         Path pack = writePack(temporaryDirectory.resolve("wrong-png.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
             Map.of(HOTBAR_TEXTURE, damaged));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -121,7 +138,9 @@ class HudResourcePackVerifierTest {
     @Test
     void 旧overlay的ascent被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("old-overlay.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(0), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz_hotbar_debug", 0, OverlayMutation.NONE),
+            overlayMetadata("muz_hotbar_debug"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("字体映射与 YAML 不一致"), failure.getMessage());
@@ -130,7 +149,7 @@ class HudResourcePackVerifierTest {
     @Test
     void overlay覆盖旧字体或贴图被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("overlay.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
             Map.of("legacy/assets/minecraft/font/muz_counter.json",
                 "{\"providers\":[]}".getBytes(StandardCharsets.UTF_8)),
             overlayMetadata("legacy"));
@@ -142,7 +161,7 @@ class HudResourcePackVerifierTest {
     @Test
     void CRC损坏被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("crc.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y), Map.of());
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of());
         corruptStoredEntry(pack, HOTBAR_TEXTURE);
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -196,7 +215,7 @@ class HudResourcePackVerifierTest {
     @Test
     void 中央目录与本地头名称不同仍可验证() throws IOException {
         Path pack = temporaryDirectory.resolve("local-name-mismatch.zip");
-        writePack(pack, OFFSET_Y, counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y), Map.of());
+        writePack(pack, OFFSET_Y, counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of());
         rewriteLocalHeaderName(pack, PACK_META, "pack.mcteta");
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
@@ -204,10 +223,9 @@ class HudResourcePackVerifierTest {
 
     @Test
     void 正确overlay覆盖可通过() throws IOException {
-        String path = "muz_hotbar_debug/assets/minecraft/font/muz_hotbar.json";
         Path pack = writePack(temporaryDirectory.resolve("valid-overlay.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
-            Map.of(path, overlayHotbarFontJson(OFFSET_Y, OverlayMutation.NONE).getBytes(StandardCharsets.UTF_8)),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.NONE),
             overlayMetadata("muz_hotbar_debug"));
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
@@ -216,7 +234,7 @@ class HudResourcePackVerifierTest {
     @Test
     void 仅无关overlay可通过() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("irrelevant-overlay.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
             Map.of("muz_hotbar_debug/unrelated.txt", "not HUD".getBytes(StandardCharsets.UTF_8)),
             overlayMetadata("muz_hotbar_debug"));
 
@@ -225,11 +243,9 @@ class HudResourcePackVerifierTest {
 
     @Test
     void 任意声明overlay目录中的旧映射被拒绝() throws IOException {
-        String path = "declared_overlay/assets/minecraft/font/muz_hotbar.json";
         Path pack = writePack(temporaryDirectory.resolve("declared-old-overlay.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
-            Map.of(path, overlayHotbarFontJson(OFFSET_Y, OverlayMutation.OLD_48_PIXEL_MAPPING)
-                .getBytes(StandardCharsets.UTF_8)),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("declared_overlay", OFFSET_Y, OverlayMutation.OLD_48_PIXEL_MAPPING),
             overlayMetadata("declared_overlay"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -239,11 +255,9 @@ class HudResourcePackVerifierTest {
 
     @Test
     void overlay错ascent被拒绝() throws IOException {
-        String path = "muz_hotbar_debug/assets/minecraft/font/muz_hotbar.json";
         Path pack = writePack(temporaryDirectory.resolve("wrong-overlay-ascent.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
-            Map.of(path, overlayHotbarFontJson(OFFSET_Y, OverlayMutation.WRONG_ASCENT)
-                .getBytes(StandardCharsets.UTF_8)),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.WRONG_ASCENT),
             overlayMetadata("muz_hotbar_debug"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -252,11 +266,9 @@ class HudResourcePackVerifierTest {
 
     @Test
     void overlay重复char被拒绝() throws IOException {
-        String path = "muz_hotbar_debug/assets/minecraft/font/muz_hotbar.json";
         Path pack = writePack(temporaryDirectory.resolve("duplicate-overlay-char.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
-            Map.of(path, overlayHotbarFontJson(OFFSET_Y, OverlayMutation.DUPLICATE_CHAR)
-                .getBytes(StandardCharsets.UTF_8)),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.DUPLICATE_CHAR),
             overlayMetadata("muz_hotbar_debug"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -265,11 +277,9 @@ class HudResourcePackVerifierTest {
 
     @Test
     void overlay缺失char被拒绝() throws IOException {
-        String path = "muz_hotbar_debug/assets/minecraft/font/muz_hotbar.json";
         Path pack = writePack(temporaryDirectory.resolve("missing-overlay-char.zip"), OFFSET_Y,
-            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(OFFSET_Y),
-            Map.of(path, overlayHotbarFontJson(OFFSET_Y, OverlayMutation.MISSING_CHAR)
-                .getBytes(StandardCharsets.UTF_8)),
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.MISSING_CHAR),
             overlayMetadata("muz_hotbar_debug"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -314,16 +324,46 @@ class HudResourcePackVerifierTest {
         String packMetadata
     ) throws IOException {
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(target))) {
+            List<String> generated = new ArrayList<>();
             addStored(zip, PACK_META, packMetadata.getBytes(StandardCharsets.UTF_8));
             addStored(zip, COUNTER_FONT, counterJson.getBytes(StandardCharsets.UTF_8));
+            generated.add(COUNTER_FONT);
             addStored(zip, HOTBAR_FONT, hotbarJson.getBytes(StandardCharsets.UTF_8));
-            addResource(zip, HOTBAR_TEXTURE, overrides);
-            for (String file : COUNTER_FILES) {
-                addResource(zip, COUNTER_TEXTURE_ROOT + file, overrides);
+            generated.add(HOTBAR_FONT);
+            for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+                if (scale == PackAssets.COUNTER_DEFAULT_SCALE) {
+                    continue;
+                }
+                String path = counterFontPath(scale);
+                addStored(zip, path, counterFontJson(scale, offsetY, Mutation.NONE)
+                    .getBytes(StandardCharsets.UTF_8));
+                generated.add(path);
+            }
+            for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+                if (scale == PackAssets.HOTBAR_DEFAULT_SCALE) {
+                    continue;
+                }
+                String path = hotbarFontPath(scale);
+                addStored(zip, path, hotbarFontJson(scale).getBytes(StandardCharsets.UTF_8));
+                generated.add(path);
+            }
+            for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+                for (String file : COUNTER_FILES) {
+                    String path = counterTexturePath(scale, file);
+                    addResource(zip, path, overrides);
+                    generated.add(path);
+                }
+            }
+            for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+                String path = hotbarTexturePath(scale, false);
+                addResource(zip, path, overrides);
+                generated.add(path);
+                path = hotbarTexturePath(scale, true);
+                addResource(zip, path, overrides);
+                generated.add(path);
             }
             for (Map.Entry<String, byte[]> extra : overrides.entrySet()) {
-                if (!extra.getKey().equals(HOTBAR_TEXTURE)
-                    && !extra.getKey().startsWith(COUNTER_TEXTURE_ROOT)) {
+                if (!generated.contains(extra.getKey())) {
                     addStored(zip, extra.getKey(), extra.getValue());
                 }
             }
@@ -336,10 +376,30 @@ class HudResourcePackVerifierTest {
         entries.add(new RawEntry(PACK_META, packMetadata.getBytes(StandardCharsets.UTF_8)));
         entries.add(new RawEntry(COUNTER_FONT, counterFontJson(OFFSET_Y, Mutation.NONE)
             .getBytes(StandardCharsets.UTF_8)));
-        entries.add(new RawEntry(HOTBAR_FONT, hotbarFontJson(OFFSET_Y).getBytes(StandardCharsets.UTF_8)));
-        entries.add(new RawEntry(HOTBAR_TEXTURE, readResource("craftengine/muz/resourcepack/" + HOTBAR_TEXTURE)));
-        for (String file : COUNTER_FILES) {
-            String path = COUNTER_TEXTURE_ROOT + file;
+        entries.add(new RawEntry(HOTBAR_FONT, hotbarFontJson().getBytes(StandardCharsets.UTF_8)));
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            if (scale != PackAssets.COUNTER_DEFAULT_SCALE) {
+                String path = counterFontPath(scale);
+                entries.add(new RawEntry(path, counterFontJson(scale, OFFSET_Y, Mutation.NONE)
+                    .getBytes(StandardCharsets.UTF_8)));
+            }
+        }
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            if (scale != PackAssets.HOTBAR_DEFAULT_SCALE) {
+                String path = hotbarFontPath(scale);
+                entries.add(new RawEntry(path, hotbarFontJson(scale).getBytes(StandardCharsets.UTF_8)));
+            }
+        }
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            for (String file : COUNTER_FILES) {
+                String path = counterTexturePath(scale, file);
+                entries.add(new RawEntry(path, readResource("craftengine/muz/resourcepack/" + path)));
+            }
+        }
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            String path = hotbarTexturePath(scale, false);
+            entries.add(new RawEntry(path, readResource("craftengine/muz/resourcepack/" + path)));
+            path = hotbarTexturePath(scale, true);
             entries.add(new RawEntry(path, readResource("craftengine/muz/resourcepack/" + path)));
         }
         entries.addAll(extras);
@@ -349,6 +409,45 @@ class HudResourcePackVerifierTest {
     private String overlayMetadata(String directory) {
         return "{\"pack\":{\"pack_format\":88},\"overlays\":{\"entries\":[{\"directory\":\""
             + directory + "\"}]}}";
+    }
+
+    private String counterFontPath(int scale) {
+        return scale == PackAssets.COUNTER_DEFAULT_SCALE
+            ? COUNTER_FONT : "assets/minecraft/font/muz_counter_s" + scale + ".json";
+    }
+
+    private String hotbarFontPath(int scale) {
+        return scale == PackAssets.HOTBAR_DEFAULT_SCALE
+            ? HOTBAR_FONT : "assets/minecraft/font/muz_hotbar_s" + scale + ".json";
+    }
+
+    private String counterTexturePath(int scale, String file) {
+        return scale == PackAssets.COUNTER_DEFAULT_SCALE
+            ? COUNTER_TEXTURE_ROOT + file
+            : COUNTER_TEXTURE_ROOT + "scale_" + scale + "/" + file;
+    }
+
+    private String hotbarTexturePath(int scale, boolean select) {
+        String file = select ? "hotbar_select.png" : "hotbar_slots.png";
+        return scale == PackAssets.HOTBAR_DEFAULT_SCALE
+            ? "assets/muz/textures/font/" + file
+            : "assets/muz/textures/font/scale_" + scale + "/" + file;
+    }
+
+    private Map<String, byte[]> overlayFontOverrides(
+        String directory,
+        int offsetY,
+        OverlayMutation mutation
+    ) {
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            OverlayMutation scaleMutation = scale == PackAssets.HOTBAR_DEFAULT_SCALE
+                ? mutation : OverlayMutation.NONE;
+            String path = directory + "/" + hotbarFontPath(scale);
+            result.put(path, overlayHotbarFontJson(offsetY, scale, scaleMutation)
+                .getBytes(StandardCharsets.UTF_8));
+        }
+        return result;
     }
 
     private void addResource(ZipOutputStream zip, String path, Map<String, byte[]> overrides) throws IOException {
@@ -373,76 +472,97 @@ class HudResourcePackVerifierTest {
     }
 
     private String counterFontJson(int offsetY, Mutation mutation) {
+        return counterFontJson(PackAssets.COUNTER_DEFAULT_SCALE, offsetY, mutation);
+    }
+
+    private String counterFontJson(int scale, int offsetY, Mutation mutation) {
         StringBuilder json = new StringBuilder("{\"providers\":[");
         boolean first = true;
-        for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
-            int offset = PackAssets.avatarDownOffsetAt(tier);
+        for (int tier = 0; tier < PackAssets.counterDownOffsetTierCount(); tier++) {
+            int offset = PackAssets.counterDownOffsetAt(tier);
+            PackAssets.CounterTier geometry = PackAssets.counterGeometry(scale, tier);
             for (int index = 0; index < PackAssets.COUNTER_GLYPHS_PER_TIER; index++) {
                 if (!first) {
                     json.append(',');
                 }
                 first = false;
-                int codepoint = PackAssets.COUNTER_GLYPH_CODEPOINT_START
+                int codepoint = geometry.codepointStart()
                     + tier * PackAssets.COUNTER_GLYPHS_PER_TIER + index;
                 int height;
                 int ascent;
                 if (index < PackAssets.COUNTER_LABEL_COUNT) {
-                    height = PackAssets.COUNTER_LABEL_HEIGHT;
-                    ascent = PackAssets.COUNTER_LABEL_ASCENT - offset;
+                    height = geometry.labelHeight();
+                    ascent = geometry.labelAscent();
                 } else if (index < PackAssets.COUNTER_FRAME_START_INDEX) {
-                    height = PackAssets.COUNTER_DIGIT_HEIGHT;
-                    ascent = PackAssets.COUNTER_DIGIT_ASCENT - offset;
+                    height = geometry.digitHeight();
+                    ascent = geometry.digitAscent();
                 } else {
-                    height = PackAssets.COUNTER_FRAME_HEIGHT;
-                    ascent = PackAssets.COUNTER_FRAME_ASCENT - offset;
+                    height = geometry.frameHeight();
+                    ascent = geometry.frameAscent();
                 }
                 String file = COUNTER_FILES.get(index);
-                if (mutation == Mutation.OLD_48_PIXEL_MAPPING && offset == OFFSET_Y && index == 15) {
-                    file = "rank_3_dim.png";
+                String resourceFile = "muz:font/" + (scale == PackAssets.COUNTER_DEFAULT_SCALE
+                    ? "counter/" + file : "counter/scale_" + scale + "/" + file);
+                if (mutation == Mutation.OLD_48_PIXEL_MAPPING && scale == PackAssets.COUNTER_DEFAULT_SCALE
+                    && offset == offsetY && index == 15) {
+                    resourceFile = "muz:font/counter/rank_3_dim.png";
                     height = 48;
                     ascent = 26;
-                } else if (mutation == Mutation.WRONG_ASCENT && offset == OFFSET_Y && index == 15) {
+                } else if (mutation == Mutation.WRONG_ASCENT && scale == PackAssets.COUNTER_DEFAULT_SCALE
+                    && offset == offsetY && index == 15) {
                     ascent++;
-                } else if (mutation == Mutation.WRONG_CODEPOINT && offset == OFFSET_Y && index == 15) {
+                } else if (mutation == Mutation.WRONG_CODEPOINT && scale == PackAssets.COUNTER_DEFAULT_SCALE
+                    && offset == offsetY && index == 15) {
                     codepoint += 0x100;
                 }
-                appendBitmapProvider(json, height, ascent, "muz:font/counter/" + file, codepoint);
+                appendBitmapProvider(json, height, ascent, resourceFile, codepoint);
             }
         }
         return json.append("]}").toString();
     }
 
-    private String hotbarFontJson(int offsetY) {
+    private String hotbarFontJson() {
+        return hotbarFontJson(PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    private String hotbarFontJson(int scale) {
+        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
         StringBuilder json = new StringBuilder("{\"providers\":[");
-        appendBitmapProvider(json, PackAssets.HOTBAR_HUD_GLYPH_HEIGHT, HotbarDebugOverlayWriter.BASE_ASCENT,
-            "muz:font/hotbar_slots.png", PackAssets.HOTBAR_HUD_CODEPOINT);
+        appendBitmapProvider(json, tier.height(), tier.baseAscent(), tier.texture(), tier.baseCodepoint());
         json.append(',');
-        appendBitmapProvider(json, HotbarDebugOverlayWriter.GLYPH_HEIGHT,
-            HotbarDebugOverlayWriter.ascentFor(offsetY), "muz:font/hotbar_slots.png",
-            PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT);
+        // 选中框字形（默认 0xEF02）：根 bundle 只声明 base/select，overlay 的 debug/select-debug 单独生成。
+        appendBitmapProvider(json, tier.selectHeight(), tier.baseAscent(), tier.selectTexture(), tier.selectCodepoint());
         return json.append("]}").toString();
     }
 
     private String overlayHotbarFontJson(int offsetY, OverlayMutation mutation) {
-        int height = HotbarDebugOverlayWriter.GLYPH_HEIGHT;
-        int ascent = HotbarDebugOverlayWriter.ascentFor(offsetY);
-        String file = "muz:font/hotbar_slots.png";
-        if (mutation == OverlayMutation.OLD_48_PIXEL_MAPPING) {
-            height = 48;
-            ascent = 26;
-            file = "muz:font/counter/rank_3_dim.png";
-        } else if (mutation == OverlayMutation.WRONG_ASCENT) {
-            ascent++;
-        }
+        return overlayHotbarFontJson(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, mutation);
+    }
+
+    private String overlayHotbarFontJson(int offsetY, int scale, OverlayMutation mutation) {
+        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+        int height = tier.height();
+        int ascent = HotbarDebugOverlayWriter.ascentFor(offsetY, scale);
+        String file = tier.texture();
+        int codepoint = tier.debugCodepoint();
+        String selectFile = tier.selectTexture();
+        int selectCodepoint = tier.selectDebugCodepoint();
         StringBuilder json = new StringBuilder("{\"providers\":[");
-        if (mutation == OverlayMutation.MISSING_CHAR) {
-            appendBitmapProvider(json, PackAssets.HOTBAR_HUD_GLYPH_HEIGHT, HotbarDebugOverlayWriter.BASE_ASCENT,
-                file, PackAssets.HOTBAR_HUD_CODEPOINT);
+        if (mutation == OverlayMutation.OLD_48_PIXEL_MAPPING) {
+            appendBitmapProvider(json, 48, 26, "muz:font/counter/rank_3_dim.png", codepoint);
         } else {
-            appendBitmapProvider(json, height, ascent, file, PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT);
+            if (mutation == OverlayMutation.WRONG_ASCENT) {
+                ascent++;
+            }
+            appendBitmapProvider(json, height, ascent, file, codepoint);
             if (mutation == OverlayMutation.DUPLICATE_CHAR) {
                 json.append(',');
-                appendBitmapProvider(json, height, ascent, file, PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT);
+                appendBitmapProvider(json, height, ascent, file, codepoint);
+            }
+            if (mutation != OverlayMutation.MISSING_CHAR) {
+                json.append(',');
+                appendBitmapProvider(json, tier.selectHeight(),
+                    HotbarDebugOverlayWriter.ascentFor(offsetY, scale), selectFile, selectCodepoint);
             }
         }
         return json.append("]}").toString();

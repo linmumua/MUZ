@@ -56,26 +56,30 @@ final class TrickHudView {
      * 记牌器行里的一格：点数标签、通用框、数字三层 glyph，顺序固定为 label → frame → digit。
      *
      * <p>调用方把已经套好颜色与字体标签的分层片段交进来，View 只负责按
-     * {@code offset(-34)} 叠加。每格的净前进量固定为 34 像素；隐藏时层列表为空，
-     * 但仍保留同样的占位宽度，保证 15 个点数的位置永远不变。
+     * {@code offset(-advance)} 叠加。默认档每格净前进量为 34 像素；75/125% 资源档
+     * 使用对应缩放后的 advance。隐藏时层列表为空，但仍保留同样的占位宽度，保证 15 个
+     * 点数的位置永远不变。
      *
      * @param text          兼容单层片段的构造入口；空串表示隐藏占位格
-     * @param advancePixels 必须严格为 34 像素
+     * @param advancePixels 当前资源档的格子净前进量，必须为正数
      */
     static final class CounterCell {
+        /** 默认 100% 资源档的兼容 advance；新档位由实例字段携带真实值。 */
         static final int ADVANCE_PIXELS = PackAssets.COUNTER_CELL_ADVANCE;
 
         private final List<String> layers;
+        private final int advancePixels;
 
         CounterCell(String text, int advancePixels) {
             this(text == null || text.isEmpty() ? List.of() : List.of(text), advancePixels);
         }
 
         CounterCell(List<String> layers, int advancePixels) {
-            if (advancePixels != ADVANCE_PIXELS) {
-                throw new IllegalArgumentException("记牌器格子的净前进量必须是 " + ADVANCE_PIXELS + "：" + advancePixels);
+            if (advancePixels <= 0) {
+                throw new IllegalArgumentException("记牌器格子的净前进量必须为正数：" + advancePixels);
             }
             this.layers = layers == null ? List.of() : List.copyOf(layers);
+            this.advancePixels = advancePixels;
         }
 
         List<String> layers() {
@@ -87,7 +91,7 @@ final class TrickHudView {
         }
 
         int advancePixels() {
-            return ADVANCE_PIXELS;
+            return advancePixels;
         }
 
         boolean isEmpty() {
@@ -117,7 +121,7 @@ final class TrickHudView {
      * @param rowXOffsets    三行【各自】的水平偏移，叠加在 {@code xOffsetPixels} 之上；
      *                       正右负左。见 {@link RowXOffsets}
      * @param counterCells   记牌器行的各格，按 CardRank.values() 顺序排列；null 或空表示不显示记牌器行。
-     *                       每格净前进量固定为 34 像素，格间距另行累加
+     *                       每格净前进量由对应资源档携带，格间距另行累加
      * @param counterGapPixels 相邻两格的间距
      */
     static String buildMiniMessage(
@@ -337,7 +341,7 @@ final class TrickHudView {
                 List<String> layers = cell.layers();
                 for (int layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
                     if (layerIndex > 0) {
-                        appendOffset(builder, offsetProvider, -CounterCell.ADVANCE_PIXELS);
+                        appendOffset(builder, offsetProvider, -cell.advancePixels());
                     }
                     builder.append(layers.get(layerIndex));
                 }

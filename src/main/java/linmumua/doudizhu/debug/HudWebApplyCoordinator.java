@@ -152,7 +152,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                         controller.snapshot(), disk.messages()));
                 }
                 // 当前 HUD 没有独立的 Trick HUD CE 字形资源；每次保存统一写当前 hotbar overlay。
-                return overlayWriter.writeAsync(resolved.root(), disk.offsetY(), executor,
+                return overlayWriter.writeAsync(resolved.root(), disk.offsetY(), disk.hotbarScale(), executor,
                         () -> isTaskActive(task))
                     .thenCompose(written -> {
                         if (!isTaskActive(task)) {
@@ -163,8 +163,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                             return CompletableFuture.completedFuture(ApplyResult.failed(controller.snapshot(),
                                 List.of("写出当前 hotbar 调试覆盖层失败，未触发 CraftEngine 重载。")));
                         }
-                        return resourceAndApply(resolved.bridge(), disk.offsetY(), disk.appliedKeys(),
-                            disk.messages(), task);
+                        return resourceAndApply(resolved.bridge(), disk.offsetY(), disk.hotbarScale(),
+                            disk.appliedKeys(), disk.messages(), task);
                     });
             });
         }).exceptionally(this::failedFromThrowable);
@@ -175,13 +175,20 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             if (!isTaskActive(task)) {
                 return CompletableFuture.completedFuture(inactiveResult("未重载配置。"));
             }
-            return CompletableFuture.supplyAsync(() -> isTaskActive(task)
-                ? controller.reloadFromDiskForWeb() : null, executor)
-                .thenCompose(offsetY -> {
-                    if (offsetY == null || !isTaskActive(task)) {
+            return CompletableFuture.supplyAsync(() -> {
+                if (!isTaskActive(task)) {
+                    return null;
+                }
+                // 保留 reloadFromDiskForWeb() 这个旧调用入口；scale 在同一配置锁边界内读取。
+                int offsetY = controller.reloadFromDiskForWeb();
+                int hotbarScale = controller.hotbarScaleForWeb();
+                return new RuntimeValues(offsetY, hotbarScale);
+            }, executor)
+                .thenCompose(values -> {
+                    if (values == null || !isTaskActive(task)) {
                         return CompletableFuture.completedFuture(inactiveResult("未写入 hotbar 覆盖层。"));
                     }
-                    return overlayWriter.writeAsync(resolved.root(), offsetY, executor,
+                    return overlayWriter.writeAsync(resolved.root(), values.offsetY(), values.hotbarScale(), executor,
                             () -> isTaskActive(task))
                         .thenCompose(written -> {
                             if (!isTaskActive(task)) {
@@ -192,8 +199,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                                 return CompletableFuture.completedFuture(ApplyResult.failed(controller.snapshot(),
                                     List.of("写出当前 hotbar 调试覆盖层失败，未触发 CraftEngine 重载。")));
                             }
-                            return resourceAndApply(resolved.bridge(), offsetY, List.of(),
-                                List.of("已从磁盘重新读取 HUD 配置。"), task);
+                            return resourceAndApply(resolved.bridge(), values.offsetY(), values.hotbarScale(),
+                                List.of(), List.of("已从磁盘重新读取 HUD 配置。"), task);
                         });
                 });
         }).exceptionally(this::failedFromThrowable);
@@ -240,13 +247,16 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
     }
 
     private CompletableFuture<ApplyResult> resourceAndApply(HudResourcePackBridge selected, int offsetY,
-                                                              List<String> appliedKeys, List<String> messages,
+                                                              int hotbarScale, List<String> appliedKeys,
+                                                              List<String> messages,
                                                               HudWebApplyTaskGate.Task<ApplyResult> task) {
         CompletableFuture<CompletableFuture<Void>> started = runOnMain(() -> {
             if (!isTaskActive(task)) {
                 throw new IllegalStateException("HUD 资源任务已失效，未启动 CraftEngine 重载。");
             }
-            return selected.reloadGenerateAndVerify(offsetY, executor, mainExecutor);
+            // 本次 overlay 尚未完成真实重载与 ZIP 校验，先撤销旧的 ready 声明；失败时绝不虚报成功。
+            plugin.setHotbarOverlayReady(false);
+            return selected.reloadGenerateAndVerify(offsetY, hotbarScale, executor, mainExecutor);
         });
         return started.thenCompose(resource -> {
             if (resource == null) {
@@ -261,6 +271,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
         return runOnMain(() -> taskGate.runIfActiveAtomically(
             task,
             () -> {
+                // 到这里才表示真实 CE reload/generate/ZIP 校验全链路成功；无客户端回执仍不宣称客户端已应用。
+                plugin.setHotbarOverlayReady(true);
                 plugin.applyHudRuntimeStateFromWeb();
                 List<String> resultMessages = new ArrayList<>(messages);
                 resultMessages.add("服务端资源包内容已校验；CraftEngine 自动上传结果未确认，客户端待重新下载。");
@@ -376,6 +388,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
     }
 
     private record Resolved(Path root, HudResourcePackBridge bridge) {}
+
+    private record RuntimeValues(int offsetY, int hotbarScale) {}
 
     public record ApplyResult(boolean ok, DebugHudConfigController.Snapshot snapshot,
                               List<String> appliedKeys, List<String> messages) {

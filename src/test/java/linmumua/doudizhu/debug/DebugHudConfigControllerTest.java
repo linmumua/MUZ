@@ -23,7 +23,7 @@ public class DebugHudConfigControllerTest {
     Path tempDir;
 
     @Test
-    void onlyExposesNineteenRuntimeHudFields() {
+    void onlyExposesTwentyTwoRuntimeHudFields() {
         Set<String> keys = new LinkedHashSet<>(DebugHudConfigController.fields().keySet());
 
         assertEquals(Set.of(
@@ -40,16 +40,19 @@ public class DebugHudConfigControllerTest {
             "trick-hud.avatar-outline.enabled",
             "trick-hud.avatar-outline.color",
             "trick-hud.counter.enabled",
+            "trick-hud.counter.scale",
+            "trick-hud.counter.offset-down",
             "trick-hud.counter.gap",
             "trick-hud.counter.hide-exhausted",
             "trick-hud.counter.offset-x",
+            "hotbar-hud.scale",
             "hotbar-hud.enabled",
             // hotbar 定位两键：offset-x 走 CE 负空格运行期即时生效，
             // offset-y 要落到字形 ascent 上（由 HotbarDebugOverlayWriter 写覆盖层）。
             "hotbar-hud.offset-x",
             "hotbar-hud.offset-y"
         ), keys);
-        assertEquals(19, keys.size());
+        assertEquals(22, keys.size());
     }
 
     @Test
@@ -76,7 +79,7 @@ public class DebugHudConfigControllerTest {
     void rejectsNumberThatIsNotAResourceTier() {
         DebugHudConfigController.ValidationException exception = assertThrows(
             DebugHudConfigController.ValidationException.class,
-            () -> DebugHudConfigController.parsePatch("{\"trick-hud.offset-down\":51}")
+            () -> DebugHudConfigController.parsePatch("{\"trick-hud.counter.offset-down\":51}")
         );
 
         assertTrue(exception.getMessage().contains("合法档位"));

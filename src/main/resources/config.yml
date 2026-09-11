@@ -254,14 +254,13 @@ trick-hud:
   card-height: 53
   # 整条 HUD 相对 BossBar 默认位置往下推多少像素。这里只调【牌那一行】，
   # 头像行由下面的 avatar-offset-down 单独调，两行互不影响。
-  # 可取 0..80（步长 2）。写奇数会静默吸附到最近的偶数档，
-  # 只有越界（如 -4、100）才会钳到边界并留警告。
+  # 可取 0..80（步长 1），资源包按每个像素档预生成。越界值会钳到边界并留警告。
   # 没有「往上」：BossBar 本来就贴着屏幕顶部，往上会直接出屏。
   offset-down: 50
   # 头像那一行往下推多少像素。与上面的 offset-down 【完全独立】：
   # 改 offset-down 不会动头像行，改这一项也不会动牌行。
-  # 可取 0..400（步长 2，和牌行不是同一套值：头像行要让开的距离大得多）。
-  # 写奇数会静默吸附到最近的偶数档，只有越界才钳到边界并留警告。
+  # 可取 0..400（步长 1，和牌行不是同一套值：头像行要让开的距离大得多）。
+  # 资源包按每个像素档预生成，越界值会钳到边界并留警告。
   #
   # 【两行会不会重叠要自己算】：这一项独立可调的代价就是插件不再替你保证不重叠。
   # 不重叠的条件是：avatar-offset-down >= offset-down + 12 * avatar-scale
@@ -300,11 +299,15 @@ trick-hud:
     color: "#000000"
   # 记牌器：HUD 的【第三行】，固定 15 格（3~10、J、Q、K、A、2、小王、大王）。
   # 上方显示牌类，下方矩形框内显示本局累计已出张数（普通点数 0..4，双王各 0..1）。
-  # 三层资源包字形共用头像下移档；和上面两行一样共用 offset-x，但有自己独立的开关。
+  # 三层资源包字形共用 counter 自己的 scale/Y 档；和上面两行一样共用 offset-x，但有自己独立的开关。
   counter:
     # 只关这一行，牌行与头像行照旧。
     # 单独给开关是因为「嫌它占地方」和「嫌它降低难度」都不该被迫连整条 HUD 一起关掉。
     enabled: true
+    # 记牌器资源缩放档，只允许 75/100/125；底图、选中框和三层 cell 共用该档。
+    scale: 100
+    # 记牌器独立的纵向偏移，只允许 0..400、步长 2；旧配置缺键时迁移自 avatar-offset-down。
+    offset-down: 122
     # 相邻两格的间距。
     # 【每格自身的宽度不在这里配】：牌类/框/数字分层字形固定宽 33px、前进量 34px，
     # 包括 10 和双王在内各格等宽；默认 gap=2 时整行总前进量为 538px。
@@ -401,10 +404,11 @@ debug:
   web-ui:
     # Debug Web 调试面板。开启后只在服务端本机回环地址监听 port 端口，
     # 可通过 http://127.0.0.1:<port> 或 http://localhost:<port> 打开可编辑 HUD 配置页。
-    # 页面可改这些运行期字段：trick-hud.enabled/avatar-scale/avatar-gap/card-step/card-height、
+    # 页面可改这些运行期字段（共 22 个）：trick-hud.enabled/avatar-scale/avatar-gap/card-step/card-height、
     # trick-hud.offset-down/avatar-offset-down/offset-x/card-offset-x/avatar-offset-x、
-    # trick-hud.counter.enabled/gap/hide-exhausted/offset-x、hotbar-hud.enabled/offset-x/offset-y。
-    # 不提供构建期 hotbar 字形参数编辑。
+    # trick-hud.counter.enabled/scale/offset-down/gap/hide-exhausted/offset-x、
+    # hotbar-hud.scale/enabled/offset-x/offset-y。
+    # 不提供构建期 hotbar glyph-ascent/slot-count 等参数编辑。
     # “保存并应用”先在 Debug Web 单线程异步写回 config.yml 与当前唯一的 hotbar CE overlay，
     # 再切主线程启动 CE 真实重载 Future，异步生成并校验 ZIP 后应用 HUD 运行态；“重新读取配置”也走同一条
     # HUD 专用异步链路，只从磁盘重载，不调用完整 reloadVisualState，不重建牌桌，会丢弃页面上尚未保存的改动。
@@ -564,6 +568,8 @@ hotbar-hud:
   # 是否启用。false 时降级为普通 ActionBar（对局功能不受影响）。
   # 【注意】启用后需要玩家重新下载包含自定义字形的资源包才能看到效果；资源包不会全局隐藏原版 hotbar。
   enabled: false
+  # 底图与选中框资源缩放档，只允许 75/100/125；运行期只选择构建期已生成的档位。
+  scale: 100
   # 槽位底图水平偏移（像素，正数右移、负数左移）。
   # 走 CraftEngine 负空格实现，【运行期即时生效】：/muz reload 或 Debug Web 保存后
   # 下一次推送就能看到，不需要重新构建、不需要玩家重下资源包。

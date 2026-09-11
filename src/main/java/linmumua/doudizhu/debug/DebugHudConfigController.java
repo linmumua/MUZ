@@ -27,8 +27,8 @@ import java.util.Set;
 /**
  * Debug Web 面板可改的 HUD 配置白名单与保存入口。
  *
- * <p>这个类刻意只暴露 19 个运行期可轻量应用的键：16 个 {@code trick-hud.*}
- * 叶子键，加上 3 个 {@code hotbar-hud.*} 键。Web 请求里的其它键
+ * <p>这个类刻意只暴露 22 个运行期可轻量应用的键：18 个 {@code trick-hud.*}
+ * 叶子键，加上 4 个 {@code hotbar-hud.*} 键。Web 请求里的其它键
  * 一律拒绝，避免调试面板变成任意 YAML 编辑器，也避免 HTTP 线程碰到牌桌坐标、经济、存储等
  * 非 HUD 运行态配置。
  */
@@ -72,7 +72,8 @@ public final class DebugHudConfigController {
         synchronized (plugin.hudWebConfigLock()) {
             if (patch.values().isEmpty()) {
                 return new DiskSaveResult(true, List.of(), List.of("没有提交任何变更。"),
-                    plugin.yamlConfig().getInt("hotbar-hud.offset-y", 0));
+                    plugin.yamlConfig().getInt("hotbar-hud.offset-y", 0),
+                    plugin.yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
             }
             MuzYamlConfig config = plugin.yamlConfig();
             // 这是 Web 自身的快照边界：先复制当前根，再在同一把锁内合并并原子写盘。
@@ -84,12 +85,14 @@ public final class DebugHudConfigController {
                 }
                 config.saveWithComments(packagedConfigTemplate());
                 return new DiskSaveResult(true, new ArrayList<>(patch.values().keySet()), List.of(),
-                    config.getInt("hotbar-hud.offset-y", 0));
+                    config.getInt("hotbar-hud.offset-y", 0),
+                    config.getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
             } catch (Exception exception) {
                 config.set(null, before);
                 return new DiskSaveResult(false, List.of(),
                     List.of("保存 config.yml 失败，已回滚内存配置：" + exception.getMessage()),
-                    config.getInt("hotbar-hud.offset-y", 0));
+                    config.getInt("hotbar-hud.offset-y", 0),
+                    config.getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
             }
         }
     }
@@ -103,6 +106,14 @@ public final class DebugHudConfigController {
             MuzYamlConfig config = plugin.yamlConfig();
             config.reload();
             return config.getInt("hotbar-hud.offset-y", 0);
+        }
+    }
+
+    /** 读取刚完成磁盘重载后的 hotbar scale；调用方必须与 reloadFromDiskForWeb 同线程串行调用。 */
+    int hotbarScaleForWeb() {
+        synchronized (plugin.hudWebConfigLock()) {
+            return validHotbarScale(plugin.yamlConfig().getInt(
+                "hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
         }
     }
 
@@ -173,9 +184,18 @@ public final class DebugHudConfigController {
         if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
             avatarScale = 6;
         }
+        int counterScale = validCounterScale(config.getInt("trick-hud.counter.scale", PackAssets.COUNTER_DEFAULT_SCALE));
+        int counterDownOffset = config.contains("trick-hud.counter.offset-down")
+            ? config.getInt("trick-hud.counter.offset-down", 122)
+            : config.getInt("trick-hud.avatar-offset-down", 122);
+        int counterDownTier = PackAssets.nearestCounterDownOffsetTier(counterDownOffset);
+        int hotbarScale = validHotbarScale(config.getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
         return currentGeometry(
             avatarScale,
-            config.getBoolean("trick-hud.avatar-outline.enabled", true));
+            config.getBoolean("trick-hud.avatar-outline.enabled", true),
+            counterScale,
+            counterDownTier,
+            hotbarScale);
     }
 
     private static PreviewGeometry currentGeometry(Map<String, Object> values) {
@@ -183,11 +203,26 @@ public final class DebugHudConfigController {
         if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
             avatarScale = 6;
         }
+        int counterScale = validCounterScale(intValue(values.getOrDefault(
+            "trick-hud.counter.scale", PackAssets.COUNTER_DEFAULT_SCALE)));
+        int counterDownOffset = intValue(values.getOrDefault("trick-hud.counter.offset-down", 122));
+        int counterDownTier = PackAssets.nearestCounterDownOffsetTier(counterDownOffset);
+        int hotbarScale = validHotbarScale(intValue(values.getOrDefault(
+            "hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE)));
         boolean outlined = Boolean.TRUE.equals(values.getOrDefault("trick-hud.avatar-outline.enabled", true));
-        return currentGeometry(avatarScale, outlined);
+        return currentGeometry(avatarScale, outlined, counterScale, counterDownTier, hotbarScale);
     }
 
     private static PreviewGeometry currentGeometry(int avatarScale, boolean outlined) {
+        return currentGeometry(avatarScale, outlined,
+            PackAssets.COUNTER_DEFAULT_SCALE,
+            PackAssets.nearestCounterDownOffsetTier(122),
+            PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    private static PreviewGeometry currentGeometry(int avatarScale, boolean outlined,
+                                                   int counterScale, int counterDownTier, int hotbarScale) {
+        PackAssets.HotbarTier compatibilityHotbar = PackAssets.hotbarTier(PackAssets.HOTBAR_DEFAULT_SCALE);
         return new PreviewGeometry(
             640,
             360,
@@ -199,6 +234,10 @@ public final class DebugHudConfigController {
             sampleCardFixtures(),
             avatarSlotGeometries(avatarScale, outlined),
             avatarLayoutGeometries(),
+            counterTierGeometries(counterDownTier),
+            hotbarGeometries(),
+            // 以下字段是旧前端兼容字段，继续固定为 100% 资源档的默认几何；新前端使用
+            // counterTiers/hotbars，避免把当前选择误当成字形表的唯一档位。
             PackAssets.COUNTER_CELL_WIDTH,
             PackAssets.COUNTER_CELL_HEIGHT,
             PackAssets.COUNTER_CELL_ADVANCE,
@@ -208,12 +247,20 @@ public final class DebugHudConfigController {
             PackAssets.COUNTER_LABEL_ASCENT,
             PackAssets.COUNTER_FRAME_TOP_DELTA,
             PackAssets.COUNTER_DIGIT_INSET,
-            PackAssets.HOTBAR_HUD_GLYPH_WIDTH,
-            PackAssets.HOTBAR_HUD_GLYPH_ADVANCE,
-            HotbarDebugOverlayWriter.GLYPH_HEIGHT,
-            HotbarDebugOverlayWriter.BASE_ASCENT,
-            HotbarDebugOverlayWriter.minOffsetY(),
-            HotbarDebugOverlayWriter.maxOffsetY());
+            compatibilityHotbar.width(),
+            compatibilityHotbar.advance(),
+            compatibilityHotbar.height(),
+            compatibilityHotbar.baseAscent(),
+            compatibilityHotbar.minOffsetY(),
+            compatibilityHotbar.maxOffsetY());
+    }
+
+    private static int validCounterScale(int scale) {
+        return PackAssets.counterScaleTierOf(scale) < 0 ? PackAssets.COUNTER_DEFAULT_SCALE : scale;
+    }
+
+    private static int validHotbarScale(int scale) {
+        return PackAssets.hotbarScaleTierOf(scale) < 0 ? PackAssets.HOTBAR_DEFAULT_SCALE : scale;
     }
 
     static Patch parsePatch(String jsonPatch) {
@@ -306,6 +353,42 @@ public final class DebugHudConfigController {
             geometries.add(new PreviewGeometry.CounterGeometry(
                 rank.label(), counters.remaining(rank), counters.played(rank), counters.exhausted(rank)
             ));
+        }
+        return List.copyOf(geometries);
+    }
+
+    /** 按当前 counter Y 档为每个合法 scale 下发完整的三层 cell 几何。 */
+    private static List<PreviewGeometry.CounterTierGeometry> counterTierGeometries(int downOffsetTier) {
+        List<PreviewGeometry.CounterTierGeometry> geometries = new ArrayList<>();
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            PackAssets.CounterTier tier = PackAssets.counterTier(scale, downOffsetTier);
+            geometries.add(new PreviewGeometry.CounterTierGeometry(
+                tier.scale(),
+                tier.width(),
+                tier.height(),
+                tier.advance(),
+                tier.labelHeight(),
+                tier.frameHeight(),
+                tier.digitHeight(),
+                tier.labelAscent(),
+                tier.frameTopDelta(),
+                tier.digitInset()));
+        }
+        return List.copyOf(geometries);
+    }
+
+    /** 下发完整 hotbar 三档几何，前端只消费这些字段，不复算槽位/advance。 */
+    private static List<PreviewGeometry.HotbarGeometry> hotbarGeometries() {
+        List<PreviewGeometry.HotbarGeometry> geometries = new ArrayList<>();
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+            geometries.add(new PreviewGeometry.HotbarGeometry(
+                tier.scale(), tier.width(), tier.height(), tier.advance(), tier.baseAscent(),
+                tier.minOffsetY(), tier.maxOffsetY(), tier.font(), tier.texture(), tier.selectTexture(),
+                tier.selectWidth(), tier.selectHeight(), tier.selectAdvance(), tier.slotCount(),
+                tier.slotWidth(), tier.slotHeight(), tier.slotStep(), tier.slotsStartX(), tier.slotsStartY(),
+                tier.selectStartX(), tier.selectStartY(), tier.baseCodepoint(), tier.debugCodepoint(),
+                tier.selectCodepoint(), tier.selectDebugCodepoint()));
         }
         return List.copyOf(geometries);
     }
@@ -446,6 +529,30 @@ public final class DebugHudConfigController {
         return values;
     }
 
+    private static List<Integer> counterDownOptions() {
+        List<Integer> values = new ArrayList<>();
+        for (int tier = 0; tier < PackAssets.counterDownOffsetTierCount(); tier++) {
+            values.add(PackAssets.counterDownOffsetAt(tier));
+        }
+        return values;
+    }
+
+    private static List<Integer> counterScaleOptions() {
+        List<Integer> values = new ArrayList<>();
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            values.add(scale);
+        }
+        return values;
+    }
+
+    private static List<Integer> hotbarScaleOptions() {
+        List<Integer> values = new ArrayList<>();
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            values.add(scale);
+        }
+        return values;
+    }
+
     private static FieldSpec color(String key, String fallback, String label, String group) {
         return new FieldSpec(key, ValueType.COLOR, fallback, null, null, null, label, group, "color", List.of());
     }
@@ -471,9 +578,15 @@ public final class DebugHudConfigController {
         add(specs, bool("trick-hud.avatar-outline.enabled", true, "头像描边开关", "头像描边"));
         add(specs, color("trick-hud.avatar-outline.color", "#000000", "头像描边颜色", "头像描边"));
         add(specs, bool("trick-hud.counter.enabled", true, "记牌器开关", "记牌器"));
+        add(specs, tierInteger("trick-hud.counter.scale", PackAssets.COUNTER_DEFAULT_SCALE,
+            counterScaleOptions(), "记牌器缩放档", "记牌器"));
+        add(specs, tierInteger("trick-hud.counter.offset-down", 122,
+            counterDownOptions(), "记牌器向下偏移", "记牌器"));
         add(specs, integer("trick-hud.counter.gap", 2, 0, null, 1, "记牌器格间距", "记牌器"));
         add(specs, bool("trick-hud.counter.hide-exhausted", false, "出完后隐藏该格", "记牌器"));
         add(specs, integer("trick-hud.counter.offset-x", 0, null, null, 1, "记牌行水平偏移", "记牌器"));
+        add(specs, tierInteger("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE,
+            hotbarScaleOptions(), "Hotbar 缩放档", "Hotbar HUD"));
         add(specs, bool("hotbar-hud.enabled", false, "Hotbar HUD 开关", "Hotbar HUD"));
         // 水平偏移走 CE 负空格，任意整数都合法，所以不给 min/max（控件退化为普通数字框）。
         add(specs, integer("hotbar-hud.offset-x", 0, null, null, 1, "Hotbar 水平偏移", "Hotbar HUD"));
@@ -529,7 +642,9 @@ public final class DebugHudConfigController {
      * @param cards              牌几何，按资源包档位顺序下发
      * @param avatars            头像几何，按头像倍数顺序下发
      * @param counters           记牌器各格动态数据，按 CardRank 顺序下发
-     * @param counterCellWidth   记牌器 cell 宽度（固定 33px）
+     * @param counterTiers       counter 各缩放档的完整分层 cell 几何；当前 counter Y 已折入 ascent
+     * @param hotbars             hotbar 各缩放档的完整九槽与选中框几何
+     * @param counterCellWidth   记牌器 cell 宽度（旧前端兼容字段，固定 33px）
      * @param counterCellHeight  记牌器 cell 高度（固定 36px）
      * @param counterAdvance     记牌器 cell 前进量（固定 34px）
      * @param counterLabelHeight 记牌器上方牌类区域高度（固定 16px）
@@ -550,6 +665,7 @@ public final class DebugHudConfigController {
         List<CardGeometry> cards, List<AvatarGeometry> avatars, List<CounterGeometry> counters,
         List<CardFixture> sampleCards, List<AvatarSlotGeometry> avatarSlots,
         List<AvatarLayoutGeometry> avatarLayouts,
+        List<CounterTierGeometry> counterTiers, List<HotbarGeometry> hotbars,
         int counterCellWidth, int counterCellHeight, int counterAdvance,
         int counterLabelHeight, int counterFrameHeight, int counterDigitHeight,
         int counterLabelAscent, int counterFrameTopDelta, int counterDigitInset,
@@ -562,6 +678,8 @@ public final class DebugHudConfigController {
             sampleCards = List.copyOf(sampleCards);
             avatarSlots = List.copyOf(avatarSlots);
             avatarLayouts = List.copyOf(avatarLayouts);
+            counterTiers = List.copyOf(counterTiers);
+            hotbars = List.copyOf(hotbars);
         }
 
         public record CardGeometry(int tier, int height, int width, int advance) {}
@@ -590,6 +708,21 @@ public final class DebugHudConfigController {
             String position, int scale, int slotWidth, int contentAdvance, int rowHeight,
             int faceAdvance, int crownHeight, boolean crowned, boolean empty) {}
 
+        /** counter 的三层位图 cell 几何；ascent 已包含当前独立 counter Y 档。 */
+        public record CounterTierGeometry(
+            int scale, int cellWidth, int cellHeight, int advance,
+            int labelHeight, int frameHeight, int digitHeight,
+            int labelAscent, int frameTopDelta, int digitInset) {}
+
+        /** hotbar 的完整缩放、底图、九槽、选中框与 overlay 码位几何。 */
+        public record HotbarGeometry(
+            int scale, int width, int height, int advance, int baseAscent,
+            int minOffsetY, int maxOffsetY, String font, String texture, String selectTexture,
+            int selectWidth, int selectHeight, int selectAdvance, int slotCount,
+            int slotWidth, int slotHeight, int slotStep, int slotsStartX, int slotsStartY,
+            int selectStartX, int selectStartY, int baseCodepoint, int debugCodepoint,
+            int selectCodepoint, int selectDebugCodepoint) {}
+
         /**
          * 记牌器 cell 的动态数据；宽度、高度与前进量由 PreviewGeometry 固定下发。
          * playedCount 是累计已出数量，exhausted 明确表示该点数已耗尽，前端不推导状态。
@@ -598,10 +731,12 @@ public final class DebugHudConfigController {
     }
 
 
-    record DiskSaveResult(boolean ok, List<String> appliedKeys, List<String> messages, int offsetY) {
+    record DiskSaveResult(boolean ok, List<String> appliedKeys, List<String> messages,
+                          int offsetY, int hotbarScale) {
         DiskSaveResult {
             appliedKeys = List.copyOf(appliedKeys);
             messages = List.copyOf(messages);
+            hotbarScale = validHotbarScale(hotbarScale);
         }
     }
 

@@ -19,4 +19,13 @@ public interface HudResourcePackBridge {
      * 重载、生成并校验资源包。返回 Future 完成前不得释放资源任务租约。
      */
     CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, Executor ioExecutor, Executor mainExecutor);
+
+    /**
+     * 带 hotbar 缩放档的资源同步入口；旧测试桥接默认按 100% 档执行，保持接口兼容。
+     * 生产 CraftEngine 桥接应覆盖此方法，以校验本次 scale 对应的 overlay 声明。
+     */
+    default CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, int hotbarScale,
+                                                              Executor ioExecutor, Executor mainExecutor) {
+        return reloadGenerateAndVerify(offsetY, ioExecutor, mainExecutor);
+    }
 }

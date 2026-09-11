@@ -107,6 +107,12 @@ final class TrickHudService {
      */
     private static final int DEFAULT_COUNTER_GAP = 2;
 
+    /** counter 资源的默认缩放百分比；构建期 100 档保留旧码位与旧几何。 */
+    private static final int DEFAULT_COUNTER_SCALE = 100;
+
+    /** counter 独立 Y 的源码默认值；旧配置缺键时先继承 avatar-offset-down。 */
+    private static final int DEFAULT_COUNTER_OFFSET_DOWN = 122;
+
     /**
      * 从 config 读出来的那几个可调量。
      *
@@ -127,8 +133,9 @@ final class TrickHudService {
      * @param counterEnabled 记牌器行（第三行）的开关。【与 {@link #enabled} 分开】：
      *                       有人只想要「谁出了什么」而嫌记牌器占地方或觉得降低难度，
      *                       关它不该连整条 HUD 一起关掉
-     * @param counterGap     记牌器相邻两格的间距。各格自身宽度【不在这里配】：
-     *                       标签、框、数字三层位图固定为 33px 视觉宽度、34px 前进量，
+     * @param counterScale   记牌器资源缩放百分比，只允许构建期提供的 75/100/125 档
+     * @param counterDownOffsetTier 记牌器独立的向下偏移档，不再复用头像行位置
+     * @param counterGap     记牌器相邻两格的间距。各格自身宽度由对应 scale 的资源几何决定，
      *                       不随累计已出数量变化；固定宽度才能让 15 格位置始终稳定
      * @param counterHideExhausted 某个点数出完（剩 0 张）时是否隐藏那一格。
      *                       【隐藏的只是内容，不是位置】：那一格照样占住它的宽度，
@@ -145,6 +152,8 @@ final class TrickHudService {
         int offsetX,
         TrickHudView.RowXOffsets rowXOffsets,
         boolean counterEnabled,
+        int counterScale,
+        int counterDownOffsetTier,
         int counterGap,
         boolean counterHideExhausted
     ) {
@@ -217,6 +226,25 @@ final class TrickHudService {
         // 记牌器行【独立开关】：关掉只少画第三行，牌行与头像行照旧。
         boolean counterEnabled = config.getBoolean("trick-hud.counter.enabled", true);
 
+        int counterScale = config.getInt("trick-hud.counter.scale", DEFAULT_COUNTER_SCALE);
+        if (PackAssets.counterScaleTierOf(counterScale) < 0) {
+            warn.accept("trick-hud.counter.scale=" + counterScale
+                + " 不是当前资源包支持的缩放档（75/100/125），已回退为 " + DEFAULT_COUNTER_SCALE);
+            counterScale = DEFAULT_COUNTER_SCALE;
+        }
+
+        // counter Y 与头像行完全独立。旧配置缺键时先继承 avatar-offset-down，
+        // 再由默认值 122 收底；ensureConfigIntegrity 会把迁移后的结果写回磁盘，
+        // 这里保留同一 fallback 供纯函数测试和未经过启动迁移的旧配置使用。
+        String counterOffsetKey = "trick-hud.counter.offset-down";
+        int counterOffsetDown = config.contains(counterOffsetKey)
+            ? config.getInt(counterOffsetKey, DEFAULT_COUNTER_OFFSET_DOWN)
+            : config.getInt("trick-hud.avatar-offset-down", DEFAULT_COUNTER_OFFSET_DOWN);
+        int counterDownOffsetTier = snapTier(
+            counterOffsetDown, PackAssets.counterDownOffsetMin(), PackAssets.counterDownOffsetMax(),
+            PackAssets.nearestCounterDownOffsetTier(counterOffsetDown),
+            counterOffsetKey, warn, PackAssets::counterDownOffsetAt);
+
         // 和 avatarGap 不同，这里【必须拦负值】：头像槽的负间距是有意义的紧凑排版，
         // 而记牌器 15 格一字排开，负间距会让点数图标和邻格的数字直接叠在一起糊成一团，
         // 没有任何一种看法能读出剩几张。这属于纯粹的配置笔误，回退而不是照用。
@@ -231,7 +259,7 @@ final class TrickHudService {
 
         return new Settings(
             enabled, avatarScale, avatarGap, cardStep, heightTier, downOffsetTier, avatarDownOffsetTier, offsetX,
-            rowXOffsets, counterEnabled, counterGap, counterHideExhausted);
+            rowXOffsets, counterEnabled, counterScale, counterDownOffsetTier, counterGap, counterHideExhausted);
     }
 
     /**
@@ -588,7 +616,8 @@ final class TrickHudService {
             settings.downOffsetTier(),
             settings.offsetX(),
             settings.rowXOffsets(),
-            showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(), avatarRowDownTier) : List.of(),
+            showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(),
+                settings.counterScale(), settings.counterDownOffsetTier()) : List.of(),
             settings.counterGap()
         );
         apply(viewer, line);
@@ -604,12 +633,14 @@ final class TrickHudService {
      * @param playedCounts       每个点数累计已出数量
      * @param remainingCounts    每个点数剩余数量，仅用于耗尽/隐藏判断
      * @param hideWhenExhausted  出完的点数是否输出空占位
-     * @param downOffsetTier     记牌行的头像下移档
+     * @param scale              记牌器资源缩放百分比
+     * @param downOffsetTier     记牌器自己的向下偏移档
      */
     private List<TrickHudView.CounterCell> counterCells(
         Map<CardRank, Integer> playedCounts,
         Map<CardRank, Integer> remainingCounts,
         boolean hideWhenExhausted,
+        int scale,
         int downOffsetTier
     ) {
         if ((playedCounts == null || playedCounts.isEmpty())
@@ -618,7 +649,8 @@ final class TrickHudService {
         }
         Map<CardRank, Integer> played = playedCounts == null ? Map.of() : playedCounts;
         Map<CardRank, Integer> remaining = remainingCounts == null ? Map.of() : remainingCounts;
-        String font = PackAssets.counterGlyphFont(downOffsetTier);
+        String font = PackAssets.counterGlyphFont(scale, downOffsetTier);
+        PackAssets.CounterTier geometry = PackAssets.counterTier(scale, downOffsetTier);
         List<TrickHudView.CounterCell> cells = new ArrayList<>(CardRank.values().length);
         for (CardRank rank : CardRank.values()) {
             int initial = initialCount(rank);
@@ -626,17 +658,17 @@ final class TrickHudService {
             int left = clampCount(remaining.getOrDefault(rank, initial), initial);
             boolean exhausted = left == 0;
             if (hideWhenExhausted && exhausted) {
-                cells.add(new TrickHudView.CounterCell(List.of(), TrickHudView.CounterCell.ADVANCE_PIXELS));
+                cells.add(new TrickHudView.CounterCell(List.of(), geometry.advance()));
                 continue;
             }
             String frameColor = exhausted ? "dark_gray" : "white";
             String labelColor = exhausted ? "dark_gray" : "white";
             String digitColor = exhausted ? "dark_gray" : "gray";
-            String frame = layer(font, PackAssets.counterFrameChar(exhausted, downOffsetTier), frameColor);
-            String label = layer(font, PackAssets.counterRankChar(rank, downOffsetTier), labelColor);
-            String digit = layer(font, PackAssets.counterDigitChar(shown, downOffsetTier), digitColor);
-            // 层顺序固定为 label → frame → digit；View 会把后两层分别用 -34 拉回同一格。
-            cells.add(new TrickHudView.CounterCell(List.of(label, frame, digit), TrickHudView.CounterCell.ADVANCE_PIXELS));
+            String frame = layer(font, PackAssets.counterFrameChar(exhausted, scale, downOffsetTier), frameColor);
+            String label = layer(font, PackAssets.counterRankChar(rank, scale, downOffsetTier), labelColor);
+            String digit = layer(font, PackAssets.counterDigitChar(shown, scale, downOffsetTier), digitColor);
+            // 层顺序固定为 label → frame → digit；View 会把后两层分别按该 scale 的 advance 拉回同一格。
+            cells.add(new TrickHudView.CounterCell(List.of(label, frame, digit), geometry.advance()));
         }
         return cells;
     }

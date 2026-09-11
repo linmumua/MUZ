@@ -73,38 +73,45 @@ public final class HotbarDebugOverlayWriter {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
     }
 
-    /**
-     * {@code offset-y} 的合法下界（向上偏移的极限）。
-     *
-     * <p>Minecraft 要求 {@code ascent <= height}。覆盖层的
-     * {@code ascent = BASE_ASCENT - offsetY}，代入得
-     * {@code BASE_ASCENT - offsetY <= GLYPH_HEIGHT}，即
-     * {@code offsetY >= BASE_ASCENT - GLYPH_HEIGHT = -150}。
-     * 取等号时字形贴到基线上方边界，实际可用性由进服实测确认。
-     */
+    /** {@code offset-y} 的合法下界（默认 100% 档，兼容旧调用方）。 */
     public static int minOffsetY() {
-        return BASE_ASCENT - GLYPH_HEIGHT;
+        return minOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /**
-     * {@code offset-y} 的合法上界（向下偏移的极限）。
-     *
-     * <p>向下没有 Minecraft 层面的硬限制（ascent 越小越往下），但推到屏幕外就没有意义了。
-     * 取 256 作为实用上界：1080p 下 GUI scale 3 时屏幕高约 360 MC 像素，
-     * 256 已足够把底图从物品栏推到屏幕任意位置。
-     */
+    /** 指定 hotbar scale 的合法下界；ascent 必须不大于该档位的字形 height。 */
+    public static int minOffsetY(int scale) {
+        return PackAssets.hotbarTier(scale).minOffsetY();
+    }
+
+    /** {@code offset-y} 的合法上界（默认 100% 档，兼容旧调用方）。 */
     public static int maxOffsetY() {
-        return 256;
+        return maxOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /** 把 {@code offset-y} 钳到 {@link #minOffsetY()}..{@link #maxOffsetY()} 区间。 */
+    /** 指定 hotbar scale 的合法上界。 */
+    public static int maxOffsetY(int scale) {
+        return PackAssets.hotbarTier(scale).maxOffsetY();
+    }
+
+    /** 把默认 100% 档的 {@code offset-y} 钳位，保留旧调用方行为。 */
     public static int clampOffsetY(int offsetY) {
-        return Math.max(minOffsetY(), Math.min(maxOffsetY(), offsetY));
+        return clampOffsetY(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /** 给定（已钳位的）{@code offset-y} 算出要写进 images.yml 的 ascent。 */
+    /** 把指定 hotbar scale 的 {@code offset-y} 钳到该档位的合法区间。 */
+    public static int clampOffsetY(int offsetY, int scale) {
+        return Math.max(minOffsetY(scale), Math.min(maxOffsetY(scale), offsetY));
+    }
+
+    /** 给定默认 100% 档的 {@code offset-y} 算出要写进 images.yml 的 ascent。 */
     public static int ascentFor(int offsetY) {
-        return BASE_ASCENT - clampOffsetY(offsetY);
+        return ascentFor(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    /** 给定指定 scale 的 {@code offset-y} 算出要写进 images.yml 的 ascent。 */
+    public static int ascentFor(int offsetY, int scale) {
+        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+        return tier.baseAscent() - clampOffsetY(offsetY, scale);
     }
 
     /**
@@ -118,22 +125,39 @@ public final class HotbarDebugOverlayWriter {
      * @param offsetY 垂直偏移，正数向下；内部会钳位
      */
     public static String buildImagesYaml(int offsetY) {
-        int ascent = ascentFor(offsetY);
+        return buildImagesYaml(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    /** 生成指定 hotbar scale 的底图与选中框 overlay 声明。 */
+    public static String buildImagesYaml(int offsetY, int scale) {
+        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+        int clamped = clampOffsetY(offsetY, scale);
+        int ascent = ascentFor(clamped, scale);
         // char 用 \\uXXXX 转义写进 YAML：CraftEngine 按转义序列解析，
         // 直接写真实字符会因为它落在 PUA 区而在各种编辑器里显示成豆腐块，不可读也易被误改。
-        String charEscape = String.format("\\u%04x", PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT);
+        String suffix = scale == PackAssets.HOTBAR_DEFAULT_SCALE ? "" : "_s" + scale;
+        String baseCharEscape = String.format("\\u%04x", tier.debugCodepoint());
+        String selectCharEscape = String.format("\\u%04x", tier.selectDebugCodepoint());
+        String baseName = OVERLAY_NAMESPACE + ":hotbar_slots_debug" + suffix;
+        String selectName = OVERLAY_NAMESPACE + ":hotbar_select_debug" + suffix;
         return "# 【运行期生成，不要手改】由 MUZ 的 HotbarDebugOverlayWriter 按\n"
             + "# hotbar-hud.offset-y 写出，每次在 Debug Web 保存垂直偏移都会覆盖这个文件。\n"
-            + "# ascent = " + BASE_ASCENT + " - offset-y(" + clampOffsetY(offsetY) + ") = " + ascent + "\n"
-            + "# height 恒等于贴图原生高 " + GLYPH_HEIGHT + "，保证 1:1 渲染、只位移不缩放。\n"
+            + "# scale = " + scale + "%，ascent = " + tier.baseAscent() + " - offset-y(" + clamped + ") = " + ascent + "\n"
+            + "# height 与选中框 height 恒等于各自贴图原生高，保证 1:1 渲染、只位移不缩放。\n"
             + "# file 指向 bundle 提供的贴图，本覆盖层不自带 PNG。\n"
             + "images:\n"
-            + "  " + OVERLAY_NAMESPACE + ":hotbar_slots_debug:\n"
-            + "    height: " + GLYPH_HEIGHT + "\n"
+            + "  " + baseName + ":\n"
+            + "    height: " + tier.height() + "\n"
             + "    ascent: " + ascent + "\n"
-            + "    font: " + PackAssets.HOTBAR_HUD_FONT + "\n"
-            + "    file: muz:font/hotbar_slots.png\n"
-            + "    char: " + charEscape + "\n";
+            + "    font: " + tier.font() + "\n"
+            + "    file: " + tier.texture() + "\n"
+            + "    char: " + baseCharEscape + "\n"
+            + "  " + selectName + ":\n"
+            + "    height: " + tier.selectHeight() + "\n"
+            + "    ascent: " + ascent + "\n"
+            + "    font: " + tier.font() + "\n"
+            + "    file: " + tier.selectTexture() + "\n"
+            + "    char: " + selectCharEscape + "\n";
     }
 
     /** 生成覆盖层的 {@code pack.yml} 正文。 */
@@ -155,19 +179,32 @@ public final class HotbarDebugOverlayWriter {
      */
     public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
                                                                        java.util.concurrent.Executor executor) {
-        return writeAsync(root, offsetY, executor, () -> true);
+        return writeAsync(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, executor, () -> true);
+    }
+
+    /** 带 scale 的兼容重载；覆盖层底图与选中框必须使用同一档位。 */
+    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY, int scale,
+                                                                       java.util.concurrent.Executor executor) {
+        return writeAsync(root, offsetY, scale, executor, () -> true);
     }
 
     /**
      * 带任务有效性检查的异步写出。检查放在真正文件 I/O 所在线程，并且紧邻 writeNow，
      * 这样关闭或超时后已经排队但尚未开始的写盘不会继续落地旧状态。
      */
+    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY, int scale,
+                                                                       java.util.concurrent.Executor executor,
+                                                                       java.util.function.BooleanSupplier active) {
+        int clamped = clampOffsetY(offsetY, scale);
+        return java.util.concurrent.CompletableFuture.supplyAsync(
+            () -> active.getAsBoolean() && writeNow(root, clamped, scale), executor);
+    }
+
+    /** 旧参数顺序保留给已有调用点。 */
     public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
                                                                        java.util.concurrent.Executor executor,
                                                                        java.util.function.BooleanSupplier active) {
-        int clamped = clampOffsetY(offsetY);
-        return java.util.concurrent.CompletableFuture.supplyAsync(
-            () -> active.getAsBoolean() && writeNow(root, clamped), executor);
+        return writeAsync(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, executor, active);
     }
 
 
@@ -177,6 +214,10 @@ public final class HotbarDebugOverlayWriter {
      * @return 是否真的写成功；CraftEngine 缺失或写失败都返回 false
      */
     boolean writeNow(int offsetY) {
+        return writeNow(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    boolean writeNow(int offsetY, int scale) {
         if (!Bukkit.isPrimaryThread()) {
             plugin.getLogger().warning("异步写出 hotbar 调试覆盖层时未提供主线程解析的目录，已拒绝访问 CraftEngine PluginManager。");
             return false;
@@ -186,13 +227,17 @@ public final class HotbarDebugOverlayWriter {
             plugin.getLogger().info("CraftEngine 未检测到，跳过 hotbar 调试覆盖层生成。");
             return false;
         }
-        return writeNow(root, offsetY);
+        return writeNow(root, offsetY, scale);
     }
 
     /**
      * 使用主线程预先解析的目录写出资源；异步阶段不得再调用 Bukkit PluginManager。
      */
     boolean writeNow(Path root, int offsetY) {
+        return writeNow(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+    }
+
+    boolean writeNow(Path root, int offsetY, int scale) {
         if (root == null) {
             return false;
         }
@@ -207,11 +252,11 @@ public final class HotbarDebugOverlayWriter {
             packTemp = Files.createTempFile(root, "pack.yml.", ".tmp");
             imagesTemp = Files.createTempFile(imagesDirectory, "hotbar_debug.yml.", ".tmp");
             Files.writeString(packTemp, buildPackYaml(), StandardCharsets.UTF_8);
-            Files.writeString(imagesTemp, buildImagesYaml(offsetY), StandardCharsets.UTF_8);
+            Files.writeString(imagesTemp, buildImagesYaml(offsetY, scale), StandardCharsets.UTF_8);
             atomicReplace(packTemp, packFile);
             atomicReplace(imagesTemp, imagesFile);
-            plugin.getLogger().info("hotbar 调试覆盖层已写出，offset-y=" + clampOffsetY(offsetY)
-                + "（ascent=" + ascentFor(offsetY) + "）：" + root);
+            plugin.getLogger().info("hotbar 调试覆盖层已写出，scale=" + scale + "%，offset-y="
+                + clampOffsetY(offsetY, scale) + "（ascent=" + ascentFor(offsetY, scale) + "）：" + root);
             return true;
         } catch (Exception exception) {
             try {

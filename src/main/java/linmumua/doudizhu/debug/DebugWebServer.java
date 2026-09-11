@@ -8,6 +8,7 @@ import linmumua.doudizhu.DoudizhuPlugin;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -48,6 +49,33 @@ import java.util.concurrent.TimeoutException;
 public final class DebugWebServer {
     private static final Gson GSON = new Gson();
     private static final int MAX_BODY_BYTES = 16 * 1024;
+    /**
+     * 同源只读资源白名单：只允许前端请求构建期生成的 hotbar 相关 PNG。
+     *
+     * <p>键是后端 {@code hotbars[].texture / selectTexture} 下发的资源名（如
+     * {@code "muz:font/hotbar_slots.png"}、{@code "muz:font/scale_75/hotbar_select.png"}），
+     * 前端用 {@code /api/resource/<资源名>} 请求。值是 JAR classpath 内嵌路径。
+     *
+     * <p>三档（75/100/125）× 两个文件（底图 + 选中框）= 固定 6 条。
+     * 不要添加非 HUD 调试用途的资源条目，不要开放任意路径。
+     */
+    private static final Map<String, String> RESOURCE_WHITELIST = buildResourceWhitelist();
+
+    private static Map<String, String> buildResourceWhitelist() {
+        // 构建期产物的 classpath 根路径；与 build.gradle.kts 的 outputAssetsRoot 对应
+        final String classpathBase = "craftengine/muz/resourcepack/assets/muz/textures/font/";
+        LinkedHashMap<String, String> map = new LinkedHashMap<>();
+        // 100% 默认档：muz:font/hotbar_slots.png → classpath .../font/hotbar_slots.png
+        map.put("muz:font/hotbar_slots.png", classpathBase + "hotbar_slots.png");
+        map.put("muz:font/hotbar_select.png", classpathBase + "hotbar_select.png");
+        // 75% 档：muz:font/scale_75/hotbar_slots.png → classpath .../font/scale_75/hotbar_slots.png
+        map.put("muz:font/scale_75/hotbar_slots.png", classpathBase + "scale_75/hotbar_slots.png");
+        map.put("muz:font/scale_75/hotbar_select.png", classpathBase + "scale_75/hotbar_select.png");
+        // 125% 档：muz:font/scale_125/hotbar_slots.png → classpath .../font/scale_125/hotbar_slots.png
+        map.put("muz:font/scale_125/hotbar_slots.png", classpathBase + "scale_125/hotbar_slots.png");
+        map.put("muz:font/scale_125/hotbar_select.png", classpathBase + "scale_125/hotbar_select.png");
+        return Map.copyOf(map);
+    }
     /**
      * HTTP 层仅保留比协调器 120 秒结果租约略长的保护等待；超时只结束本次请求，
      * 不取消 coordinator 底层任务。迟到结果由 coordinator 自己按 generation 丢弃。
@@ -104,6 +132,7 @@ public final class DebugWebServer {
             httpServer.createContext("/", this::handleRoot);
             httpServer.createContext("/api/save", this::handleSave);
             httpServer.createContext("/api/reload", this::handleReload);
+            httpServer.createContext("/api/resource/", this::handleResource);
             // 守护线程：随 JVM 退出自动终止，不阻塞 shutdown
             executor = Executors.newFixedThreadPool(2, r -> {
                 Thread t = new Thread(r, "muz-debug-web");
@@ -285,6 +314,58 @@ public final class DebugWebServer {
         }
     }
 
+    /**
+     * /api/resource/{resourceName}（GET）：只读白名单内的构建期 PNG 资源。
+     *
+     * <p>URL 路径格式为 {@code /api/resource/muz:font/hotbar_slots.png}，
+     * 前缀 {@code /api/resource/} 之后的整段作为白名单键查找。
+     * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的 6 个固定条目；
+     * 用于前端 hotbar 各缩放档的真实图片预览。
+     * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
+     */
+    private void handleResource(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        // 提取 /api/resource/ 之后的完整相对路径作为白名单键
+        // 例如 /api/resource/muz:font/scale_75/hotbar_slots.png → muz:font/scale_75/hotbar_slots.png
+        final String prefix = "/api/resource/";
+        if (!path.startsWith(prefix) || path.length() <= prefix.length()) {
+            sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("资源路径无效。")));
+            return;
+        }
+        String name = path.substring(prefix.length());
+        // 安全校验：拒绝路径遍历和空名
+        if (name.isEmpty() || name.contains("..") || name.startsWith("/")) {
+            sendJson(exchange, 400, Map.of("ok", false, "messages", List.of("资源路径包含非法字符。")));
+            return;
+        }
+        String classpathResource = RESOURCE_WHITELIST.get(name);
+        if (classpathResource == null) {
+            sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("资源不在白名单内：" + name)));
+            return;
+        }
+        byte[] data;
+        try (InputStream stream = getClass().getClassLoader().getResourceAsStream(classpathResource)) {
+            if (stream == null) {
+                sendJson(exchange, 404, Map.of("ok", false, "messages",
+                    List.of("资源包尚未构建或 JAR 中不包含该文件：" + classpathResource)));
+                return;
+            }
+            data = stream.readAllBytes();
+        }
+        addSecurityHeaders(exchange.getResponseHeaders());
+        exchange.getResponseHeaders().set("Content-Type", "image/png");
+        // 构建期产物不变，强缓存减少重复读取
+        exchange.getResponseHeaders().set("Cache-Control", "public, max-age=86400, immutable");
+        exchange.sendResponseHeaders(200, data.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(data);
+        }
+    }
+
     private Map<String, Object> apiPayload(
         boolean ok,
         DebugHudConfigController.Snapshot snapshot,
@@ -348,15 +429,18 @@ public final class DebugWebServer {
                 + "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'");
     }
 
+    /** 测试用：返回白名单键集合（同源资源路由允许的文件名）。 */
+    static java.util.Set<String> resourceWhitelistNames() {
+        return RESOURCE_WHITELIST.keySet();
+    }
+
     static String buildHtml(DebugHudConfigController.Snapshot snapshot, String token) {
         DebugHudConfigController.Snapshot safeSnapshot = snapshot == null
             ? new DebugHudConfigController.Snapshot(Map.of(), List.of("配置快照尚未初始化。"), List.of())
             : snapshot;
         String stateJson = escapeJsonForScript(GSON.toJson(safeSnapshot));
         // 溢出防护靠 minmax(0,...)/min-width:0/word-break 从源头约束子元素尺寸，
-        // 而不是在 body 或 .panel 上用 overflow:hidden 裁切——裁切会创建新的滚动容器，
-        // 导致 .actions 的 position:sticky 失效（sticky 只在最近的滚动祖先内生效）。
-        // 预览区的大尺寸 MC 像素内容在 .preview（overflow:auto）内独立横滚。
+        // 不在 body 或 .panel 上用 overflow:hidden 裁切——裁切会创建新的滚动容器导致 .actions sticky 失效。
         String styles = "*{box-sizing:border-box}body{margin:0;background:#202326;color:#f4f1e8;font-family:Verdana,'Segoe UI',sans-serif;image-rendering:pixelated}"
             + "header{padding:18px 22px;background:#303438;border-bottom:4px solid #17191b;box-shadow:0 4px 0 #111}h1{margin:0;color:#f1c75b;font-size:22px;text-shadow:2px 2px #17191b}"
             // main 网格：宽屏两列、窄屏媒体查询里降为单列。minmax(0,...) 防止隐式最小宽度撑破容器。
@@ -376,10 +460,31 @@ public final class DebugWebServer {
             + ".ref{position:absolute;pointer-events:none}.ref.boss{background:#5c3d2177;outline:2px solid #d4a943}"
             + ".ref.bottom{border-top:2px dashed #d4a943;left:0;right:0}.ref.mid{border-left:2px dashed #d4a943;top:0;bottom:0}.ref.grid{background-image:linear-gradient(#ffffff0b 1px,transparent 1px),linear-gradient(90deg,#ffffff0b 1px,transparent 1px);background-size:8px 8px;inset:0}"
             + ".layer{position:absolute;cursor:grab;outline:2px solid transparent}.layer:hover{outline-color:#f1c75b}.layer.drag{cursor:grabbing;outline-color:#d26b48}"
+            + ".layer.selected{outline-color:#f1c75b;outline-width:2px;outline-style:solid}"
             + ".layer .tag{position:absolute;top:-17px;left:0;font-size:10px;color:#f1c75b;white-space:nowrap;pointer-events:none;text-shadow:1px 1px #111}"
             + ".cardbox{position:absolute;background:#f9fafb;outline:1px solid #222;color:#111;font-size:9px;font-weight:800;text-align:center;overflow:hidden}"
             + ".avslot{position:absolute}.avbox{position:absolute;background:#4e8cff;outline:1px solid #111}.avbox.crowned{background:#d7a52b}.avbox.empty{background:#25282a;opacity:.6}.cnt{position:absolute}.cnt-label{position:absolute;left:0;top:0;width:100%;color:#fff;text-align:center;font-size:10px}.cnt-frame{position:absolute;box-sizing:border-box;outline:1px solid #8bd5ff;background:#8bd5ff33}.cnt-digit{position:absolute;color:#b8b8b8;text-align:center;font-size:9px}.cnt.exhausted .cnt-label,.cnt.exhausted .cnt-digit{color:#777;opacity:.55}.cnt.exhausted .cnt-frame{outline-color:#777;background:#7773}"
-            + ".hb{position:absolute;box-sizing:border-box;border:0}.scalebar{display:flex;gap:8px;align-items:center;margin:0 0 10px;font-size:12px;color:#eee9dc;flex-wrap:wrap}"
+            // hotbar 层样式：支持 IMG 真实贴图预览，选中框为绝对定位叠加。
+            + ".hb{position:absolute;box-sizing:border-box;border:0}.hb-img{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated;pointer-events:none}"
+            + ".hb-select{position:absolute;image-rendering:pixelated;pointer-events:none;z-index:2}"
+            + ".hb-slot-indicator{position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:9px;color:#f1c75b;white-space:nowrap;pointer-events:none}"
+            // 资源加载失败可见提示：红色边框 + 叠加文字，不静默隐藏
+            + ".hb-img-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:9px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center}"
+            + ".scalebar{display:flex;gap:8px;align-items:center;margin:0 0 10px;font-size:12px;color:#eee9dc;flex-wrap:wrap}"
+            // 层选择面板：标签页切换活动层，高亮当前选中层
+            + ".layer-tabs{display:flex;gap:0;margin:0 0 12px;border-bottom:3px solid #17191b}"
+            + ".layer-tab{padding:6px 12px;cursor:pointer;font-size:12px;color:#a9abad;background:#25282a;border:2px solid #17191b;border-bottom:none;position:relative;top:3px;font-weight:600}"
+            + ".layer-tab:hover{color:#f1c75b}.layer-tab.active{background:#303438;color:#f1c75b;border-bottom-color:#303438}"
+            // 层坐标面板：当前层的精确偏移输入与尺寸读数
+            + ".layer-coords{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:6px 8px;align-items:center;margin:0 0 10px;padding:8px;background:#25282a;border:2px solid #17191b;font-size:12px}"
+            + ".layer-coords label{color:#a9abad;font-size:11px;text-align:right}.layer-coords input{width:100%;padding:4px 6px;font-size:12px}"
+            + ".layer-coords .coord-ro{color:#686d70;font-size:11px;padding:4px 0}"
+            // 缩放手柄：四角 + 四边中点的 8 个小方块，仅在选中层上显示
+            + ".resize-handle{position:absolute;width:8px;height:8px;background:#f1c75b;border:1px solid #17191b;z-index:5;pointer-events:auto}"
+            + ".resize-handle.nw{top:-4px;left:-4px;cursor:nw-resize}.resize-handle.ne{top:-4px;right:-4px;cursor:ne-resize}"
+            + ".resize-handle.sw{bottom:-4px;left:-4px;cursor:sw-resize}.resize-handle.se{bottom:-4px;right:-4px;cursor:se-resize}"
+            + ".resize-handle.n{top:-4px;left:50%;transform:translateX(-50%);cursor:n-resize}.resize-handle.s{bottom:-4px;left:50%;transform:translateX(-50%);cursor:s-resize}"
+            + ".resize-handle.w{top:50%;left:-4px;transform:translateY(-50%);cursor:w-resize}.resize-handle.e{top:50%;right:-4px;transform:translateY(-50%);cursor:e-resize}"
             + ".warn{color:#e6aa63}.ok{color:#a7d46f}.msg{min-height:22px;color:#eee9dc}code{color:#f1c75b}"
             // 窄屏：900px 以下降为单列堆叠，字段网格缩窄但保持三列；
             // 500px 以下字段堆叠为标签在上、输入在下的两行布局，适配手机。
@@ -389,15 +494,29 @@ public final class DebugWebServer {
             + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             + "<title>MUZ Debug HUD 调试面板</title><style>" + styles + "</style></head>"
             + "<body data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD 调试面板</h1>"
-            + "<div>只开放 19 个 HUD 运行期字段；保存会异步写入配置与当前 hotbar 覆盖层，再在主线程重载 CraftEngine 并应用 HUD。客户端需重新下载资源包。</div></header>"
+            + "<div>只开放 22 个 HUD 运行期字段；保存会异步写入配置与当前 hotbar 覆盖层，再在主线程重载 CraftEngine 并应用 HUD。客户端需重新下载资源包。</div></header>"
             + "<main><section class='panel'><h2>可编辑配置</h2><form id='hudForm'></form>"
             + "<div class='actions'><button type='button' id='saveBtn' title='Ctrl+S'>保存并应用</button>"
             + "<button type='button' class='secondary' id='reloadBtn' title='Ctrl+R'>重新读取</button>"
             + "<button type='button' class='secondary' id='undoBtn'>撤销</button></div><p id='message' class='msg'></p></section>"
             + "<section class='panel'><h2>像素预览（可拖动）</h2>"
+            // 层选择标签：点击切换活动层高亮与坐标面板
+            + "<div class='layer-tabs' id='layerTabs'>"
+            + "<div class='layer-tab active' data-layer='card'>牌行</div>"
+            + "<div class='layer-tab' data-layer='avatar'>头像</div>"
+            + "<div class='layer-tab' data-layer='counter'>记牌</div>"
+            + "<div class='layer-tab' data-layer='hotbar'>Hotbar</div>"
+            + "</div>"
+            // 层坐标面板：显示当前层的配置偏移值（不是屏幕绝对坐标）与渲染尺寸
+            + "<div class='layer-coords' id='layerCoords'>"
+            + "<label>X 偏移</label><input type='number' id='coordX' step='1' aria-label='层水平偏移（配置值）'>"
+            + "<label>Y 偏移</label><input type='number' id='coordY' step='1' aria-label='层纵向偏移（配置值）'>"
+            + "<label>渲染宽</label><span class='coord-ro' id='coordW'>-</span>"
+            + "<label>渲染高</label><span class='coord-ro' id='coordH'>-</span>"
+            + "</div>"
             + "<div class='scalebar'><label>逻辑视口（MC px）</label><input id='viewportWidth' type='number' min='320' max='1920' step='1' value='640' aria-label='逻辑视口宽度'>"
             + "<span>×</span><input id='viewportHeight' type='number' min='240' max='1080' step='1' value='360' aria-label='逻辑视口高度'>"
-            + "<span>仅页面校准，不写入 19 个 HUD 配置键</span></div>"
+            + "<span>仅页面校准，不写入 22 个 HUD 配置键</span></div>"
             + "<div class='scalebar'><label>客户端 GUI 倍率</label><select id='guiScale'>"
             + "<option value='2'>2</option><option value='3' selected>3</option><option value='4'>4</option></select>"
             + "<label>页面查看倍率</label><select id='pageScale'><option value='0.25'>1/4</option><option value='0.3333333333' selected>1/3</option><option value='0.5'>1/2</option><option value='1'>1</option></select>"
@@ -410,7 +529,10 @@ public final class DebugWebServer {
             + "<script>"
             + "const token=document.body.dataset.token;let state=JSON.parse(document.getElementById('muz-state').textContent);let dirty=new Set();let dragging=null;let busy=false;"
             + "let dragCfg=state.drag||{snapEnabled:true,snapThreshold:4,centerGuidesEnabled:true,altAxisLock:true};let pageSnapEnabled=dragCfg.snapEnabled!==false;"
+            // 层选择状态：activeLayer 决定高亮哪层、坐标面板显示哪层。hotbar 选中槽仅页面演示，不写入 patch。
+            + "let activeLayer='card';let hotbarSelectedSlot=0;"
             + "const form=document.getElementById('hudForm'),msg=document.getElementById('message'),warns=document.getElementById('warnings'),dragHint=document.getElementById('dragHint');"
+            + "const coordX=document.getElementById('coordX'),coordY=document.getElementById('coordY'),coordW=document.getElementById('coordW'),coordH=document.getElementById('coordH');"
             + "function fieldSpec(k){return state.fields.find(f=>f.key===k)}"
             + "function esc(s){return String(s??'').replace(/[&<>\\\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;',\"'\":'&#39;'})[c])}"
             + "function messagesHtml(xs){return (xs||[]).map(x=>'<div>'+esc(x)+'</div>').join('')}"
@@ -422,8 +544,18 @@ public final class DebugWebServer {
             + "function setPrompt(text){msg.textContent=text; if(!dragging)dragHint.textContent=text}"
             + "function setDirtyPrompt(){setPrompt(dirty.size?'有未保存改动：'+dirty.size+' 项':'当前没有未保存改动。')}"
             + "function updateDirty(k){const same=normalizeValue(k,readValue(k))===normalizeValue(k,v(k));if(same)dirty.delete(k);else dirty.add(k);const el=control(k),row=el&&el.closest('.field');if(row)row.classList.toggle('dirty',dirty.has(k));}"
-            + "function setBusy(on){busy=on;document.querySelectorAll('#hudForm input,#hudForm select,#saveBtn,#reloadBtn,#undoBtn,#viewportWidth,#viewportHeight,#guiScale,#pageScale,#snapToggle').forEach(el=>el.disabled=on)}"
-            + "function renderForm(){form.innerHTML='';let groups={};state.fields.forEach(f=>(groups[f.group]??=[]).push(f));Object.entries(groups).forEach(([g,fs])=>{let box=document.createElement('div');box.className='group';box.innerHTML='<h2>'+esc(g)+'</h2>';fs.forEach(f=>box.appendChild(field(f)));form.appendChild(box)});refreshDragStatus();renderPreview();renderWarnings();if(!busy&&!dragging)setDirtyPrompt()}"
+            + "function setBusy(on){busy=on;document.querySelectorAll('#hudForm input,#hudForm select,#saveBtn,#reloadBtn,#undoBtn,#viewportWidth,#viewportHeight,#guiScale,#pageScale,#snapToggle,#coordX,#coordY').forEach(el=>el.disabled=on)}"
+            // 层选择：点击标签页切换活动层，在预览中高亮选中层
+            + "function selectLayer(kind){activeLayer=kind;document.querySelectorAll('.layer-tab').forEach(t=>t.classList.toggle('active',t.dataset.layer===kind));document.querySelectorAll('.layer').forEach(el=>el.classList.toggle('selected',el.dataset.drag===kind));updateCoordPanel()}"
+            + "document.getElementById('layerTabs').addEventListener('click',e=>{const tab=e.target.closest('.layer-tab');if(tab&&tab.dataset.layer)selectLayer(tab.dataset.layer)});"
+            // 坐标面板：从活动层的配置偏移键读取/写入精确值（不是屏幕绝对坐标）
+            + "function layerXYKeys(kind){const m={avatar:['trick-hud.avatar-offset-x','trick-hud.avatar-offset-down'],card:['trick-hud.card-offset-x','trick-hud.offset-down'],counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down'],hotbar:['hotbar-hud.offset-x','hotbar-hud.offset-y']};return m[kind]||[null,null]}"
+            + "function updateCoordPanel(){const keys=layerXYKeys(activeLayer),vals=collectAll();const xKey=keys[0],yKey=keys[1];"
+            + "coordX.value=xKey?Math.round(Number(vals[xKey]||0)):'';coordX.disabled=!xKey||busy;coordY.value=yKey?Math.round(Number(vals[yKey]||0)):'';coordY.disabled=!yKey||busy;"
+            + "const layerEl=document.querySelector('.layer[data-drag=\"'+activeLayer+'\"]');if(layerEl){const s=cssScale();coordW.textContent=Math.round(parseFloat(layerEl.style.width)/s);coordH.textContent=Math.round(parseFloat(layerEl.style.height)/s)}else{coordW.textContent='-';coordH.textContent='-'}}"
+            + "coordX.addEventListener('input',()=>{const keys=layerXYKeys(activeLayer);if(keys[0]&&!busy){setField(keys[0],Number(coordX.value)||0);renderPreview();renderWarnings()}});"
+            + "coordY.addEventListener('input',()=>{const keys=layerXYKeys(activeLayer);if(keys[1]&&!busy){setField(keys[1],Number(coordY.value)||0);renderPreview();renderWarnings()}});"
+            + "function renderForm(){form.innerHTML='';let groups={};state.fields.forEach(f=>(groups[f.group]??=[]).push(f));Object.entries(groups).forEach(([g,fs])=>{let box=document.createElement('div');box.className='group';box.innerHTML='<h2>'+esc(g)+'</h2>';fs.forEach(f=>box.appendChild(field(f)));form.appendChild(box)});refreshDragStatus();renderPreview();renderWarnings();selectLayer(activeLayer);if(!busy&&!dragging)setDirtyPrompt()}"
             + "function field(f){let row=document.createElement('div');row.className='field';let val=v(f.key);let left=document.createElement('label');left.innerHTML=esc(f.label)+'<span class=key>'+esc(f.key)+'</span>';let mid=document.createElement('div');let right=document.createElement('div');if(f.type==='boolean'){let i=document.createElement('input');i.type='checkbox';i.checked=!!val;i.dataset.key=f.key;i.onchange=changed;mid.appendChild(i);right.textContent=i.checked?'true':'false'}else if(f.type==='integer'){if(f.control==='select'){let s=document.createElement('select');s.dataset.key=f.key;(f.options||[]).forEach(o=>{let option=document.createElement('option');option.value=o;option.textContent=o;option.selected=Number(o)===Number(val);s.appendChild(option)});s.onchange=changed;mid.appendChild(s);right.textContent='资源档位'}else if(f.control==='range'){let r=document.createElement('input');r.type='range';r.min=f.min;r.max=f.max;r.step=f.step;r.value=val;r.dataset.key=f.key;let n=document.createElement('input');n.type='number';n.min=f.min;n.max=f.max;n.step=f.step;n.value=val;n.dataset.key=f.key;r.oninput=()=>{n.value=r.value;changed({target:r})};n.onchange=()=>{r.value=n.value;changed({target:n})};n.oninput=()=>{r.value=n.value;changed({target:n})};mid.append(r,n);right.textContent=f.min+'..'+f.max}else{let n=document.createElement('input');n.type='number';if(f.min!=null)n.min=f.min;if(f.max!=null)n.max=f.max;if(f.step!=null)n.step=f.step;n.value=val;n.dataset.key=f.key;n.oninput=changed;mid.appendChild(n);right.textContent=(f.min==null?'无下限':f.min)+'..'+(f.max==null?'无上限':f.max)}}else{let c=document.createElement('input');c.type='color';let color=String(val);c.value=/^#[0-9a-fA-F]{6}$/.test(color)?color:'#'+color.slice(-6);let t=document.createElement('input');t.type='text';t.value=val;t.dataset.key=f.key;c.oninput=()=>{t.value=c.value.toUpperCase();changed({target:t})};t.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(t.value))c.value=t.value;changed({target:t})};mid.append(c,t);right.textContent='#RGB/#ARGB'}row.append(left,mid,right);return row}"
             // row 可能取不到（拖动是从预览层触发的，不一定有对应的 .field 祖先）。
             // 这里必须判空：拖动过程中一次 TypeError 就会中断整个手势，表现成「拖不动」。
@@ -459,7 +591,9 @@ public final class DebugWebServer {
             + "const down=Number(vals['trick-hud.offset-down']),avatarDown=Number(vals['trick-hud.avatar-offset-down']);"
             + "const required=down+Number(av.rowHeight);"
             + "return avatarDown<required?'头像行会与牌行重叠：建议 avatar-offset-down 至少为 '+required+'。':null}"
-            // rowGeom 现在只查表，不复算：card/avatar 从 geometry 数组按档位匹配，counter 使用服务端固定 cell advance。
+            // rowGeom 只查表，不复算：card/avatar 从 geometry 数组按档位匹配；
+            // counter 优先从 counterTiers[] 按 trick-hud.counter.scale 查表，找不到则降级到顶层默认字段（兼容旧快照）。
+            // hotbar 同理优先从 hotbars[] 按 hotbar-hud.scale 查表。
             + "function rowGeom(vals){const g=geo();"
             + "const cards=g.sampleCards||[],n=cards.length,step=Number(vals['trick-hud.card-step']),h=Number(vals['trick-hud.card-height']);"
             + "const card=(g.cards||[]).find(x=>Number(x.height)===h)||{width:0,advance:0,height:h};"
@@ -472,17 +606,41 @@ public final class DebugWebServer {
             + "const slotWidth=layout?Number(layout.slotWidth||0):0;"
             + "const avatarRowWidth=3*slotWidth+2*avGap;"
             + "const avatarHeight=layout?Number(layout.rowHeight||0):Number(avatar.rowHeight);"
+            // counter 几何按 scale 从 counterTiers 数组查表，降级到顶层字段
+            + "const cntScale=Number(vals['trick-hud.counter.scale'])||100;"
+            + "const cntTier=(g.counterTiers||[]).find(x=>Number(x.scale)===cntScale);"
             + "const counterCells=g.counters||[],counterGap=Number(vals['trick-hud.counter.gap']);"
-            + "const counterCellWidth=Number(g.counterCellWidth),counterCellHeight=Number(g.counterCellHeight),counterAdvance=Number(g.counterAdvance);"
-            + "const counterLabelHeight=Number(g.counterLabelHeight),counterFrameHeight=Number(g.counterFrameHeight),counterDigitHeight=Number(g.counterDigitHeight);"
-            + "const counterLabelAscent=Number(g.counterLabelAscent),counterFrameTopDelta=Number(g.counterFrameTopDelta),counterDigitInset=Number(g.counterDigitInset);"
+            + "const counterCellWidth=Number(cntTier?cntTier.cellWidth:g.counterCellWidth);"
+            + "const counterCellHeight=Number(cntTier?cntTier.cellHeight:g.counterCellHeight);"
+            + "const counterAdvance=Number(cntTier?cntTier.advance:g.counterAdvance);"
+            + "const counterLabelHeight=Number(cntTier?cntTier.labelHeight:g.counterLabelHeight);"
+            + "const counterFrameHeight=Number(cntTier?cntTier.frameHeight:g.counterFrameHeight);"
+            + "const counterDigitHeight=Number(cntTier?cntTier.digitHeight:g.counterDigitHeight);"
+            + "const counterLabelAscent=Number(cntTier?cntTier.labelAscent:g.counterLabelAscent);"
+            + "const counterFrameTopDelta=Number(cntTier?cntTier.frameTopDelta:g.counterFrameTopDelta);"
+            + "const counterDigitInset=Number(cntTier?cntTier.digitInset:g.counterDigitInset);"
             + "let counterRowWidth=0;if(counterCells.length){counterRowWidth=counterCells.length*counterAdvance+(counterCells.length-1)*counterGap}"
+            // hotbar 几何按 scale 从 hotbars 数组查表，降级到顶层字段
+            + "const hbScale=Number(vals['hotbar-hud.scale'])||100;"
+            + "const hb=(g.hotbars||[]).find(x=>Number(x.scale)===hbScale)||{};"
+            + "const hbW=Number(hb.width||g.hotbarWidth),hbH=Number(hb.height||g.hotbarHeight),hbAdv=Number(hb.advance||g.hotbarAdvance);"
+            + "const hbBaseAscent=Number(hb.baseAscent||g.hotbarBaseAscent);"
+            + "const hbSlotW=Number(hb.slotWidth||18),hbSlotH=Number(hb.slotHeight||20),hbSlotStep=Number(hb.slotStep||20);"
+            + "const hbSlotsStartX=Number(hb.slotsStartX||2),hbSlotsStartY=Number(hb.slotsStartY||1);"
+            + "const hbSelW=Number(hb.selectWidth||20),hbSelH=Number(hb.selectHeight||22);"
+            + "const hbSelStartX=Number(hb.selectStartX||1),hbSelStartY=Number(hb.selectStartY||0);"
+            + "const hbSlotCount=Number(hb.slotCount||9);"
+            + "const hbTexture=hb.texture||'hotbar_slots.png',hbSelectTexture=hb.selectTexture||'hotbar_select.png';"
             + "return{cards:cards,cardW:cardW,cardAdvance:cardAdvance,cardRowWidth:cardRowWidth,cardHeight:cardHeight,step:step,n:n,"
             + "avatarSlot:slotWidth,avatarSlots:slots,avatarRowWidth:avatarRowWidth,avatarHeight:avatarHeight,avGap:avGap,"
             + "counterCells:counterCells,counterRowWidth:counterRowWidth,counterGap:counterGap,counterCellWidth:counterCellWidth,"
             + "counterCellHeight:counterCellHeight,counterAdvance:counterAdvance,counterLabelHeight:counterLabelHeight,"
             + "counterFrameHeight:counterFrameHeight,counterDigitHeight:counterDigitHeight,counterLabelAscent:counterLabelAscent,"
-            + "counterFrameTopDelta:counterFrameTopDelta,counterDigitInset:counterDigitInset}}"
+            + "counterFrameTopDelta:counterFrameTopDelta,counterDigitInset:counterDigitInset,"
+            + "hbW:hbW,hbH:hbH,hbAdv:hbAdv,hbBaseAscent:hbBaseAscent,hbSlotW:hbSlotW,hbSlotH:hbSlotH,hbSlotStep:hbSlotStep,"
+            + "hbSlotsStartX:hbSlotsStartX,hbSlotsStartY:hbSlotsStartY,hbSelW:hbSelW,hbSelH:hbSelH,"
+            + "hbSelStartX:hbSelStartX,hbSelStartY:hbSelStartY,hbSlotCount:hbSlotCount,"
+            + "hbTexture:hbTexture,hbSelectTexture:hbSelectTexture}}"
             // 布局警告缓存：renderPreview 每次重算，renderWarnings 再合并进列表。
             + "let layoutWarnings=[];"
             + "function pushBoundsWarn(name,x,y,w,h){const v=viewport();"
@@ -490,6 +648,7 @@ public final class DebugWebServer {
             + "if(y<0)layoutWarnings.push(name+' 越出屏幕上边界（y='+Math.round(y)+'）');"
             + "if(x+w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(x+w)+' > '+v.width+'）');"
             + "if(y+h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(y+h)+' > '+v.height+'）')}"
+            + "const SCALE_KEYS={card:'trick-hud.card-height',avatar:'trick-hud.avatar-scale',counter:'trick-hud.counter.scale',hotbar:'hotbar-hud.scale'};"
             + "function renderPreview(){layoutWarnings=[];const vals=collectAll(),g=geo(),v=viewport(),screen=document.getElementById('screen');"
             + "screen.style.width=cssPx(v.width)+'px';screen.style.height=cssPx(v.height)+'px';screen.innerHTML='';"
             + "let html='';"
@@ -508,24 +667,24 @@ public final class DebugWebServer {
             + "const avY=bossBaseline-avatarAscent;"
             + "let oc=String(vals['trick-hud.avatar-outline.color']);if(!/^#[0-9a-fA-F]{6}$/.test(oc))oc='#'+oc.slice(-6);"
             + "const ob=vals['trick-hud.avatar-outline.enabled']?oc:'transparent';"
-            + "html+='<div class=layer data-drag=avatar style=\"left:'+cssPx(avX)+'px;top:'+cssPx(avY)+'px;width:'+cssPx(r.avatarRowWidth)+'px;height:'+cssPx(r.avatarHeight)+'px\"><span class=tag>头像行几何示意 avatar-offset-x/down</span>';"
+            + "html+='<div class=layer data-drag=avatar style=\"left:'+cssPx(avX)+'px;top:'+cssPx(avY)+'px;width:'+cssPx(r.avatarRowWidth)+'px;height:'+cssPx(r.avatarHeight)+'px\"><span class=tag>头像行 avatar-offset-x/down</span>'+layerHandles('avatar');"
             + "for(let i=0;i<3;i++){const slot=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true};const slotW=Number(slot.slotWidth||r.avatarSlot),contentW=Number(slot.contentAdvance||slotW),faceH=Number(slot.rowHeight||r.avatarHeight),faceTop=r.avatarHeight-faceH,faceLeft=(slotW-contentW)/2;const classes='avbox'+(slot.crowned?' crowned':'')+(slot.empty?' empty':'');html+='<div class=avslot style=\"left:'+cssPx(i*(r.avatarSlot+r.avGap))+'px;top:0;width:'+cssPx(r.avatarSlot)+'px;height:'+cssPx(r.avatarHeight)+'px\"><div class=\"'+classes+'\" data-position=\"'+esc(slot.position||'')+'\" style=\"left:'+cssPx(faceLeft)+'px;top:'+cssPx(faceTop)+'px;width:'+cssPx(contentW)+'px;height:'+cssPx(faceH)+'px;outline-color:'+ob+'\"></div></div>'}html+='</div>';"
             + "pushBoundsWarn('头像行',avX,avY,r.avatarRowWidth,r.avatarHeight);"
             // 牌行：ascent = cardHeight - offset-down；top = baseline - ascent（offset-down 增大 top 下降）
             + "const cardAscent=r.cardHeight-Number(vals['trick-hud.offset-down']);"
             + "const cdX=baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']);"
             + "const cdY=bossBaseline-cardAscent;"
-            + "html+='<div class=layer data-drag=card style=\"left:'+cssPx(cdX)+'px;top:'+cssPx(cdY)+'px;width:'+cssPx(r.cardRowWidth)+'px;height:'+cssPx(r.cardHeight)+'px\"><span class=tag>牌行 card-offset-x / offset-down</span>';"
+            + "html+='<div class=layer data-drag=card style=\"left:'+cssPx(cdX)+'px;top:'+cssPx(cdY)+'px;width:'+cssPx(r.cardRowWidth)+'px;height:'+cssPx(r.cardHeight)+'px\"><span class=tag>牌行 card-offset-x / offset-down</span>'+layerHandles('card');"
             + "const cardLabels=r.cards.map(card=>String(card.label||card.rank||''));"
             + "for(let i=0;i<r.n;i++){html+='<div class=cardbox data-card-index=\"'+i+'\" data-card-rank=\"'+esc(cardLabels[i])+'\" style=\"left:'+cssPx(i*r.step)+'px;top:0;width:'+cssPx(r.cardW)+'px;height:'+cssPx(r.cardHeight)+'px;line-height:'+cssPx(r.cardHeight)+'px\">'+esc(cardLabels[i])+'</div>'}html+='</div>';"
             + "pushBoundsWarn('牌行',cdX,cdY,r.cardRowWidth,r.cardHeight);"
-            // 记牌行：服务端固定下发分层 cell geometry，前端只按 geometry 画牌类、数字和闭合矩形。
-            // cell 的水平定位使用固定 advance；不读取 label 长度，也不复算任何字体宽度。
+            // 记牌行：使用独立的 counter.offset-down 控制纵向位置，不再耦合 avatar-offset-down。
+            // cell 的水平定位使用 counterTiers 按 scale 查表的 advance；不复算任何字体宽度。
             + "if(vals['trick-hud.counter.enabled']){"
             + "const cnX=baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']);"
-            + "const counterAscent=r.counterLabelAscent-Number(vals['trick-hud.avatar-offset-down']);"
+            + "const counterAscent=r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down']);"
             + "const cnY=bossBaseline-counterAscent;const cnH=r.counterCellHeight;"
-            + "html+='<div class=layer data-drag=counter style=\"left:'+cssPx(cnX)+'px;top:'+cssPx(cnY)+'px;width:'+cssPx(r.counterRowWidth)+'px;height:'+cssPx(cnH)+'px\"><span class=tag>记牌行 counter.offset-x</span>';"
+            + "html+='<div class=layer data-drag=counter style=\"left:'+cssPx(cnX)+'px;top:'+cssPx(cnY)+'px;width:'+cssPx(r.counterRowWidth)+'px;height:'+cssPx(cnH)+'px\"><span class=tag>记牌行 counter.offset-x / offset-down</span>'+layerHandles('counter');"
             + "let cx=0;r.counterCells.forEach((cell,i)=>{"
             + "const exhausted=!!cell.exhausted,hidden=exhausted&&!!vals['trick-hud.counter.hide-exhausted'];"
             + "const label=String(cell.label),digits=String(cell.playedCount);"
@@ -539,22 +698,30 @@ public final class DebugWebServer {
             + "html+='</div>';"
             + "pushBoundsWarn('记牌行',cnX,cnY,r.counterRowWidth,cnH)}}"
             // hotbar 定位公式（批准版）：
-            //   baseAscent = g.hotbarBaseAscent
+            //   baseAscent = rowGeom 查表的 hbBaseAscent
             //   currentAscent = baseAscent - hy
             //   ascentDelta = baseAscent - currentAscent   （= hy）
             //   hbY = actionBarBottomY - hotbarHeight + ascentDelta
             //   hbX = floor((screenWidth - hotbarAdvance)/2) + hx
-            // 完整 9 槽热键栏：182×22，槽块 18×20，x=2,22...162，不影响 Hotbar 外框几何。
-            + "if(vals['hotbar-hud.enabled']){"
+            // 完整 9 槽热键栏几何全部从 hotbars[] 按 scale 查表，不硬编码尺寸。
+            // 预览使用同源 /api/resource/ 路由提供的构建期真实 PNG；纹理名来自 geometry。
+            + "if(vals['hotbar-hud.enabled']){const r=rowGeom(vals);"
             + "const hy=Number(vals['hotbar-hud.offset-y']),hx=Number(vals['hotbar-hud.offset-x']);"
-            + "const baseAscent=g.hotbarBaseAscent,currentAscent=baseAscent-hy,ascentDelta=baseAscent-currentAscent;"
-            + "const hbY=v.height-g.hotbarHeight+ascentDelta;"
-            + "const hbX=Math.floor((v.width-g.hotbarAdvance)/2)+hx;"
-            + "html+='<div class=layer data-drag=hotbar style=\"left:'+cssPx(hbX)+'px;top:'+cssPx(hbY)+'px;width:'+cssPx(g.hotbarWidth)+'px;height:'+cssPx(g.hotbarHeight)+'px;background:#121216\"><span class=tag>Hotbar offset-x / offset-y（纵向需重载资源包）</span>';"
+            + "const baseAscent=r.hbBaseAscent,currentAscent=baseAscent-hy,ascentDelta=baseAscent-currentAscent;"
+            + "const hbY=v.height-r.hbH+ascentDelta;"
+            + "const hbX=Math.floor((v.width-r.hbAdv)/2)+hx;"
+            + "html+='<div class=layer data-drag=hotbar style=\"left:'+cssPx(hbX)+'px;top:'+cssPx(hbY)+'px;width:'+cssPx(r.hbW)+'px;height:'+cssPx(r.hbH)+'px;background:#121216\"><span class=tag>Hotbar offset-x / offset-y（纵向需重载资源包）</span>'+layerHandles('hotbar');"
+            // 真实底图 PNG：加载失败显示可见的资源缺失提示，不静默隐藏
+            + "html+='<img class=hb-img src=\"/api/resource/'+esc(r.hbTexture)+'\" onerror=\"this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'\">"
+            + "<div class=hb-img-error style=\"display:none\">底图缺失：'+esc(r.hbTexture)+'<br>请构建后重启</div>';"
             + "const cols=['#E03A3A','#E06A2A','#E08A2A','#D8D030','#3CC050','#30C0A8','#3888E0','#7050D8','#C04AA0'];"
-            + "const slotW=18,slotH=20,slotStep=20,slotsStart=2;"
-            + "for(let i=0;i<9;i++){html+='<div class=hb style=\"left:'+cssPx(slotsStart+i*slotStep)+'px;top:'+cssPx(1)+'px;width:'+cssPx(slotW)+'px;height:'+cssPx(slotH)+'px;background:'+cols[i]+'\"></div>'}html+='</div>';"
-            + "pushBoundsWarn('Hotbar',hbX,hbY,g.hotbarWidth,g.hotbarHeight)}"
+            + "for(let i=0;i<r.hbSlotCount;i++){html+='<div class=hb data-slot=\"'+i+'\" style=\"left:'+cssPx(r.hbSlotsStartX+i*r.hbSlotStep)+'px;top:'+cssPx(r.hbSlotsStartY)+'px;width:'+cssPx(r.hbSlotW)+'px;height:'+cssPx(r.hbSlotH)+'px;background:'+(cols[i]||'#555')+'\"></div>'}"
+            // 选中框 PNG：定位到 hotbarSelectedSlot 对应槽位置
+            + "const selLeft=r.hbSelStartX+hotbarSelectedSlot*r.hbSlotStep;"
+            + "html+='<img class=hb-select src=\"/api/resource/'+esc(r.hbSelectTexture)+'\" style=\"left:'+cssPx(selLeft)+'px;top:'+cssPx(r.hbSelStartY)+'px;width:'+cssPx(r.hbSelW)+'px;height:'+cssPx(r.hbSelH)+'px\" onerror=\"this.style.display=\\'none\\'\">';"
+            + "html+='<span class=hb-slot-indicator>持槽 '+hotbarSelectedSlot+'</span>';"
+            + "html+='</div>';"
+            + "pushBoundsWarn('Hotbar',hbX,hbY,r.hbW,r.hbH)}"
             // 【拖动期间绝对不能重建 DOM】：真实鼠标按下时浏览器会做「隐式指针捕获」，
             // 把指针事件锁定到 pointerdown 的那个 target 元素上。一旦这个元素被
             // innerHTML 重建销毁，浏览器就派发 pointercancel 并【停止派发后续
@@ -562,11 +729,18 @@ public final class DebugWebServer {
             // 用合成 PointerEvent 测不出来这个问题：合成事件不走隐式捕获，
             // 所以哪怕元素被销毁，dispatchEvent 仍然照常触发。
             // 拖动时走 nudgeDraggedLayer 只改 style，松手后才做完整重建。
-            + "screen.innerHTML=html;bindDrag()}"
+            // 缩放手柄 HTML：选中层的四角和四边中点各 8 个手柄。
+            // SCALE_KEYS 映射：每层拖拽缩放对应的配置档位键（牌高、头像scale、counter/hotbar scale）。
+            // 手柄只在选中层上显示；缩放写入的是档位字段（select control），会吸附到最近合法档。
+            + "function layerHandles(kind){if(kind!==activeLayer)return '';return '<div class=\"resize-handle nw\" data-resize=\"nw\"></div><div class=\"resize-handle ne\" data-resize=\"ne\"></div><div class=\"resize-handle sw\" data-resize=\"sw\"></div><div class=\"resize-handle se\" data-resize=\"se\"></div><div class=\"resize-handle n\" data-resize=\"n\"></div><div class=\"resize-handle s\" data-resize=\"s\"></div><div class=\"resize-handle w\" data-resize=\"w\"></div><div class=\"resize-handle e\" data-resize=\"e\"></div>'}"
+            + "screen.innerHTML=html;bindDrag();bindResize();updateCoordPanel()}"
+            // 滚轮切换 hotbar 选中槽（0..8）：仅在 hotbar 层上方才拦截滚轮，不劫持页面其他位置。
+            // 这只是页面演示持槽效果，不混入保存 patch。
+            + "document.getElementById('screen').addEventListener('wheel',e=>{const hbLayer=e.target.closest('.layer[data-drag=\"hotbar\"]');if(!hbLayer)return;e.preventDefault();hotbarSelectedSlot=Math.max(0,Math.min(8,hotbarSelectedSlot+(e.deltaY>0?1:-1)));renderPreview()},{passive:false});"
             // 拖动：把 CSS 位移换算回 MC 像素写进表单。松手才提交（纵向重打包代价高）。
             + "const DRAG_KEYS={avatar:['trick-hud.avatar-offset-x','trick-hud.avatar-offset-down'],"
             + "card:['trick-hud.card-offset-x','trick-hud.offset-down'],"
-            + "counter:['trick-hud.counter.offset-x',null],"
+            + "counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down'],"
             + "hotbar:['hotbar-hud.offset-x','hotbar-hud.offset-y']};"
             + "function controls(k){const q=CSS.escape(k);return form.querySelectorAll(\"[data-key='\"+q+\"']\")}"
             + "function writeValue(k,value){controls(k).forEach(el=>{if(el.type==='checkbox')el.checked=!!value;else el.value=value})}"
@@ -576,7 +750,7 @@ public final class DebugWebServer {
             // 否则会写出一个后端必然拒绝的值。
             + "if(f&&f.control==='select'&&f.options&&f.options.length){let best=Number(f.options[0]);"
             + "f.options.forEach(o=>{if(Math.abs(Number(o)-next)<Math.abs(best-next))best=Number(o)});next=best}"
-            + "writeValue(key,next);if(dragging){updateDirty(key);return true}changed({target:el});return true}"
+            + "writeValue(key,next);if(dragging||resizing){updateDirty(key);return true}changed({target:el});return true}"
             // 【拖动为什么不能把监听器挂在被拖的元素上】：拖动过程中要实时更新预览，
             // 而 renderPreview() 是整段重建 screen.innerHTML 的 —— 那会把正在被拖的
             // 元素本身销毁，挂在它上面的 pointermove 与 setPointerCapture 一起消失，
@@ -584,6 +758,8 @@ public final class DebugWebServer {
             // 所以监听器挂在 window 上：它不随预览重建而消失。
             + "function bindDrag(){document.querySelectorAll('.layer').forEach(el=>{el.onpointerdown=e=>{"
             + "if(busy)return;e.preventDefault();const kind=el.dataset.drag,keys=DRAG_KEYS[kind];if(!keys)return;"
+            // 点击层时同步选中：层标签页、坐标面板和预览高亮同步更新
+            + "selectLayer(kind);"
             + "const vals=collectAll(),s=cssScale(),baseLeft=parseFloat(el.style.left)/s,baseTop=parseFloat(el.style.top)/s;"
             + "if(el.setPointerCapture)el.setPointerCapture(e.pointerId);"
             + "dragging={kind:kind,keys:keys,sx:e.clientX,sy:e.clientY,axis:null,hasMoved:false,"
@@ -610,7 +786,7 @@ public final class DebugWebServer {
             + "const effectiveDx=Number.isFinite(actualX)?actualX-dragging.bx:dx,effectiveDy=k[1]&&Number.isFinite(actualY)?actualY-dragging.by:0;"
             // 拖动期间不重建 DOM，只让当前层视觉上跟着指针走；松手后才完整重建。
             + "dragging.el.classList.add('drag');dragging.el.style.transform='translate('+cssPx(effectiveDx)+'px,'+cssPx(effectiveDy)+'px)';"
-            + "dragHint.textContent='拖动中：'+k[0]+'='+Math.round(actualX)+(k[1]?('，'+k[1]+'='+Math.round(actualY)):'')+(dragging.axis?'，Alt 锁 '+dragging.axis:'')});"
+            + "dragHint.textContent='拖动中：'+k[0]+'='+Math.round(actualX)+(k[1]?('，'+k[1]+'='+Math.round(actualY)):'')+(dragging.axis?'，Alt 锁 '+dragging.axis:'');updateCoordPanel()});"
             + "function finishDrag(){if(!dragging)return;const active=dragging;dragging=null;"
             + "if(active.el.releasePointerCapture&&active.el.hasPointerCapture&&active.el.hasPointerCapture(active.pointerId))active.el.releasePointerCapture(active.pointerId);"
             // 松手后才完整重建一次，让吸附后的档位值和所有行的 max-width 居中重新计算。
@@ -618,6 +794,45 @@ public final class DebugWebServer {
             + "dragHint.textContent=dirty.size?'已停止拖动，改动尚未保存。点「保存并应用」写回 config.yml。':'当前没有未保存改动。'}"
             + "window.addEventListener('pointerup',finishDrag);window.addEventListener('pointercancel',finishDrag);"
             + "window.addEventListener('lostpointercapture',finishDrag);"
+            // ── 缩放手柄：在选中层的四角/边中点拖拽改变尺寸档位 ──
+            // 缩放改变的是档位字段（如牌高、avatar-scale、counter/hotbar scale），
+            // 使用 setField 自动吸附到最近合法档；缩放期间保持对侧锚点固定。
+            // pointermove 只改 CSS transform/style，不重建 DOM。
+            + "let resizing=null;"
+            + "function bindResize(){document.querySelectorAll('.resize-handle').forEach(h=>{h.onpointerdown=e=>{"
+            + "if(busy)return;e.preventDefault();e.stopPropagation();"
+            + "const layer=h.closest('.layer');if(!layer)return;const kind=layer.dataset.drag;const scaleKey=SCALE_KEYS[kind];"
+            + "if(!scaleKey)return;"
+            + "if(h.setPointerCapture)h.setPointerCapture(e.pointerId);"
+            + "const s=cssScale();const f=fieldSpec(scaleKey);"
+            + "resizing={kind:kind,scaleKey:scaleKey,dir:h.dataset.resize,sx:e.clientX,sy:e.clientY,"
+            + "baseVal:Number(readValue(scaleKey)),el:layer,pointerId:e.pointerId,"
+            + "baseW:parseFloat(layer.style.width)/s,baseH:parseFloat(layer.style.height)/s,"
+            + "baseLeft:parseFloat(layer.style.left)/s,baseTop:parseFloat(layer.style.top)/s,"
+            + "field:f,options:f&&f.options?f.options.map(Number).sort((a,b)=>a-b):null};"
+            + "layer.classList.add('drag')}})}"
+            + "window.addEventListener('pointermove',ev=>{if(!resizing||busy)return;ev.preventDefault();"
+            + "const s=cssScale(),dy=(ev.clientY-resizing.sy)/s,dx=(ev.clientX-resizing.sx)/s;"
+            + "const dir=resizing.dir,el=resizing.el;"
+            // 缩放方向：含 s/se/sw/e/w/n/ne/nw，垂直分量改尺寸档位
+            + "let delta=0;if(dir.includes('s'))delta=dy;else if(dir.includes('n'))delta=-dy;else if(dir.includes('e'))delta=dx;else if(dir.includes('w'))delta=-dx;"
+            + "let next=Math.round(resizing.baseVal+delta);"
+            + "setField(resizing.scaleKey,next);"
+            + "const actual=Number(readValue(resizing.scaleKey));"
+            // 用 CSS transform 模拟尺寸变化，让用户看到拖拽响应；松手后完整重建
+            + "const ratio=resizing.baseVal>0?actual/resizing.baseVal:1;"
+            + "const newW=resizing.baseW*ratio,newH=resizing.baseH*ratio;"
+            // 对侧锚点：根据拖拽方向计算 translate 偏移，保持对侧不动
+            + "let tx=0,ty=0;"
+            + "if(dir.includes('n'))ty=(resizing.baseH-newH);if(dir.includes('w'))tx=(resizing.baseW-newW);"
+            + "el.style.width=cssPx(newW)+'px';el.style.height=cssPx(newH)+'px';"
+            + "el.style.transform='translate('+cssPx(tx)+'px,'+cssPx(ty)+'px)';"
+            + "updateCoordPanel();"
+            + "dragHint.textContent='缩放中：'+resizing.scaleKey+'='+actual});"
+            + "function finishResize(){if(!resizing)return;const active=resizing;resizing=null;"
+            + "if(active.el.releasePointerCapture&&active.el.hasPointerCapture&&active.el.hasPointerCapture(active.pointerId))active.el.releasePointerCapture(active.pointerId);"
+            + "active.el.style.transform='';renderPreview();renderWarnings();setDirtyPrompt()}"
+            + "window.addEventListener('pointerup',finishResize);window.addEventListener('pointercancel',finishResize);"
             + "document.getElementById('guiScale').onchange=()=>renderPreview();"
             + "document.getElementById('pageScale').onchange=()=>renderPreview();"
             + "document.getElementById('viewportWidth').onchange=()=>{renderPreview();renderWarnings()};"

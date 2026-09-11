@@ -115,6 +115,17 @@ public final class PackAssets {
      */
     public static final String COUNTER_GLYPH_FONT = "minecraft:muz_counter";
 
+    /** counter 缩放档；顺序、数值与构建期 counterScaleTiers 严格同源。 */
+    public static final int[] COUNTER_SCALE_TIERS = PackTiers.COUNTER_SCALE_TIERS;
+    /** hotbar 缩放档；顺序、数值与构建期 hotbarScaleTiers 严格同源。 */
+    public static final int[] HOTBAR_SCALE_TIERS = PackTiers.HOTBAR_SCALE_TIERS;
+    public static final int DEFAULT_HUD_SCALE = 100;
+    public static final int COUNTER_DEFAULT_SCALE = DEFAULT_HUD_SCALE;
+    public static final int HOTBAR_DEFAULT_SCALE = DEFAULT_HUD_SCALE;
+
+    /** counter 各 scale 的独立码位起点；100 档必须保留旧 0xE900。 */
+    public static final int[] COUNTER_SCALE_CODEPOINT_STARTS = PackTiers.COUNTER_SCALE_CODEPOINT_STARTS;
+
     /** 记牌器分层字形族的码位起点，必须与 build.gradle.kts 的 counterGlyphCodepointStart 一致。 */
     public static final int COUNTER_GLYPH_CODEPOINT_START = 0xE900;
 
@@ -163,6 +174,82 @@ public final class PackAssets {
     public static final int COUNTER_DIGIT_INSET = COUNTER_FRAME_ASCENT - COUNTER_DIGIT_ASCENT;
     public static final int COUNTER_CELL_HEIGHT = COUNTER_FRAME_TOP_DELTA + COUNTER_FRAME_HEIGHT;
 
+    /** counter 自己的向下偏移表：0..400 step2，不能复用头像 0..400 step1 表。 */
+    private static final int[] COUNTER_DOWN_OFFSET_TIERS = PackTiers.COUNTER_DOWN_OFFSET_TIERS;
+
+    /**
+     * counter/hotbar 每个 scale 的完整几何快照；所有字段都是纯内存推导，不读取资源包文件。
+     * downOffset 只影响三层 ascent，不改变 PNG 几何和每格净 advance。
+     */
+    public record CounterTier(
+        int scale,
+        int downOffset,
+        int width,
+        int height,
+        int advance,
+        int labelWidth,
+        int labelHeight,
+        int labelAdvance,
+        int labelAscent,
+        int frameWidth,
+        int frameHeight,
+        int frameAdvance,
+        int frameAscent,
+        int frameTopDelta,
+        int digitWidth,
+        int digitHeight,
+        int digitAdvance,
+        int digitAscent,
+        int digitInset,
+        int frameX,
+        int frameY,
+        int digitX,
+        int digitY,
+        String font,
+        String labelTexture,
+        String frameTexture,
+        String digitTexture,
+        int codepointStart
+    ) {
+        public int cellWidth() {
+            return width;
+        }
+
+        public int cellHeight() {
+            return height;
+        }
+    }
+
+    /** hotbar 的完整缩放/九槽/选中框几何快照；offset-y 的运行期范围也随 scale 提供。 */
+    public record HotbarTier(
+        int scale,
+        int width,
+        int height,
+        int advance,
+        int baseAscent,
+        int minOffsetY,
+        int maxOffsetY,
+        String font,
+        String texture,
+        String selectTexture,
+        int selectWidth,
+        int selectHeight,
+        int selectAdvance,
+        int slotCount,
+        int slotWidth,
+        int slotHeight,
+        int slotStep,
+        int slotsStartX,
+        int slotsStartY,
+        int selectStartX,
+        int selectStartY,
+        int baseCodepoint,
+        int debugCodepoint,
+        int selectCodepoint,
+        int selectDebugCodepoint
+    ) {
+    }
+
     /**
      * 底部物品栏 HUD 字形族的字体名与码位。
      *
@@ -174,6 +261,21 @@ public final class PackAssets {
      * 记牌器占据，后段预留给 CraftEngine 内置配置，{@code 0xEF00} 处于空隙且不与
      * 任何已知字形冲突。
      */
+    /**
+     * 允许的资源包 {@code pack_format} 集合，与 build.gradle.kts 的 {@code MuzTarget}
+     * 表逐项对应：paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88。
+     *
+     * <p>【为什么放在插件侧枚举】：运行期 Java 读不到 Kotlin 构建脚本里的
+     * {@code muzTarget.resourcePackFormat}，而同一份 JAR 可能被部署到三种目标之一，
+     * {@link linmumua.doudizhu.compat.HudResourcePackVerifier} 校验 CraftEngine 实际
+     * 生成的 {@code pack.mcmeta} 时无法预知当前目标，只能接受项目【可能】产出的全部格式。
+     *
+     * <p>【必须与 build.gradle.kts 的 {@code supportedMuzTargets} 同步】：那边新增/调整
+     * 一个目标的 {@code resourcePackFormat}，这里就要同步增删对应数字，否则合法资源包
+     * 会被误判为「pack_format 不受支持」。反向新增未在构建表出现的格式也不允许。
+     */
+    public static final int[] SUPPORTED_RESOURCE_PACK_FORMATS = {75, 84, 88};
+
     public static final String HOTBAR_HUD_FONT = "minecraft:muz_hotbar";
 
     /** 底部物品栏字形码位（对应贴图文件 {@code muz:font/hotbar_slots.png}）。 */
@@ -225,6 +327,15 @@ public final class PackAssets {
      */
     public static final int HOTBAR_HUD_DEBUG_CODEPOINT = 0xEF01;
 
+    /** hotbar 各 scale 的底图/Debug/选中框/overlay 选中框码位，100 档保留 EF00/EF01/EF02/EF03。 */
+    public static final int[] HOTBAR_SCALE_BASE_CODEPOINTS = PackTiers.HOTBAR_SCALE_BASE_CODEPOINTS;
+    public static final int[] HOTBAR_SCALE_DEBUG_CODEPOINTS = PackTiers.HOTBAR_SCALE_DEBUG_CODEPOINTS;
+    public static final int[] HOTBAR_SCALE_SELECT_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_CODEPOINTS;
+    public static final int[] HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS;
+
+    /** 新增的 overlay 选中框码位；由 HotbarDebugOverlayWriter 按 scale 生成声明。 */
+    public static final int HOTBAR_SELECT_DEBUG_CODEPOINT = 0xEF03;
+
     /**
      * 取底部物品栏字形的 MiniMessage 片段（已包含字体标签）。
      *
@@ -232,8 +343,14 @@ public final class PackAssets {
      * MiniMessage 字符串中，由 {@link HotbarHudService} 负责后续合成。
      */
     public static String hotbarHudGlyphText() {
-        return "<font:" + HOTBAR_HUD_FONT + ">"
-            + new String(Character.toChars(HOTBAR_HUD_CODEPOINT))
+        return hotbarHudGlyphText(DEFAULT_HUD_SCALE);
+    }
+
+    /** 返回指定 scale 的 hotbar 底图字形片段。 */
+    public static String hotbarHudGlyphText(int scale) {
+        HotbarTier tier = hotbarTier(scale);
+        return "<font:" + tier.font() + ">"
+            + new String(Character.toChars(tier.baseCodepoint()))
             + "</font>";
     }
 
@@ -246,8 +363,73 @@ public final class PackAssets {
      * （{@link HotbarHudService} 用 Debug Web 的接管状态做这个判断）。
      */
     public static String hotbarHudDebugGlyphText() {
-        return "<font:" + HOTBAR_HUD_FONT + ">"
-            + new String(Character.toChars(HOTBAR_HUD_DEBUG_CODEPOINT))
+        return hotbarHudDebugGlyphText(DEFAULT_HUD_SCALE);
+    }
+
+    /** 返回指定 scale 的 hotbar Debug Web 覆盖层底图字形片段。 */
+    public static String hotbarHudDebugGlyphText(int scale) {
+        HotbarTier tier = hotbarTier(scale);
+        return "<font:" + tier.font() + ">"
+            + new String(Character.toChars(tier.debugCodepoint()))
+            + "</font>";
+    }
+
+    /**
+     * 「选中槽」高亮框字形码位（对应贴图文件 {@code muz:font/hotbar_select.png}）。
+     *
+     * <p>与 {@link #HOTBAR_HUD_CODEPOINT}（0xEF00）【同字体族 minecraft:muz_hotbar】，
+     * 但是【另一张贴图、另一个码位】：0xEF00 是完整 9 槽底图，0xEF02 是单个可移动的
+     * 空心高亮框。{@link linmumua.doudizhu.game.HotbarHudService} 按玩家当前持槽
+     * （{@code heldSlot}）用零净前进量的负空格夹心把它定位到对应槽位的像素位置，
+     * 因此不改变底图字形的净前进量与客户端居中。
+     *
+     * <p>【必须与 build.gradle.kts 的 {@code hotbarSelectCodepoint} 保持一致】。
+     * 选 {@code 0xEF02} 是因为紧邻已用的 0xEF00/0xEF01，同处 PUA 空隙且不与任何已知字形冲突。
+     */
+    public static final int HOTBAR_SELECT_CODEPOINT = 0xEF02;
+
+    /**
+     * 「选中槽」高亮框贴图宽度：20px，比 18px 槽块每边多 1px（左右各 1px 描边外扩）。
+     *
+     * <p>必须与 build.gradle.kts 的 {@code hotbarSelectGlyphWidth} 保持一致。
+     */
+    public static final int HOTBAR_SELECT_GLYPH_WIDTH = 20;
+
+    /** 「选中槽」高亮框贴图高度：22px，与 hotbar 底图等高，CraftEngine {@code height} 恒等于此值以保持 1:1。 */
+    public static final int HOTBAR_SELECT_GLYPH_HEIGHT = 22;
+
+    /**
+     * 「选中槽」高亮框字形的光标前进量（21px = 贴图宽 + 1）。
+     *
+     * <p>与底图同理，位图字形在渲染宽度之外额外加 1px 字间距。
+     * {@link linmumua.doudizhu.game.HotbarHudService} 用 CraftEngine 负空格把这个前进量
+     * 连同定位偏移一起抵消，确保底图字形的净前进量（{@link #HOTBAR_HUD_GLYPH_ADVANCE}）不变。
+     */
+    public static final int HOTBAR_SELECT_GLYPH_ADVANCE = HOTBAR_SELECT_GLYPH_WIDTH + 1;
+
+    /**
+     * 取「选中槽」高亮框字形的 MiniMessage 片段（已包含字体标签）。
+     *
+     * <p>返回 {@code <font:minecraft:muz_hotbar>\uef02</font>}，由
+     * {@link linmumua.doudizhu.game.HotbarHudService} 负责用负空格定位到玩家持槽像素位置。
+     */
+    public static String hotbarSelectGlyphText() {
+        return hotbarSelectGlyphText(DEFAULT_HUD_SCALE);
+    }
+
+    /** 返回指定 scale 的 hotbar 选中框字形片段。 */
+    public static String hotbarSelectGlyphText(int scale) {
+        HotbarTier tier = hotbarTier(scale);
+        return "<font:" + tier.font() + ">"
+            + new String(Character.toChars(tier.selectCodepoint()))
+            + "</font>";
+    }
+
+    /** 返回指定 scale 的 overlay 选中框字形片段（默认100档为 EF03）。 */
+    public static String hotbarSelectDebugGlyphText(int scale) {
+        HotbarTier tier = hotbarTier(scale);
+        return "<font:" + tier.font() + ">"
+            + new String(Character.toChars(tier.selectDebugCodepoint()))
             + "</font>";
     }
 
@@ -321,8 +503,14 @@ public final class PackAssets {
      * 全部位于同一张 {@code muz_counter} 字体中；字体名必须与构建期 YAML 同源。
      */
     public static String counterGlyphFont(int downOffsetTier) {
-        avatarDownOffsetAt(downOffsetTier);
-        return COUNTER_GLYPH_FONT;
+        return counterGlyphFont(DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** counter 指定 scale/偏移档的字体名；75/125 使用构建期独立字体。 */
+    public static String counterGlyphFont(int scale, int downOffsetTier) {
+        counterDownOffsetAt(downOffsetTier);
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        return scale == DEFAULT_HUD_SCALE ? COUNTER_GLYPH_FONT : COUNTER_GLYPH_FONT + "_s" + scale;
     }
 
     public static final int CARD_GLYPH_CODEPOINT_START = 0xE100;
@@ -379,7 +567,7 @@ public final class PackAssets {
      * ascent 不得大于 height），那等于把牌拉伸，不是纯位移。
      *
      * <p>索引 0 必须是 0：不带档位的那些重载走的就是档 0（桌边座位牌、Title），
-     * 它们不能跟着 HUD 往下沉。构建期按 {@code 0..80} 步长 2 生成，首项天然是 0。
+     * 它们不能跟着 HUD 往下沉。构建期按 {@code 0..80} 步长 1 生成，首项天然是 0。
      */
     private static final int[] CARD_GLYPH_DOWN_OFFSET_TIERS = PackTiers.CARD_DOWN_OFFSET_TIERS;
 
@@ -395,10 +583,9 @@ public final class PackAssets {
      * {@link #botAvatarChar(PlayerRole)} 这两个不带档位的重载走的就是档 0，
      * 桌边座位牌和 Title 用的是它们 —— 那些地方不能跟着 HUD 一起往下沉。
      *
-     * <p>构建期按 {@code 0..400} 步长 2 生成（见 {@link PackTiers#AVATAR_DOWN_OFFSET_TIERS}）。
+     * <p>构建期按 {@code 0..400} 步长 1 生成（见 {@link PackTiers#AVATAR_DOWN_OFFSET_TIERS}）。
      * 上限 400 覆盖最坏组合：牌行最深 80 加最大头像盒高 192（{@code 12 * 16}）是 272，留了余量。
-     * 步长 2 而不是 1 是条目数的折中 —— 吸附误差最多 1 像素，肉眼看不出；步长 1 会让
-     * 头像族条目数翻倍。想要精确到 1 像素就用 {@code -PmuzAvatarOffsetStep=1} 重新构建。
+     * 头像行需要与牌行保持 1 像素级的独立定位，因此不再依赖步长 2 的吸附误差。
      *
      * <p>浅档里有一部分【任何组合都必然与牌行重叠】：不重叠下限是
      * {@code offset-down + 12 * avatar-scale}，scale 最小是 2，所以 {@code 0..22}
@@ -457,6 +644,52 @@ public final class PackAssets {
         return AVATAR_DOWN_OFFSET_TIERS[tier];
     }
 
+    /** counter 自己的向下偏移档值；与 avatarDownOffsetAt 不共享索引表。 */
+    public static int counterDownOffsetAt(int tier) {
+        if (tier < 0 || tier >= COUNTER_DOWN_OFFSET_TIERS.length) {
+            throw new IllegalArgumentException(
+                "记牌器向下偏移档越界（0.." + (COUNTER_DOWN_OFFSET_TIERS.length - 1) + "）：" + tier);
+        }
+        return COUNTER_DOWN_OFFSET_TIERS[tier];
+    }
+
+    public static int counterDownOffsetTierCount() {
+        return COUNTER_DOWN_OFFSET_TIERS.length;
+    }
+
+    public static int counterDownOffsetTierOf(int downOffset) {
+        return indexOf(COUNTER_DOWN_OFFSET_TIERS, downOffset);
+    }
+
+    public static int nearestCounterDownOffsetTier(int downOffset) {
+        return nearestTier(COUNTER_DOWN_OFFSET_TIERS, downOffset);
+    }
+
+    public static int counterDownOffsetMin() {
+        return min(COUNTER_DOWN_OFFSET_TIERS);
+    }
+
+    public static int counterDownOffsetMax() {
+        return max(COUNTER_DOWN_OFFSET_TIERS);
+    }
+
+    /** 公开 scale 表的防修改副本；常量数组仍保留给运行期热路径直接遍历。 */
+    public static int[] counterScaleTiers() {
+        return COUNTER_SCALE_TIERS.clone();
+    }
+
+    public static int[] hotbarScaleTiers() {
+        return HOTBAR_SCALE_TIERS.clone();
+    }
+
+    public static int counterScaleTierOf(int scale) {
+        return indexOf(COUNTER_SCALE_TIERS, scale);
+    }
+
+    public static int hotbarScaleTierOf(int scale) {
+        return indexOf(HOTBAR_SCALE_TIERS, scale);
+    }
+
     /**
      * 把 config 里写的像素高度换成档位下标；没有这一档返回 -1。
      *
@@ -509,10 +742,10 @@ public final class PackAssets {
      * 显然不是 400，钳到边界必须让他知道。越界判定由调用方做（比较 {@code value} 与
      * 表的首末项），这个方法只负责找最近的。
      *
-     * <p>【并列时取档位值较小的那一档】，例如步长 2 下的 111 取 110。这里显式比较档位值
-     * 而不是靠遍历顺序：{@link #CARD_GLYPH_HEIGHT_TIERS} 是降序、两张偏移表是升序，
-     * 靠「先遇到的赢」会让同一条规则在降序表上变成「取较大」。步长为 1 时并列不可能发生，
-     * 但 {@code muzCardHeightStep} 是对外可调的构建参数，步长变 2 后 55 就会并列。
+     * <p>【并列时取档位值较小的那一档】，例如 counter 步长 2 下的 111 取 110。这里显式比较档位值
+     * 而不是靠遍历顺序：{@link #CARD_GLYPH_HEIGHT_TIERS} 是降序、三张偏移表是升序，
+     * 靠「先遇到的赢」会让同一条规则在降序表上变成「取较大」。牌/头像默认步长为 1 时并列不可能发生，
+     * 但构建参数仍允许调整步长，counter 表则固定保留 2 像素网格。
      */
     private static int nearestTier(int[] tiers, int value) {
         int best = 0;
@@ -617,12 +850,182 @@ public final class PackAssets {
      */
     public static int cardGlyphWidth(int heightTier) {
         int height = cardGlyphHeightAt(heightTier);
-        return Math.round((float) CARD_GLYPH_WIDTH * height / CARD_GLYPH_HEIGHT_TIERS[0]);
+        // 牌源 PNG 的真实正面尺寸是 35×53；高度档表按降序排列，索引 0 是 56，
+        // 不能拿区间端点当 1:1 分母，否则默认 53 会被错误算成 33px 宽。
+        return Math.round((float) CARD_GLYPH_WIDTH * height / DEFAULT_CARD_HEIGHT);
     }
 
     /** 第 {@code heightTier} 档画完一张牌后光标往右走多少像素（渲染宽度加 1 像素字间距）。 */
     public static int cardGlyphAdvance(int heightTier) {
         return cardGlyphWidth(heightTier) + 1;
+    }
+
+    private static int scalePixel(int value, int scale) {
+        return Math.max(1, Math.round(value * scale / 100.0f));
+    }
+
+    private static int scaleCoordinate(int value, int scale) {
+        return Math.round(value * scale / 100.0f);
+    }
+
+    private static int scaleSigned(int value, int scale) {
+        return Math.round(value * scale / 100.0f);
+    }
+
+    private static void requireScale(int scale, int[] scales, String family) {
+        if (indexOf(scales, scale) < 0) {
+            throw new IllegalArgumentException(
+                family + " scale 不受支持（可用：" + join(scales) + "）：" + scale);
+        }
+    }
+
+    private static int counterScaleIndex(int scale) {
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        return indexOf(COUNTER_SCALE_TIERS, scale);
+    }
+
+    private static int hotbarScaleIndex(int scale) {
+        requireScale(scale, HOTBAR_SCALE_TIERS, "hotbar");
+        return indexOf(HOTBAR_SCALE_TIERS, scale);
+    }
+
+    private static int counterCodepointStart(int scale) {
+        return COUNTER_SCALE_CODEPOINT_STARTS[counterScaleIndex(scale)];
+    }
+
+    private static String counterTextureDirectory(int scale) {
+        return scale == DEFAULT_HUD_SCALE ? "muz:font/counter" : "muz:font/counter/scale_" + scale;
+    }
+
+    /** counter 指定 scale 的单张 PNG 路径；不会访问文件系统。 */
+    public static String counterTexturePath(int scale, String fileName) {
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        if (fileName == null || fileName.isBlank() || fileName.contains("/") || fileName.contains("\\")) {
+            throw new IllegalArgumentException("非法 counter 贴图文件名：" + fileName);
+        }
+        return counterTextureDirectory(scale) + "/" + fileName + ".png";
+    }
+
+    public static CounterTier counterTier(int scale) {
+        return counterTier(scale, 0);
+    }
+
+    /** counter 完整几何；downTier 只改变三层实际 ascent，偏移表独立于头像表。 */
+    public static CounterTier counterTier(int scale, int downTier) {
+        counterScaleIndex(scale);
+        int downOffset = counterDownOffsetAt(downTier);
+        int labelWidth = scalePixel(COUNTER_LABEL_WIDTH, scale);
+        int labelHeight = scalePixel(COUNTER_LABEL_HEIGHT, scale);
+        int frameWidth = scalePixel(COUNTER_FRAME_WIDTH, scale);
+        int frameHeight = scalePixel(COUNTER_FRAME_HEIGHT, scale);
+        int digitWidth = scalePixel(COUNTER_DIGIT_WIDTH, scale);
+        int digitHeight = scalePixel(COUNTER_DIGIT_HEIGHT, scale);
+        int labelAdvance = labelWidth + 1;
+        int frameAdvance = frameWidth + 1;
+        int digitAdvance = digitWidth + 1;
+        int labelAscent = scaleSigned(COUNTER_LABEL_ASCENT, scale) - downOffset;
+        int frameAscent = scaleSigned(COUNTER_FRAME_ASCENT, scale) - downOffset;
+        int digitAscent = scaleSigned(COUNTER_DIGIT_ASCENT, scale) - downOffset;
+        int frameTopDelta = labelAscent - frameAscent;
+        int digitInset = frameAscent - digitAscent;
+        int frameY = frameTopDelta;
+        int digitY = labelAscent - digitAscent;
+        int cellHeight = Math.max(frameY + frameHeight, digitY + digitHeight);
+        String labelTexture = counterTexturePath(scale, "label_3");
+        String frameTexture = counterTexturePath(scale, "frame_normal");
+        String digitTexture = counterTexturePath(scale, "digit_0");
+        return new CounterTier(
+            scale, downOffset, labelWidth, cellHeight, labelAdvance,
+            labelWidth, labelHeight, labelAdvance, labelAscent,
+            frameWidth, frameHeight, frameAdvance, frameAscent, frameTopDelta,
+            digitWidth, digitHeight, digitAdvance, digitAscent, digitInset,
+            0, frameY, 0, digitY,
+            counterGlyphFont(scale, downTier), labelTexture, frameTexture, digitTexture,
+            counterCodepointStart(scale)
+        );
+    }
+
+    public static CounterTier counterGeometry(int scale, int downTier) {
+        return counterTier(scale, downTier);
+    }
+
+    /** hotbar 指定 scale 的字体名；75/125 与默认档隔离在独立字体中。 */
+    public static String hotbarFont(int scale) {
+        requireScale(scale, HOTBAR_SCALE_TIERS, "hotbar");
+        return scale == DEFAULT_HUD_SCALE ? HOTBAR_HUD_FONT : HOTBAR_HUD_FONT + "_s" + scale;
+    }
+
+    public static String hotbarTexturePath(int scale) {
+        hotbarScaleIndex(scale);
+        return scale == DEFAULT_HUD_SCALE
+            ? "muz:font/hotbar_slots.png"
+            : "muz:font/scale_" + scale + "/hotbar_slots.png";
+    }
+
+    public static String hotbarSelectTexturePath(int scale) {
+        hotbarScaleIndex(scale);
+        return scale == DEFAULT_HUD_SCALE
+            ? "muz:font/hotbar_select.png"
+            : "muz:font/scale_" + scale + "/hotbar_select.png";
+    }
+
+    public static HotbarTier hotbarTier(int scale) {
+        int scaleIndex = hotbarScaleIndex(scale);
+        int width = scalePixel(HOTBAR_HUD_GLYPH_WIDTH, scale);
+        int height = scalePixel(HOTBAR_HUD_GLYPH_HEIGHT, scale);
+        int selectWidth = scalePixel(HOTBAR_SELECT_GLYPH_WIDTH, scale);
+        int selectHeight = scalePixel(HOTBAR_SELECT_GLYPH_HEIGHT, scale);
+        int baseAscent = scaleSigned(PackTiers.HOTBAR_BASE_ASCENT, scale);
+        return new HotbarTier(
+            scale, width, height, width + 1, baseAscent,
+            baseAscent - height, 256,
+            hotbarFont(scale), hotbarTexturePath(scale), hotbarSelectTexturePath(scale),
+            selectWidth, selectHeight, selectWidth + 1,
+            HOTBAR_HUD_SLOT_COUNT,
+            scalePixel(18, scale), scalePixel(20, scale), scalePixel(20, scale),
+            scaleCoordinate(2, scale), scaleCoordinate(1, scale),
+            scaleCoordinate(1, scale), 0,
+            HOTBAR_SCALE_BASE_CODEPOINTS[scaleIndex], HOTBAR_SCALE_DEBUG_CODEPOINTS[scaleIndex],
+            HOTBAR_SCALE_SELECT_CODEPOINTS[scaleIndex], HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS[scaleIndex]
+        );
+    }
+
+    public static HotbarTier hotbarGeometry(int scale) {
+        return hotbarTier(scale);
+    }
+
+    public static int hotbarCodepoint(int scale) {
+        return hotbarTier(scale).baseCodepoint();
+    }
+
+    public static int hotbarDebugCodepoint(int scale) {
+        return hotbarTier(scale).debugCodepoint();
+    }
+
+    public static int hotbarSelectCodepoint(int scale) {
+        return hotbarTier(scale).selectCodepoint();
+    }
+
+    public static int hotbarSelectDebugCodepoint(int scale) {
+        return hotbarTier(scale).selectDebugCodepoint();
+    }
+
+    public static String counterRankTexturePath(CardRank rank, int scale) {
+        if (rank == null) {
+            throw new IllegalArgumentException("记牌器点数不能为空");
+        }
+        return counterTexturePath(scale, "label_" + counterRankSlug(rank));
+    }
+
+    public static String counterDigitTexturePath(int digit, int scale) {
+        if (digit < 0 || digit >= COUNTER_DIGIT_COUNT) {
+            throw new IllegalArgumentException("记牌器数字下标越界（0.." + (COUNTER_DIGIT_COUNT - 1) + "）：" + digit);
+        }
+        return counterTexturePath(scale, "digit_" + digit);
+    }
+
+    public static String counterFrameTexturePath(boolean exhausted, int scale) {
+        return counterTexturePath(scale, "frame_" + (exhausted ? "exhausted" : "normal"));
     }
 
     private PackAssets() {
@@ -951,11 +1354,16 @@ public final class PackAssets {
      * 不再复制一套暗色标签，而是由调用方叠加 {@link #counterFrameChar(boolean, int)}。
      */
     public static String counterRankChar(CardRank rank, int downOffsetTier) {
+        return counterRankChar(rank, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器标签层字形字符（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterRankChar(CardRank rank, int scale, int downOffsetTier) {
         if (rank == null) {
             throw new IllegalArgumentException("记牌器点数不能为空");
         }
-        avatarDownOffsetAt(downOffsetTier);
-        return counterGlyphChar(rank.ordinal(), downOffsetTier);
+        counterDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(scale, rank.ordinal(), downOffsetTier);
     }
 
     /** 记牌器数字层字形字符（仅支持累计已出张数 0..4）。 */
@@ -965,11 +1373,16 @@ public final class PackAssets {
 
     /** 记牌器数字层字形字符（指定头像下移档）。 */
     public static String counterDigitChar(int digit, int downOffsetTier) {
+        return counterDigitChar(digit, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器数字层字形字符（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterDigitChar(int digit, int scale, int downOffsetTier) {
         if (digit < 0 || digit >= COUNTER_DIGIT_COUNT) {
             throw new IllegalArgumentException("记牌器数字下标越界（0.." + (COUNTER_DIGIT_COUNT - 1) + "）：" + digit);
         }
-        avatarDownOffsetAt(downOffsetTier);
-        return counterGlyphChar(COUNTER_DIGIT_START_INDEX + digit, downOffsetTier);
+        counterDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(scale, COUNTER_DIGIT_START_INDEX + digit, downOffsetTier);
     }
 
     /** 记牌器框层字形字符；exhausted=true 时使用耗尽框。 */
@@ -979,32 +1392,72 @@ public final class PackAssets {
 
     /** 记牌器框层字形字符（指定头像下移档）。 */
     public static String counterFrameChar(boolean exhausted, int downOffsetTier) {
-        avatarDownOffsetAt(downOffsetTier);
-        return counterGlyphChar(COUNTER_FRAME_START_INDEX + (exhausted ? 1 : 0), downOffsetTier);
+        return counterFrameChar(exhausted, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器框层字形字符（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterFrameChar(boolean exhausted, int scale, int downOffsetTier) {
+        counterDownOffsetAt(downOffsetTier);
+        return counterGlyphChar(scale, COUNTER_FRAME_START_INDEX + (exhausted ? 1 : 0), downOffsetTier);
     }
 
     /** 分层记牌器字形在 images.yml 中的条目名。 */
     public static String counterRankAssetName(CardRank rank, int downOffsetTier) {
-        return "counter_label_" + counterRankSlug(rank) + "_d" + avatarDownOffsetAt(downOffsetTier);
+        return counterRankAssetName(rank, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器标签层资源条目名（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterRankAssetName(CardRank rank, int scale, int downOffsetTier) {
+        if (rank == null) {
+            throw new IllegalArgumentException("记牌器点数不能为空");
+        }
+        counterDownOffsetAt(downOffsetTier);
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        String suffix = scale == DEFAULT_HUD_SCALE ? "" : "_s" + scale;
+        return "counter_label_" + counterRankSlug(rank) + suffix + "_d" + counterDownOffsetAt(downOffsetTier);
     }
 
     /** 分层记牌器数字字形在 images.yml 中的条目名。 */
     public static String counterDigitAssetName(int digit, int downOffsetTier) {
+        return counterDigitAssetName(digit, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器数字层资源条目名（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterDigitAssetName(int digit, int scale, int downOffsetTier) {
         if (digit < 0 || digit >= COUNTER_DIGIT_COUNT) {
             throw new IllegalArgumentException("记牌器数字下标越界（0.." + (COUNTER_DIGIT_COUNT - 1) + "）：" + digit);
         }
-        return "counter_digit_" + digit + "_d" + avatarDownOffsetAt(downOffsetTier);
+        counterDownOffsetAt(downOffsetTier);
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        String suffix = scale == DEFAULT_HUD_SCALE ? "" : "_s" + scale;
+        return "counter_digit_" + digit + suffix + "_d" + counterDownOffsetAt(downOffsetTier);
     }
 
     /** 分层记牌器框字形在 images.yml 中的条目名。 */
     public static String counterFrameAssetName(boolean exhausted, int downOffsetTier) {
+        return counterFrameAssetName(exhausted, DEFAULT_HUD_SCALE, downOffsetTier);
+    }
+
+    /** 记牌器框层资源条目名（指定 scale 与独立 counter 偏移档）。 */
+    public static String counterFrameAssetName(boolean exhausted, int scale, int downOffsetTier) {
+        counterDownOffsetAt(downOffsetTier);
+        requireScale(scale, COUNTER_SCALE_TIERS, "counter");
+        String suffix = scale == DEFAULT_HUD_SCALE ? "" : "_s" + scale;
         return "counter_frame_" + (exhausted ? "exhausted" : "normal")
-            + "_d" + avatarDownOffsetAt(downOffsetTier);
+            + suffix + "_d" + counterDownOffsetAt(downOffsetTier);
     }
 
     private static String counterGlyphChar(int index, int downOffsetTier) {
-        return new String(Character.toChars(
-            tierCodepointBase(downOffsetTier, COUNTER_GLYPHS_PER_TIER, COUNTER_GLYPH_CODEPOINT_START) + index));
+        return counterGlyphChar(DEFAULT_HUD_SCALE, index, downOffsetTier);
+    }
+
+    private static String counterGlyphChar(int scale, int index, int downOffsetTier) {
+        if (index < 0 || index >= COUNTER_GLYPHS_PER_TIER) {
+            throw new IllegalArgumentException("记牌器层下标越界（0.." + (COUNTER_GLYPHS_PER_TIER - 1) + "）：" + index);
+        }
+        counterDownOffsetAt(downOffsetTier);
+        int base = counterCodepointStart(scale) + downOffsetTier * COUNTER_GLYPHS_PER_TIER;
+        return new String(Character.toChars(base + index));
     }
 
     private static String counterRankSlug(CardRank rank) {

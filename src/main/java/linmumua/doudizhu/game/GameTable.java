@@ -1489,7 +1489,7 @@ public final class GameTable {
         }
         Component hint = MuzTheme.warning("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。");
         HotbarHudService hotbarHud = plugin.getHotbarHudService();
-        if (hotbarHud != null && hotbarHud.isEnabled()) {
+        if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
             hotbarHud.showOverlay(currentTurn, hint);
         } else {
             player.sendActionBar(hint);
@@ -1559,7 +1559,7 @@ public final class GameTable {
             if (player == null) {
                 continue;
             }
-            if (hotbarHud != null && hotbarHud.isEnabled()) {
+            if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
                 hotbarHud.showOverlay(seat, actionBar);
             } else {
                 player.sendActionBar(actionBar);
@@ -1747,7 +1747,7 @@ public final class GameTable {
             Player player = onlinePlayer(playerId);
             if (player != null && player.isOnline()) {
                 Component bar = buildPersistentActionBar(playerId, remainingSeconds);
-                if (hotbarHud != null && hotbarHud.isEnabled()) {
+                if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
                     hotbarHud.showOverlay(playerId, bar);
                 } else {
                     player.sendActionBar(bar);

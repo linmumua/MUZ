@@ -29,6 +29,21 @@ final class HudResourcePackSync {
         Executor ioExecutor,
         Executor mainExecutor
     ) {
+        return run(reload, generate, generatedPack, uploadPack, verifier, offsetY, 100,
+            ioExecutor, mainExecutor);
+    }
+
+    static CompletableFuture<Void> run(
+        ReloadOperation reload,
+        GenerateOperation generate,
+        PathSupplier generatedPack,
+        PathSupplier uploadPack,
+        Verifier verifier,
+        int offsetY,
+        int hotbarScale,
+        Executor ioExecutor,
+        Executor mainExecutor
+    ) {
         Objects.requireNonNull(reload, "reload");
         Objects.requireNonNull(generate, "generate");
         Objects.requireNonNull(generatedPack, "generatedPack");
@@ -62,7 +77,7 @@ final class HudResourcePackSync {
                 }
             }, ioExecutor).thenRunAsync(() -> {
                 try {
-                    verifyGeneratedAndUploaded(generatedPack.get(), uploadPack.get(), verifier, offsetY);
+                    verifyGeneratedAndUploaded(generatedPack.get(), uploadPack.get(), verifier, offsetY, hotbarScale);
                 } catch (IOException exception) {
                     throw new CompletionException("生成的 CraftEngine 资源包校验失败："
                         + messageOf(exception), exception);
@@ -76,17 +91,22 @@ final class HudResourcePackSync {
 
     static void verifyGeneratedAndUploaded(Path generated, Path upload, Verifier verifier, int offsetY)
         throws IOException {
+        verifyGeneratedAndUploaded(generated, upload, verifier, offsetY, 100);
+    }
+
+    static void verifyGeneratedAndUploaded(Path generated, Path upload, Verifier verifier, int offsetY,
+                                           int hotbarScale) throws IOException {
         Path generatedFile = requireRegularFile(generated, "CraftEngine 生成资源包");
         Path uploadFile = requireRegularFile(upload, "CraftEngine 上传资源包");
 
-        verifier.verify(generatedFile, offsetY);
+        verifier.verify(generatedFile, offsetY, hotbarScale);
         if (!samePath(generatedFile, uploadFile)) {
             if (Files.mismatch(generatedFile, uploadFile) != -1L) {
                 throw new IOException("生成资源包与上传资源包内容不一致："
                     + generatedFile + " != " + uploadFile);
             }
             // 两条路径即使字节一致也分别验证，防止上传目标是未被校验的旧文件或链接目标。
-            verifier.verify(uploadFile, offsetY);
+            verifier.verify(uploadFile, offsetY, hotbarScale);
         }
     }
 
@@ -135,6 +155,11 @@ final class HudResourcePackSync {
     @FunctionalInterface
     interface Verifier {
         void verify(Path packPath, int offsetY) throws IOException;
+
+        /** 旧 verifier 默认按 100% hotbar 档校验；生产实现可覆盖以校验指定档位。 */
+        default void verify(Path packPath, int offsetY, int hotbarScale) throws IOException {
+            verify(packPath, offsetY);
+        }
     }
 
     record ReloadResult(boolean success, String detail) {

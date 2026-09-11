@@ -88,6 +88,25 @@ public final class HotbarHudService {
      */
     private boolean useDebugOverlayGlyph;
 
+    /** 当前使用的构建期 hotbar 缩放档（百分比），只接受 75/100/125。 */
+    private int scale = 100;
+
+    /**
+     * 当前 offset-y 覆盖层是否已由 CE 重载、实际 ZIP 校验并在主线程应用。
+     * 未就绪时即使 Debug Web 正在接管，也必须退回 bundle 固定码位，避免客户端豆腐块。
+     */
+    private boolean overlayReady;
+
+    /**
+     * 当前正在合成的玩家持槽下标（0..8），供 {@link #buildActionBar(OverlayEntry)} 叠加选中框。
+     *
+     * <p>【为什么用字段而不是给 buildActionBar 加参数】：{@code DoudizhuRuntimeSyncTest}
+     * 按文本锁死了 {@code player.sendActionBar(buildActionBar(entry))} 这一行调用形态，
+     * 扩参数会让那条守护断言失效。选中框定位是纯渲染态，只在主线程 {@link #tick()} 内
+     * 「读取 heldSlot → 立刻调用 buildActionBar」这一步使用，读写都在主线程，无并发问题。
+     */
+    private int pendingHeldSlot;
+
     public HotbarHudService(DoudizhuPlugin plugin, CraftEngineOffsetService offsetService) {
         this.plugin = plugin;
         this.offsetService = offsetService;
@@ -122,7 +141,7 @@ public final class HotbarHudService {
      */
     public void reloadEnabled(boolean configuredEnabled, boolean suspended) {
         this.enabled = configuredEnabled;
-        this.useDebugOverlayGlyph = suspended;
+        this.useDebugOverlayGlyph = suspended && overlayReady;
         if (configuredEnabled) {
             start();
         } else {
@@ -140,6 +159,26 @@ public final class HotbarHudService {
      */
     public void setOffsetX(int offsetX) {
         this.offsetX = offsetX;
+    }
+
+    /** 设置构建期 hotbar 缩放档；非法值回退到默认 100%。 */
+    public void setScale(int scale) {
+        this.scale = PackAssets.hotbarScaleTierOf(scale) < 0 ? 100 : scale;
+    }
+
+    /**
+     * 设置运行期覆盖层就绪状态。只有资源协调器完成真实 CE Future 与 ZIP 校验后才能传 true。
+     * 状态变化时同步刷新 Debug Web 接管选择，避免未验证的 EF01/EF03 被推送给客户端。
+     */
+    public void setOverlayReady(boolean ready) {
+        this.overlayReady = ready;
+        if (!ready) {
+            this.useDebugOverlayGlyph = false;
+        }
+    }
+
+    public boolean isOverlayReady() {
+        return overlayReady;
     }
 
     /** 周期任务是否正在运行。 */
@@ -263,6 +302,9 @@ public final class HotbarHudService {
                         overlays.remove(id);
                         entry = null;
                     }
+                    // 主线程读取玩家当前持槽（0..8），供选中框定位；clamp 防御异常值。
+                    int heldSlot = player.getInventory().getHeldItemSlot();
+                    pendingHeldSlot = Math.max(0, Math.min(PackAssets.HOTBAR_HUD_SLOT_COUNT - 1, heldSlot));
                     player.sendActionBar(buildActionBar(entry));
                 }
             }
@@ -332,7 +374,7 @@ public final class HotbarHudService {
      *   [CE 负空格偏移，将光标归零]
      *   [叠加文字（正常 ascent → 渲染在 ActionBar 正常位置）]
      * </pre>
-     * 字形的前进量（{@link PackAssets#HOTBAR_HUD_GLYPH_ADVANCE}）由 CraftEngine 负空格
+     * 字形的前进量（当前 {@link PackAssets.HotbarTier#advance()}）由 CraftEngine 负空格
      * 抵消，使整条文本的有效宽度 = 叠加消息宽度，客户端按叠加消息居中。
      * 无叠加时仅送字形，前进量自然成为文本宽，字形自动居中。
      *
@@ -355,26 +397,44 @@ public final class HotbarHudService {
             return Component.empty();
         }
 
-        // 字形 MiniMessage 片段：<font:minecraft:muz_hotbar>\uef00</font>（或调试覆盖层的 \uef01）
+        PackAssets.HotbarTier geometry = PackAssets.hotbarTier(scale);
+        // 字形 MiniMessage 片段：bundle 固定 ascent 或已验证的调试覆盖层 ascent。
+        // 覆盖层同时声明与底图同 scale、同 Y 的 EF03 选中框，因此两层在 Debug Web 接管时
+        // 也能保持真实对位；overlayReady=false 时退回 bundle 的 EF00/EF02 组合，绝不发未声明码位。
         String glyphMm = useDebugOverlayGlyph
-            ? PackAssets.hotbarHudDebugGlyphText()
-            : PackAssets.hotbarHudGlyphText();
+            ? PackAssets.hotbarHudDebugGlyphText(scale)
+            : PackAssets.hotbarHudGlyphText(scale);
         Component glyph = MINI.deserialize(glyphMm).decoration(TextDecoration.ITALIC, false);
+
+        // 选中框叠加：底图之后用零净前进量的负空格夹心插入高亮框，定位到当前持槽像素位置。
+        // 槽 i 左 x 与两种字形 advance 均来自同一 HotbarTier，避免 75/125% 档位继续手抄
+        // 默认 2 + i*20 / 183 / 21 后产生半档错位。
+        int selectLeftX = geometry.selectStartX() + pendingHeldSlot * geometry.slotStep();
+        int lead = selectLeftX - geometry.advance();
+        int trail = -(lead + geometry.selectAdvance());
+        String selectMm = useDebugOverlayGlyph
+            ? PackAssets.hotbarSelectDebugGlyphText(scale)
+            : PackAssets.hotbarSelectGlyphText(scale);
+        Component select = MINI.deserialize(selectMm).decoration(TextDecoration.ITALIC, false);
+        glyph = glyph
+            .append(miniOrEmpty(offsetService.offset(lead)))
+            .append(select)
+            .append(miniOrEmpty(offsetService.offset(trail)));
 
         // 水平偏移：字形前推 offsetX，字形后回拉 offsetX，净前进量不变（见方法注释）
         if (offsetX != 0) {
-            Component lead = miniOrEmpty(offsetService.offset(offsetX));
-            Component trail = miniOrEmpty(offsetService.offset(-offsetX));
-            glyph = lead.append(glyph).append(trail);
+            Component offsetLead = miniOrEmpty(offsetService.offset(offsetX));
+            Component offsetTrail = miniOrEmpty(offsetService.offset(-offsetX));
+            glyph = offsetLead.append(glyph).append(offsetTrail);
         }
 
         if (overlay == null) {
-            // 仅字形，前进量 = HOTBAR_HUD_GLYPH_ADVANCE，客户端将其居中
+            // 仅字形，前进量 = 当前 scale 的底图 advance，客户端将其居中
             return glyph;
         }
 
-        // 字形 + 光标归零偏移 + 叠加文字
-        Component reset = miniOrEmpty(offsetService.offset(-PackAssets.HOTBAR_HUD_GLYPH_ADVANCE));
+        // 字形 + 光标归零偏移 + 叠加文字。重置量必须使用当前 scale 的真实 advance。
+        Component reset = miniOrEmpty(offsetService.offset(-geometry.advance()));
 
         return glyph
             .append(reset)
