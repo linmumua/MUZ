@@ -100,8 +100,8 @@ public final class DebugWebServer {
 
     /**
      * @param plugin  插件主类，用于读取配置和调度主线程任务
-     * @param onStart 启动回调；传 {@code hotbarHudService::stop} 可在面板开启时停热键栏
-     * @param onStop  停止回调；传 {@code hotbarHudService::start} 可在面板关闭时恢复热键栏
+     * @param onStart 启动回调；用于进入 Debug Web 接管状态并切换可调定位资源
+     * @param onStop  停止回调；用于退出 Debug Web 接管状态并恢复 bundle 固定字形
      */
     public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -441,11 +441,13 @@ public final class DebugWebServer {
         String stateJson = escapeJsonForScript(GSON.toJson(safeSnapshot));
         // 溢出防护靠 minmax(0,...)/min-width:0/word-break 从源头约束子元素尺寸，
         // 不在 body 或 .panel 上用 overflow:hidden 裁切——裁切会创建新的滚动容器导致 .actions sticky 失效。
-        String styles = "*{box-sizing:border-box}body{margin:0;background:#202326;color:#f4f1e8;font-family:Verdana,'Segoe UI',sans-serif;image-rendering:pixelated}"
-            + "header{padding:18px 22px;background:#303438;border-bottom:4px solid #17191b;box-shadow:0 4px 0 #111}h1{margin:0;color:#f1c75b;font-size:22px;text-shadow:2px 2px #17191b}"
-            // main 网格：宽屏两列、窄屏媒体查询里降为单列。minmax(0,...) 防止隐式最小宽度撑破容器。
-            + "main{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr);gap:18px;padding:18px}"
+        String styles = "*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#101216;color:#f4f1e8;font-family:Verdana,'Segoe UI',sans-serif;image-rendering:pixelated}"
+            + "body{min-height:100dvh}header{position:fixed;left:0;right:0;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:10px 16px;background:linear-gradient(#20251fdd,#151914cc);border-bottom:3px solid #111;box-shadow:0 3px 0 #080909;pointer-events:none}header h1{margin:0;color:#f1c75b;font-size:18px;text-shadow:2px 2px #17191b}header>div{flex:1;min-width:0;color:#d8d7ce;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}header button{pointer-events:auto}h1{margin:0;color:#f1c75b;font-size:22px;text-shadow:2px 2px #17191b}"
+            // 全屏 MC 编辑器：画布固定覆盖整个 viewport，编辑表单改为右侧浮动面板。
+            + "main.mc-editor{position:relative;width:100vw;height:100dvh;min-height:0;padding:0;display:block}"
             + ".panel{background:#303438;border:3px solid #17191b;border-right-color:#62666a;border-bottom-color:#62666a;padding:16px;box-shadow:6px 6px 0 #111;min-width:0}"
+            + ".editor-panel{position:fixed;right:18px;top:64px;z-index:25;width:min(440px,calc(100vw - 36px));max-height:calc(100dvh - 82px);overflow:auto;transition:transform .18s ease,opacity .18s ease}.editor-panel.collapsed{transform:translateX(calc(100% + 30px));opacity:.1;pointer-events:none}"
+            + ".preview-panel{position:absolute;inset:0;z-index:1;padding:0;border:0;background:transparent;box-shadow:none;overflow:hidden}.preview-panel>#dragHint{position:fixed;left:14px;bottom:12px;z-index:25;margin:0;padding:7px 10px;background:#111a;color:#f1c75b;border:2px solid #454b45;box-shadow:3px 3px 0 #080909;font-size:12px;pointer-events:none;max-width:min(80vw,620px);white-space:normal}"
             + "h2{margin:6px 0 12px;color:#f1c75b;font-size:18px;text-shadow:1px 1px #17191b}.group{margin-bottom:18px}.field{display:grid;grid-template-columns:minmax(100px,190px) minmax(0,1fr) auto;gap:8px;align-items:center;padding:8px 0;border-bottom:2px solid #25282a}"
             // .key 是配置键名（如 trick-hud.avatar-outline.enabled），长名必须允许换行，否则撑宽标签列。
             + "label{font-size:13px;color:#eee9dc;min-width:0}.key{display:block;color:#a9abad;font-size:11px;word-break:break-all}input,select{accent-color:#d9a93a}"
@@ -460,16 +462,16 @@ public final class DebugWebServer {
             + ".ref{position:absolute;pointer-events:none}.ref.boss{background:#5c3d2177;outline:2px solid #d4a943}"
             + ".ref.bottom{border-top:2px dashed #d4a943;left:0;right:0}.ref.mid{border-left:2px dashed #d4a943;top:0;bottom:0}.ref.grid{background-image:linear-gradient(#ffffff0b 1px,transparent 1px),linear-gradient(90deg,#ffffff0b 1px,transparent 1px);background-size:8px 8px;inset:0}"
             + ".layer{position:absolute;cursor:grab;outline:2px solid transparent}.layer:hover{outline-color:#f1c75b}.layer.drag{cursor:grabbing;outline-color:#d26b48}"
-            + ".layer.selected{outline-color:#f1c75b;outline-width:2px;outline-style:solid}"
+            + ".layer.selected{outline-color:#f1c75b;outline-width:2px;outline-style:solid}.layer:not(.selected) .resize-handle{display:none}"
             + ".layer .tag{position:absolute;top:-17px;left:0;font-size:10px;color:#f1c75b;white-space:nowrap;pointer-events:none;text-shadow:1px 1px #111}"
             + ".cardbox{position:absolute;background:#f9fafb;outline:1px solid #222;color:#111;font-size:9px;font-weight:800;text-align:center;overflow:hidden}"
             + ".avslot{position:absolute}.avbox{position:absolute;background:#4e8cff;outline:1px solid #111}.avbox.crowned{background:#d7a52b}.avbox.empty{background:#25282a;opacity:.6}.cnt{position:absolute}.cnt-label{position:absolute;left:0;top:0;width:100%;color:#fff;text-align:center;font-size:10px}.cnt-frame{position:absolute;box-sizing:border-box;outline:1px solid #8bd5ff;background:#8bd5ff33}.cnt-digit{position:absolute;color:#b8b8b8;text-align:center;font-size:9px}.cnt.exhausted .cnt-label,.cnt.exhausted .cnt-digit{color:#777;opacity:.55}.cnt.exhausted .cnt-frame{outline-color:#777;background:#7773}"
             // hotbar 层样式：支持 IMG 真实贴图预览，选中框为绝对定位叠加。
-            + ".hb{position:absolute;box-sizing:border-box;border:0}.hb-img{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated;pointer-events:none}"
+            + ".hb{position:absolute;box-sizing:border-box;border:0;background:transparent!important}.hb-img{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated;pointer-events:none}"
             + ".hb-select{position:absolute;image-rendering:pixelated;pointer-events:none;z-index:2}"
             + ".hb-slot-indicator{position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:9px;color:#f1c75b;white-space:nowrap;pointer-events:none}"
             // 资源加载失败可见提示：红色边框 + 叠加文字，不静默隐藏
-            + ".hb-img-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:9px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center}"
+            + ".hb-img-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:9px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center}.hb-select-error{position:absolute;inset:auto 2px 2px auto;padding:2px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center;z-index:3}"
             + ".scalebar{display:flex;gap:8px;align-items:center;margin:0 0 10px;font-size:12px;color:#eee9dc;flex-wrap:wrap}"
             // 层选择面板：标签页切换活动层，高亮当前选中层
             + ".layer-tabs{display:flex;gap:0;margin:0 0 12px;border-bottom:3px solid #17191b}"
@@ -486,52 +488,51 @@ public final class DebugWebServer {
             + ".resize-handle.n{top:-4px;left:50%;transform:translateX(-50%);cursor:n-resize}.resize-handle.s{bottom:-4px;left:50%;transform:translateX(-50%);cursor:s-resize}"
             + ".resize-handle.w{top:50%;left:-4px;transform:translateY(-50%);cursor:w-resize}.resize-handle.e{top:50%;right:-4px;transform:translateY(-50%);cursor:e-resize}"
             + ".warn{color:#e6aa63}.ok{color:#a7d46f}.msg{min-height:22px;color:#eee9dc}code{color:#f1c75b}"
+            // 全屏 Minecraft 画布视觉：低饱和天空、方块网格、暗角、准星、BossBar 和 ActionBar。
+            + ".header-btn{padding:6px 10px;background:#3e473d;color:#f4f1e8;border:2px solid #111;border-right-color:#87906f;border-bottom-color:#87906f;cursor:pointer;font-size:11px;font-weight:700}.header-btn:hover{background:#56624f}.header-btn:focus-visible{outline:2px solid #f1c75b;outline-offset:2px}"
+            + ".preview-panel .preview{min-height:0;position:absolute;inset:0;padding:0;border:0;max-width:none;background:radial-gradient(ellipse at 50% 30%,#7898a1 0,#41545e 42%,#202b31 75%,#101419 100%);overflow:hidden}"
+            + ".preview-panel .screen{left:50%;top:50%;margin:0;transform:translate(-50%,-50%) translate(var(--view-pan-x,0px),var(--view-pan-y,0px)) scale(var(--screen-zoom,1));transform-origin:center center;--screen-zoom:1;--view-pan-x:0px;--view-pan-y:0px;background:linear-gradient(#7ea4a9 0 46%,#506b69 46% 52%,#35453f 52% 100%);overflow:hidden;outline:4px solid #080909;box-shadow:0 0 0 2px #67736a,8px 8px 0 #080909;touch-action:none}"
+            + ".preview-panel .screen:before{content:'';position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(#ffffff12 1px,transparent 1px),linear-gradient(90deg,#ffffff12 1px,transparent 1px);background-size:16px 16px;mix-blend-mode:screen}.preview-panel .screen:after{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 48%,#0008 100%);z-index:18}"
+            + ".mc-crosshair{position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);z-index:19;pointer-events:none}.mc-crosshair:before,.mc-crosshair:after{content:'';position:absolute;background:#fff;box-shadow:1px 1px #111}.mc-crosshair:before{left:6px;top:0;width:2px;height:14px}.mc-crosshair:after{left:0;top:6px;width:14px;height:2px}"
+            + ".mc-bossbar{position:absolute;left:50%;top:12px;transform:translateX(-50%);width:52%;min-width:220px;z-index:17;color:#fff;text-align:center;font-size:11px;text-shadow:1px 1px #111;pointer-events:none}.mc-bossbar .boss-track{height:8px;margin-top:4px;background:#17191bcc;border:2px solid #080909;box-shadow:inset 0 0 0 1px #515651}.mc-bossbar .boss-fill{height:100%;width:76%;background:linear-gradient(#d96262,#8b2727);box-shadow:inset 0 1px #ffb0a0}.mc-actionbar{position:absolute;left:50%;bottom:42px;transform:translateX(-50%);z-index:17;padding:4px 10px;background:#1119;color:#fff;font-size:11px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}.mc-coordinate{position:fixed;z-index:40;display:none;min-width:150px;padding:7px 9px;background:#111e;color:#fff;border:2px solid #d5a63b;box-shadow:3px 3px #080909;font-size:11px;line-height:1.45;pointer-events:none}.mc-coordinate.show{display:block}.mc-world-label{position:absolute;left:12px;bottom:12px;z-index:17;color:#f1c75b;font-size:10px;text-shadow:1px 1px #111;pointer-events:none}.mc-screen-legend{position:absolute;left:50%;top:calc(50% + 190px);transform:translateX(-50%);z-index:17;color:#d8d7ce;font-size:10px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}"
             // 窄屏：900px 以下降为单列堆叠，字段网格缩窄但保持三列；
             // 500px 以下字段堆叠为标签在上、输入在下的两行布局，适配手机。
-            + "@media(max-width:900px){main{grid-template-columns:1fr}.field{grid-template-columns:minmax(80px,140px) minmax(0,1fr) auto;gap:6px}}"
+            + "@media(max-width:900px){.field{grid-template-columns:minmax(80px,140px) minmax(0,1fr) auto;gap:6px}}"
             + "@media(max-width:500px){.field{grid-template-columns:1fr;gap:4px}.field>label{min-width:0}header{padding:12px}main{padding:10px;gap:10px}.panel{padding:10px}}";
         return "<!DOCTYPE html><html lang='zh'><head><meta charset='UTF-8'>"
             + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            + "<title>MUZ Debug HUD 调试面板</title><style>" + styles + "</style></head>"
-            + "<body data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD 调试面板</h1>"
-            + "<div>只开放 22 个 HUD 运行期字段；保存会异步写入配置与当前 hotbar 覆盖层，再在主线程重载 CraftEngine 并应用 HUD。客户端需重新下载资源包。</div></header>"
-            + "<main><section class='panel'><h2>可编辑配置</h2><form id='hudForm'></form>"
-            + "<div class='actions'><button type='button' id='saveBtn' title='Ctrl+S'>保存并应用</button>"
-            + "<button type='button' class='secondary' id='reloadBtn' title='Ctrl+R'>重新读取</button>"
-            + "<button type='button' class='secondary' id='undoBtn'>撤销</button></div><p id='message' class='msg'></p></section>"
-            + "<section class='panel'><h2>像素预览（可拖动）</h2>"
-            // 层选择标签：点击切换活动层高亮与坐标面板
-            + "<div class='layer-tabs' id='layerTabs'>"
-            + "<div class='layer-tab active' data-layer='card'>牌行</div>"
-            + "<div class='layer-tab' data-layer='avatar'>头像</div>"
-            + "<div class='layer-tab' data-layer='counter'>记牌</div>"
-            + "<div class='layer-tab' data-layer='hotbar'>Hotbar</div>"
-            + "</div>"
-            // 层坐标面板：显示当前层的配置偏移值（不是屏幕绝对坐标）与渲染尺寸
-            + "<div class='layer-coords' id='layerCoords'>"
-            + "<label>X 偏移</label><input type='number' id='coordX' step='1' aria-label='层水平偏移（配置值）'>"
-            + "<label>Y 偏移</label><input type='number' id='coordY' step='1' aria-label='层纵向偏移（配置值）'>"
-            + "<label>渲染宽</label><span class='coord-ro' id='coordW'>-</span>"
-            + "<label>渲染高</label><span class='coord-ro' id='coordH'>-</span>"
-            + "</div>"
-            + "<div class='scalebar'><label>逻辑视口（MC px）</label><input id='viewportWidth' type='number' min='320' max='1920' step='1' value='640' aria-label='逻辑视口宽度'>"
-            + "<span>×</span><input id='viewportHeight' type='number' min='240' max='1080' step='1' value='360' aria-label='逻辑视口高度'>"
-            + "<span>仅页面校准，不写入 22 个 HUD 配置键</span></div>"
-            + "<div class='scalebar'><label>客户端 GUI 倍率</label><select id='guiScale'>"
-            + "<option value='2'>2</option><option value='3' selected>3</option><option value='4'>4</option></select>"
-            + "<label>页面查看倍率</label><select id='pageScale'><option value='0.25'>1/4</option><option value='0.3333333333' selected>1/3</option><option value='0.5'>1/2</option><option value='1'>1</option></select>"
-            + "<span>CSS px/MC px = GUI 倍率 × 页面查看倍率；纵向 hotbar 需保存后重载资源包。</span></div>"
-            + "<div class='scalebar'><label><input type='checkbox' id='snapToggle'> Minecraft 风格吸附</label><span id='dragStatus'>吸附：开启 · 中心线：开启 · Alt 轴锁：开启</span><span>资源状态：CraftEngine 覆盖层按保存流程生成并重载</span></div>"
+            + "<title>MUZ Debug HUD · Minecraft HUD 编辑器</title><style>" + styles + "</style></head>"
+            + "<body id='mcEditor' data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD</h1><span id='muzVersion' class='key'>版本 1.10.16</span>"
+            + "<div>只开放 22 个 HUD 运行期字段；Minecraft 风格全屏编辑器 · 左键拖动 · 右键查看边界 · Shift+方向键微调 · Shift+空白拖动平移</div>"
+            + "<button type='button' class='header-btn' id='topSaveBtn'>保存</button><button type='button' class='header-btn' id='topReloadBtn'>重载</button>"
+            + "<button type='button' class='header-btn' id='panelToggle' aria-expanded='false'>配置</button><button type='button' class='header-btn' id='fullscreenBtn'>全屏</button>"
+            + "<button type='button' class='header-btn' id='resetViewBtn'>重置视图</button></header>"
+            + "<main class='mc-editor'><section class='panel preview-panel' id='previewPanel'><div class='mc-coordinate' id='mcCoordinate'></div>"
             + "<div class='preview'><div id='screen' class='screen'></div></div>"
-            + "<p class='msg' id='dragHint'>提示：预览按 Minecraft 像素绘制，宽度取自资源包实际字形前进量。</p>"
-            + "<h2>警告</h2><ul id='warnings'></ul></section></main>"
+            + "<p class='msg' id='dragHint'>提示：预览按 Minecraft 像素绘制，宽度取自服务端 geometry；左键拖动，Shift+空白拖动平移视图，右键查看坐标。</p></section>"
+            + "<section class='panel editor-panel collapsed' id='editorPanel'><h2>HUD 配置</h2>"
+            + "<details class='tools-panel' id='toolsPanel'><summary>场景工具与层定位</summary>"
+            + "<div class='layer-tabs' id='layerTabs' role='tablist' aria-label='HUD 图层'><button type='button' role='tab' aria-selected='true' aria-controls='layer-card' class='layer-tab active' data-layer='card'>牌行</button>"
+            + "<button type='button' role='tab' aria-selected='false' aria-controls='layer-avatar' class='layer-tab' data-layer='avatar'>头像</button><button type='button' role='tab' aria-selected='false' aria-controls='layer-counter' class='layer-tab' data-layer='counter'>记牌</button>"
+            + "<button type='button' role='tab' aria-selected='false' aria-controls='layer-hotbar' class='layer-tab' data-layer='hotbar'>Hotbar</button></div>"
+            + "<div class='layer-coords' id='layerCoords'><label>X 偏移</label><input type='number' id='coordX' step='1' aria-label='层水平偏移（配置值）'>"
+            + "<label>Y 偏移</label><input type='number' id='coordY' step='1' aria-label='层纵向偏移（配置值）'><label>渲染宽</label><span class='coord-ro' id='coordW'>-</span>"
+            + "<label>渲染高</label><span class='coord-ro' id='coordH'>-</span></div>"
+            + "<div class='scalebar'><label>逻辑视口（MC px）</label><input id='viewportWidth' type='number' min='320' max='1920' step='1' value='640' aria-label='逻辑视口宽度'><span>×</span>"
+            + "<input id='viewportHeight' type='number' min='240' max='1080' step='1' value='360' aria-label='逻辑视口高度'><span>仅页面校准，不写入 HUD 配置</span></div>"
+            + "<div class='scalebar'><label>客户端 GUI 倍率</label><select id='guiScale' aria-label='客户端 GUI 倍率'><option value='2'>2</option><option value='3' selected>3</option><option value='4'>4</option></select>"
+            + "<label>页面查看倍率</label><select id='pageScale'><option value='0.25'>1/4</option><option value='0.3333333333' selected>1/3</option><option value='0.5'>1/2</option><option value='1'>1</option></select><span>倍率只改变 CSS 显示，逻辑位置仍为 MC px。</span></div>"
+            + "<div class='scalebar'><label><input type='checkbox' id='snapToggle' aria-label='Minecraft 风格吸附' checked> Minecraft 风格吸附</label><span id='dragStatus'>吸附：开启 · 中心线：开启 · Alt 轴锁：开启</span><span>纵向 hotbar 需保存后重载资源包。</span></div>"
+            + "<h2>警告</h2><ul id='warnings'></ul></details><form id='hudForm'></form>"
+            + "<div class='actions'><button type='button' id='saveBtn' title='Ctrl+S'>保存并应用</button><button type='button' class='secondary' id='reloadBtn' title='Ctrl+R'>重新读取</button>"
+            + "<button type='button' class='secondary' id='undoBtn'>撤销</button></div><p id='message' class='msg'></p></section></main>"
             + "<script type='application/json' id='muz-state'>" + stateJson + "</script>"
             + "<script>"
-            + "const token=document.body.dataset.token;let state=JSON.parse(document.getElementById('muz-state').textContent);let dirty=new Set();let dragging=null;let busy=false;"
-            + "let dragCfg=state.drag||{snapEnabled:true,snapThreshold:4,centerGuidesEnabled:true,altAxisLock:true};let pageSnapEnabled=dragCfg.snapEnabled!==false;"
+            + "const token=document.body.dataset.token;let state=JSON.parse(document.getElementById('muz-state').textContent);let dirty=new Set();let dragging=null;let panning=null;let resizing=null;let busy=false;let renderQueued=false;let viewPanX=0,viewPanY=0;"
+            + "let dragCfg=state.drag||{snapEnabled:true,snapThreshold:4,centerGuidesEnabled:true,altAxisLock:true};let pageSnapEnabled=true;let renderFrame=0;"
             // 层选择状态：activeLayer 决定高亮哪层、坐标面板显示哪层。hotbar 选中槽仅页面演示，不写入 patch。
             + "let activeLayer='card';let hotbarSelectedSlot=0;"
-            + "const form=document.getElementById('hudForm'),msg=document.getElementById('message'),warns=document.getElementById('warnings'),dragHint=document.getElementById('dragHint');"
+            + "const form=document.getElementById('hudForm'),msg=document.getElementById('message'),warns=document.getElementById('warnings'),dragHint=document.getElementById('dragHint'),screen=document.getElementById('screen'),previewPanel=document.getElementById('previewPanel');"
             + "const coordX=document.getElementById('coordX'),coordY=document.getElementById('coordY'),coordW=document.getElementById('coordW'),coordH=document.getElementById('coordH');"
             + "function fieldSpec(k){return state.fields.find(f=>f.key===k)}"
             + "function esc(s){return String(s??'').replace(/[&<>\\\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;',\"'\":'&#39;'})[c])}"
@@ -544,22 +545,14 @@ public final class DebugWebServer {
             + "function setPrompt(text){msg.textContent=text; if(!dragging)dragHint.textContent=text}"
             + "function setDirtyPrompt(){setPrompt(dirty.size?'有未保存改动：'+dirty.size+' 项':'当前没有未保存改动。')}"
             + "function updateDirty(k){const same=normalizeValue(k,readValue(k))===normalizeValue(k,v(k));if(same)dirty.delete(k);else dirty.add(k);const el=control(k),row=el&&el.closest('.field');if(row)row.classList.toggle('dirty',dirty.has(k));}"
-            + "function setBusy(on){busy=on;document.querySelectorAll('#hudForm input,#hudForm select,#saveBtn,#reloadBtn,#undoBtn,#viewportWidth,#viewportHeight,#guiScale,#pageScale,#snapToggle,#coordX,#coordY').forEach(el=>el.disabled=on)}"
-            // 层选择：点击标签页切换活动层，在预览中高亮选中层
-            + "function selectLayer(kind){activeLayer=kind;document.querySelectorAll('.layer-tab').forEach(t=>t.classList.toggle('active',t.dataset.layer===kind));document.querySelectorAll('.layer').forEach(el=>el.classList.toggle('selected',el.dataset.drag===kind));updateCoordPanel()}"
-            + "document.getElementById('layerTabs').addEventListener('click',e=>{const tab=e.target.closest('.layer-tab');if(tab&&tab.dataset.layer)selectLayer(tab.dataset.layer)});"
-            // 坐标面板：从活动层的配置偏移键读取/写入精确值（不是屏幕绝对坐标）
-            + "function layerXYKeys(kind){const m={avatar:['trick-hud.avatar-offset-x','trick-hud.avatar-offset-down'],card:['trick-hud.card-offset-x','trick-hud.offset-down'],counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down'],hotbar:['hotbar-hud.offset-x','hotbar-hud.offset-y']};return m[kind]||[null,null]}"
-            + "function updateCoordPanel(){const keys=layerXYKeys(activeLayer),vals=collectAll();const xKey=keys[0],yKey=keys[1];"
-            + "coordX.value=xKey?Math.round(Number(vals[xKey]||0)):'';coordX.disabled=!xKey||busy;coordY.value=yKey?Math.round(Number(vals[yKey]||0)):'';coordY.disabled=!yKey||busy;"
-            + "const layerEl=document.querySelector('.layer[data-drag=\"'+activeLayer+'\"]');if(layerEl){const s=cssScale();coordW.textContent=Math.round(parseFloat(layerEl.style.width)/s);coordH.textContent=Math.round(parseFloat(layerEl.style.height)/s)}else{coordW.textContent='-';coordH.textContent='-'}}"
-            + "coordX.addEventListener('input',()=>{const keys=layerXYKeys(activeLayer);if(keys[0]&&!busy){setField(keys[0],Number(coordX.value)||0);renderPreview();renderWarnings()}});"
-            + "coordY.addEventListener('input',()=>{const keys=layerXYKeys(activeLayer);if(keys[1]&&!busy){setField(keys[1],Number(coordY.value)||0);renderPreview();renderWarnings()}});"
-            + "function renderForm(){form.innerHTML='';let groups={};state.fields.forEach(f=>(groups[f.group]??=[]).push(f));Object.entries(groups).forEach(([g,fs])=>{let box=document.createElement('div');box.className='group';box.innerHTML='<h2>'+esc(g)+'</h2>';fs.forEach(f=>box.appendChild(field(f)));form.appendChild(box)});refreshDragStatus();renderPreview();renderWarnings();selectLayer(activeLayer);if(!busy&&!dragging)setDirtyPrompt()}"
+            + "function setBusy(on){busy=on;document.querySelectorAll('#hudForm input,#hudForm select,#saveBtn,#reloadBtn,#undoBtn,#topSaveBtn,#topReloadBtn,#panelToggle,#fullscreenBtn,#resetViewBtn,#viewportWidth,#viewportHeight,#guiScale,#pageScale,#snapToggle,#coordX,#coordY').forEach(el=>el.disabled=on)}"
+            // 坐标面板的稳定 DOM 事件绑定与更新逻辑位于下方静态渲染器。
+
+            + "function renderForm(){form.replaceChildren();let groups={};state.fields.forEach(f=>(groups[f.group]??=[]).push(f));Object.entries(groups).forEach(([g,fs])=>{let box=document.createElement('div');box.className='group';let title=document.createElement('h2');title.textContent=g;box.appendChild(title);fs.forEach(f=>box.appendChild(field(f)));form.appendChild(box)});refreshDragStatus();scheduleRender();renderWarnings();selectLayer(activeLayer);if(!busy&&!dragging)setDirtyPrompt()}"
             + "function field(f){let row=document.createElement('div');row.className='field';let val=v(f.key);let left=document.createElement('label');left.innerHTML=esc(f.label)+'<span class=key>'+esc(f.key)+'</span>';let mid=document.createElement('div');let right=document.createElement('div');if(f.type==='boolean'){let i=document.createElement('input');i.type='checkbox';i.checked=!!val;i.dataset.key=f.key;i.onchange=changed;mid.appendChild(i);right.textContent=i.checked?'true':'false'}else if(f.type==='integer'){if(f.control==='select'){let s=document.createElement('select');s.dataset.key=f.key;(f.options||[]).forEach(o=>{let option=document.createElement('option');option.value=o;option.textContent=o;option.selected=Number(o)===Number(val);s.appendChild(option)});s.onchange=changed;mid.appendChild(s);right.textContent='资源档位'}else if(f.control==='range'){let r=document.createElement('input');r.type='range';r.min=f.min;r.max=f.max;r.step=f.step;r.value=val;r.dataset.key=f.key;let n=document.createElement('input');n.type='number';n.min=f.min;n.max=f.max;n.step=f.step;n.value=val;n.dataset.key=f.key;r.oninput=()=>{n.value=r.value;changed({target:r})};n.onchange=()=>{r.value=n.value;changed({target:n})};n.oninput=()=>{r.value=n.value;changed({target:n})};mid.append(r,n);right.textContent=f.min+'..'+f.max}else{let n=document.createElement('input');n.type='number';if(f.min!=null)n.min=f.min;if(f.max!=null)n.max=f.max;if(f.step!=null)n.step=f.step;n.value=val;n.dataset.key=f.key;n.oninput=changed;mid.appendChild(n);right.textContent=(f.min==null?'无下限':f.min)+'..'+(f.max==null?'无上限':f.max)}}else{let c=document.createElement('input');c.type='color';let color=String(val);c.value=/^#[0-9a-fA-F]{6}$/.test(color)?color:'#'+color.slice(-6);let t=document.createElement('input');t.type='text';t.value=val;t.dataset.key=f.key;c.oninput=()=>{t.value=c.value.toUpperCase();changed({target:t})};t.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(t.value))c.value=t.value;changed({target:t})};mid.append(c,t);right.textContent='#RGB/#ARGB'}row.append(left,mid,right);return row}"
             // row 可能取不到（拖动是从预览层触发的，不一定有对应的 .field 祖先）。
             // 这里必须判空：拖动过程中一次 TypeError 就会中断整个手势，表现成「拖不动」。
-            + "function changed(e){if(busy||!e||!e.target||!e.target.dataset.key)return;const k=e.target.dataset.key;updateDirty(k);let row=e.target.closest('.field'),f=fieldSpec(k);if(f&&f.type==='boolean'&&row)row.lastElementChild.textContent=e.target.checked?'true':'false';setDirtyPrompt();renderPreview();renderWarnings()}"
+            + "function changed(e){if(busy||!e||!e.target||!e.target.dataset.key)return;const k=e.target.dataset.key;updateDirty(k);let row=e.target.closest('.field'),f=fieldSpec(k);if(f&&f.type==='boolean'&&row)row.lastElementChild.textContent=e.target.checked?'true':'false';setDirtyPrompt();scheduleRender()}"
             + "function currentPatch(){let p={};dirty.forEach(k=>{const f=fieldSpec(k),el=control(k);if(!el)throw new Error('找不到配置控件：'+k);p[k]=f.type==='boolean'?el.checked:(f.type==='integer'?Number(el.value):el.value)});return p}"
             + "function collectAll(){let out={...(state.values||{})};dirty.forEach(k=>{out[k]=readValue(k)});return out}"
             + "async function post(url,body){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-MUZ-Token':token},body:JSON.stringify(body||{})});let j=await r.json();if(!r.ok||!j.ok)throw new Error((j.messages||['请求失败']).join('；'));return j}"
@@ -570,6 +563,13 @@ public final class DebugWebServer {
             + "msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
             + "document.getElementById('reloadBtn').onclick=async()=>{if(busy)return;setBusy(true);setPrompt('正在重新读取配置，请稍候。');try{let j=await post('/api/reload',{});state=j.snapshot;dirty.clear();renderForm();let text='已重新读取配置。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+=srvMsgs.join('；');msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
             + "document.getElementById('undoBtn').onclick=()=>{if(busy)return;dirty.clear();renderForm();const text='已撤销未保存改动。';msg.textContent=text;dragHint.textContent=text};"
+            + "document.getElementById('topSaveBtn').onclick=()=>document.getElementById('saveBtn').click();document.getElementById('topReloadBtn').onclick=()=>document.getElementById('reloadBtn').click();"
+            + "document.getElementById('panelToggle').onclick=()=>{const panel=document.getElementById('editorPanel'),open=panel.classList.toggle('collapsed');document.getElementById('panelToggle').setAttribute('aria-expanded',open?'false':'true')};"
+            + "document.getElementById('fullscreenBtn').onclick=async()=>{try{if(document.fullscreenElement){await document.exitFullscreen();return}if(document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();else setPrompt('当前浏览器不支持全屏，保留普通编辑模式。')}catch(e){setPrompt('全屏失败，保留普通编辑模式。')}};"
+            + "document.getElementById('resetViewBtn').onclick=()=>{if(busy)return;viewPanX=0;viewPanY=0;applyScreenTransform();setPrompt('已重置视图平移，HUD 配置未改变。')};"
+            + "document.getElementById('layerTabs').addEventListener('click',e=>{const tab=e.target.closest('[data-layer]');if(tab&&!busy)selectLayer(tab.dataset.layer)});"
+            + "coordX.addEventListener('input',e=>{const keys=layerXYKeys(activeLayer);if(keys)setField(keys[0],Number(e.target.value||0))});coordY.addEventListener('input',e=>{const keys=layerXYKeys(activeLayer);if(keys&&keys[1])setField(keys[1],Number(e.target.value||0))});"
+            + "['viewportWidth','viewportHeight','guiScale','pageScale'].forEach(id=>document.getElementById(id).addEventListener('input',scheduleRender));['guiScale','pageScale'].forEach(id=>document.getElementById(id).addEventListener('change',scheduleRender));"
             // Ctrl+S 保存、Ctrl+R 重载快捷键——拦截浏览器默认行为，触发对应按钮 click。
             // Ctrl+S/R 必须始终 preventDefault 阻止浏览器保存/刷新，即使 busy 期间也不放过；
             // 但按钮 click 只在非 busy 时触发（按钮 handler 自己检查 busy）。
@@ -585,6 +585,7 @@ public final class DebugWebServer {
             // MC 像素 → CSS 像素：先乘客户端 GUI 倍率，再乘页面查看倍率。页面查看倍率只影响 CSS，
             // 不改变下发的 MC 几何；默认 GUI=3、页面=1/3 时 1 CSS px 对应 1 MC px。
             + "function cssScale(){return guiScale()*pageScale()}function cssPx(mc){return mc*cssScale()}"
+            + "function screenZoom(){const v=viewport(),panel=previewPanel.getBoundingClientRect(),s=cssScale(),availableW=Math.max(1,panel.width-28),availableH=Math.max(1,panel.height-28);return Math.max(.25,Math.min(1,availableW/(v.width*s),availableH/(v.height*s)))}"
             // 头像重叠所需空间 = 牌行 offset-down + 当前档位 avatar.rowHeight（不再是 12*scale 硬编码）
             + "function warningFor(vals){const g=geo();const scale=Number(vals['trick-hud.avatar-scale']);"
             + "const av=(g.avatars||[]).find(x=>Number(x.scale)===scale);if(!av)return null;"
@@ -649,99 +650,18 @@ public final class DebugWebServer {
             + "if(x+w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(x+w)+' > '+v.width+'）');"
             + "if(y+h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(y+h)+' > '+v.height+'）')}"
             + "const SCALE_KEYS={card:'trick-hud.card-height',avatar:'trick-hud.avatar-scale',counter:'trick-hud.counter.scale',hotbar:'hotbar-hud.scale'};"
-            + "function renderPreview(){layoutWarnings=[];const vals=collectAll(),g=geo(),v=viewport(),screen=document.getElementById('screen');"
-            + "screen.style.width=cssPx(v.width)+'px';screen.style.height=cssPx(v.height)+'px';screen.innerHTML='';"
-            + "let html='';"
-            // 参照物：BossBar 轨道（装饰性 182x5，仅用于示意；left/top 基于 geometry）、屏幕水平中线、屏幕底边
-            + "const bossW=182,bossH=5,bossLeft=Math.floor((v.width-bossW)/2),bossTop=Math.max(0,g.bossBarBaselineY-bossH);"
-            + "html+='<div class=\"ref boss\" style=\"left:'+cssPx(bossLeft)+'px;top:'+cssPx(bossTop)+'px;width:'+cssPx(bossW)+'px;height:'+cssPx(bossH)+'px\"></div>';"
-            + "if(dragCfg.centerGuidesEnabled){html+='<div class=\"ref grid\"></div><div class=\"ref mid\" style=\"left:'+cssPx(v.width/2)+'px\"></div><div class=\"ref bottom\" style=\"top:'+cssPx(v.height-1)+'px\"></div>';}"
-            + "if(vals['trick-hud.enabled']){const r=rowGeom(vals);"
-            + "const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0);"
-            + "const ox=Number(vals['trick-hud.offset-x']);"
-            // 整数 MC 像素居中：先按屏幕居中 max 行，再在 max 行内居中当前行。
-            + "const baseLeft=Math.floor((v.width-maxW)/2),bossBaseline=g.bossBarBaselineY;"
-            // 头像行：ascent = rowHeight - avatar-offset-down；top = baseline - ascent
-            + "const avatarAscent=r.avatarHeight-Number(vals['trick-hud.avatar-offset-down']);"
-            + "const avX=baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']);"
-            + "const avY=bossBaseline-avatarAscent;"
-            + "let oc=String(vals['trick-hud.avatar-outline.color']);if(!/^#[0-9a-fA-F]{6}$/.test(oc))oc='#'+oc.slice(-6);"
-            + "const ob=vals['trick-hud.avatar-outline.enabled']?oc:'transparent';"
-            + "html+='<div class=layer data-drag=avatar style=\"left:'+cssPx(avX)+'px;top:'+cssPx(avY)+'px;width:'+cssPx(r.avatarRowWidth)+'px;height:'+cssPx(r.avatarHeight)+'px\"><span class=tag>头像行 avatar-offset-x/down</span>'+layerHandles('avatar');"
-            + "for(let i=0;i<3;i++){const slot=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true};const slotW=Number(slot.slotWidth||r.avatarSlot),contentW=Number(slot.contentAdvance||slotW),faceH=Number(slot.rowHeight||r.avatarHeight),faceTop=r.avatarHeight-faceH,faceLeft=(slotW-contentW)/2;const classes='avbox'+(slot.crowned?' crowned':'')+(slot.empty?' empty':'');html+='<div class=avslot style=\"left:'+cssPx(i*(r.avatarSlot+r.avGap))+'px;top:0;width:'+cssPx(r.avatarSlot)+'px;height:'+cssPx(r.avatarHeight)+'px\"><div class=\"'+classes+'\" data-position=\"'+esc(slot.position||'')+'\" style=\"left:'+cssPx(faceLeft)+'px;top:'+cssPx(faceTop)+'px;width:'+cssPx(contentW)+'px;height:'+cssPx(faceH)+'px;outline-color:'+ob+'\"></div></div>'}html+='</div>';"
-            + "pushBoundsWarn('头像行',avX,avY,r.avatarRowWidth,r.avatarHeight);"
-            // 牌行：ascent = cardHeight - offset-down；top = baseline - ascent（offset-down 增大 top 下降）
-            + "const cardAscent=r.cardHeight-Number(vals['trick-hud.offset-down']);"
-            + "const cdX=baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']);"
-            + "const cdY=bossBaseline-cardAscent;"
-            + "html+='<div class=layer data-drag=card style=\"left:'+cssPx(cdX)+'px;top:'+cssPx(cdY)+'px;width:'+cssPx(r.cardRowWidth)+'px;height:'+cssPx(r.cardHeight)+'px\"><span class=tag>牌行 card-offset-x / offset-down</span>'+layerHandles('card');"
-            + "const cardLabels=r.cards.map(card=>String(card.label||card.rank||''));"
-            + "for(let i=0;i<r.n;i++){html+='<div class=cardbox data-card-index=\"'+i+'\" data-card-rank=\"'+esc(cardLabels[i])+'\" style=\"left:'+cssPx(i*r.step)+'px;top:0;width:'+cssPx(r.cardW)+'px;height:'+cssPx(r.cardHeight)+'px;line-height:'+cssPx(r.cardHeight)+'px\">'+esc(cardLabels[i])+'</div>'}html+='</div>';"
-            + "pushBoundsWarn('牌行',cdX,cdY,r.cardRowWidth,r.cardHeight);"
-            // 记牌行：使用独立的 counter.offset-down 控制纵向位置，不再耦合 avatar-offset-down。
-            // cell 的水平定位使用 counterTiers 按 scale 查表的 advance；不复算任何字体宽度。
-            + "if(vals['trick-hud.counter.enabled']){"
-            + "const cnX=baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']);"
-            + "const counterAscent=r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down']);"
-            + "const cnY=bossBaseline-counterAscent;const cnH=r.counterCellHeight;"
-            + "html+='<div class=layer data-drag=counter style=\"left:'+cssPx(cnX)+'px;top:'+cssPx(cnY)+'px;width:'+cssPx(r.counterRowWidth)+'px;height:'+cssPx(cnH)+'px\"><span class=tag>记牌行 counter.offset-x / offset-down</span>'+layerHandles('counter');"
-            + "let cx=0;r.counterCells.forEach((cell,i)=>{"
-            + "const exhausted=!!cell.exhausted,hidden=exhausted&&!!vals['trick-hud.counter.hide-exhausted'];"
-            + "const label=String(cell.label),digits=String(cell.playedCount);"
-            + "const frameTop=r.counterFrameTopDelta,digitTop=frameTop+r.counterDigitInset;"
-            + "const digitWidth=r.counterCellWidth-2*r.counterDigitInset;"
-            + "html+='<div class=\"cnt'+(exhausted?' exhausted':'')+(hidden?' hidden':'')+'\" data-label=\"'+esc(cell.label)+'\" data-played-count=\"'+cell.playedCount+'\" data-exhausted=\"'+exhausted+'\" data-hidden=\"'+hidden+'\" style=\"left:'+cssPx(cx)+'px;top:0;width:'+cssPx(r.counterCellWidth)+'px;height:'+cssPx(r.counterCellHeight)+'px\">';"
-            + "if(!hidden){html+='<div class=cnt-label style=\"height:'+cssPx(r.counterLabelHeight)+'px;line-height:'+cssPx(r.counterLabelHeight)+'px\">'+esc(label)+'</div>';"
-            + "html+='<div class=cnt-frame style=\"left:0;top:'+cssPx(frameTop)+'px;width:'+cssPx(r.counterCellWidth)+'px;height:'+cssPx(r.counterFrameHeight)+'px\"></div>';"
-            + "html+='<div class=cnt-digit style=\"left:'+cssPx(r.counterDigitInset)+'px;top:'+cssPx(digitTop)+'px;width:'+cssPx(digitWidth)+'px;height:'+cssPx(r.counterDigitHeight)+'px;line-height:'+cssPx(r.counterDigitHeight)+'px\">'+esc(digits)+'</div>';}html+='</div>';"
-            + "cx+=r.counterAdvance+(i<r.counterCells.length-1?r.counterGap:0)});"
-            + "html+='</div>';"
-            + "pushBoundsWarn('记牌行',cnX,cnY,r.counterRowWidth,cnH)}}"
-            // hotbar 定位公式（批准版）：
-            //   baseAscent = rowGeom 查表的 hbBaseAscent
-            //   currentAscent = baseAscent - hy
-            //   ascentDelta = baseAscent - currentAscent   （= hy）
-            //   hbY = actionBarBottomY - hotbarHeight + ascentDelta
-            //   hbX = floor((screenWidth - hotbarAdvance)/2) + hx
-            // 完整 9 槽热键栏几何全部从 hotbars[] 按 scale 查表，不硬编码尺寸。
-            // 预览使用同源 /api/resource/ 路由提供的构建期真实 PNG；纹理名来自 geometry。
-            + "if(vals['hotbar-hud.enabled']){const r=rowGeom(vals);"
-            + "const hy=Number(vals['hotbar-hud.offset-y']),hx=Number(vals['hotbar-hud.offset-x']);"
-            + "const baseAscent=r.hbBaseAscent,currentAscent=baseAscent-hy,ascentDelta=baseAscent-currentAscent;"
-            + "const hbY=v.height-r.hbH+ascentDelta;"
-            + "const hbX=Math.floor((v.width-r.hbAdv)/2)+hx;"
-            + "html+='<div class=layer data-drag=hotbar style=\"left:'+cssPx(hbX)+'px;top:'+cssPx(hbY)+'px;width:'+cssPx(r.hbW)+'px;height:'+cssPx(r.hbH)+'px;background:#121216\"><span class=tag>Hotbar offset-x / offset-y（纵向需重载资源包）</span>'+layerHandles('hotbar');"
-            // 真实底图 PNG：加载失败显示可见的资源缺失提示，不静默隐藏
-            + "html+='<img class=hb-img src=\"/api/resource/'+esc(r.hbTexture)+'\" onerror=\"this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'\">"
-            + "<div class=hb-img-error style=\"display:none\">底图缺失：'+esc(r.hbTexture)+'<br>请构建后重启</div>';"
-            + "const cols=['#E03A3A','#E06A2A','#E08A2A','#D8D030','#3CC050','#30C0A8','#3888E0','#7050D8','#C04AA0'];"
-            + "for(let i=0;i<r.hbSlotCount;i++){html+='<div class=hb data-slot=\"'+i+'\" style=\"left:'+cssPx(r.hbSlotsStartX+i*r.hbSlotStep)+'px;top:'+cssPx(r.hbSlotsStartY)+'px;width:'+cssPx(r.hbSlotW)+'px;height:'+cssPx(r.hbSlotH)+'px;background:'+(cols[i]||'#555')+'\"></div>'}"
-            // 选中框 PNG：定位到 hotbarSelectedSlot 对应槽位置
-            + "const selLeft=r.hbSelStartX+hotbarSelectedSlot*r.hbSlotStep;"
-            + "html+='<img class=hb-select src=\"/api/resource/'+esc(r.hbSelectTexture)+'\" style=\"left:'+cssPx(selLeft)+'px;top:'+cssPx(r.hbSelStartY)+'px;width:'+cssPx(r.hbSelW)+'px;height:'+cssPx(r.hbSelH)+'px\" onerror=\"this.style.display=\\'none\\'\">';"
-            + "html+='<span class=hb-slot-indicator>持槽 '+hotbarSelectedSlot+'</span>';"
-            + "html+='</div>';"
-            + "pushBoundsWarn('Hotbar',hbX,hbY,r.hbW,r.hbH)}"
-            // 【拖动期间绝对不能重建 DOM】：真实鼠标按下时浏览器会做「隐式指针捕获」，
-            // 把指针事件锁定到 pointerdown 的那个 target 元素上。一旦这个元素被
-            // innerHTML 重建销毁，浏览器就派发 pointercancel 并【停止派发后续
-            // pointermove】—— 表现正是「点一次只能拖动一下」。
-            // 用合成 PointerEvent 测不出来这个问题：合成事件不走隐式捕获，
-            // 所以哪怕元素被销毁，dispatchEvent 仍然照常触发。
-            // 拖动时走 nudgeDraggedLayer 只改 style，松手后才做完整重建。
-            // 缩放手柄 HTML：选中层的四角和四边中点各 8 个手柄。
-            // SCALE_KEYS 映射：每层拖拽缩放对应的配置档位键（牌高、头像scale、counter/hotbar scale）。
-            // 手柄只在选中层上显示；缩放写入的是档位字段（select control），会吸附到最近合法档。
-            + "function layerHandles(kind){if(kind!==activeLayer)return '';return '<div class=\"resize-handle nw\" data-resize=\"nw\"></div><div class=\"resize-handle ne\" data-resize=\"ne\"></div><div class=\"resize-handle sw\" data-resize=\"sw\"></div><div class=\"resize-handle se\" data-resize=\"se\"></div><div class=\"resize-handle n\" data-resize=\"n\"></div><div class=\"resize-handle s\" data-resize=\"s\"></div><div class=\"resize-handle w\" data-resize=\"w\"></div><div class=\"resize-handle e\" data-resize=\"e\"></div>'}"
-            + "screen.innerHTML=html;bindDrag();bindResize();updateCoordPanel()}"
+            // 视口适配：逻辑坐标仍是 640×360 MC px，舞台按浏览器大小放大；指针换算使用同一缩放值。
             // 滚轮切换 hotbar 选中槽（0..8）：仅在 hotbar 层上方才拦截滚轮，不劫持页面其他位置。
             // 这只是页面演示持槽效果，不混入保存 patch。
-            + "document.getElementById('screen').addEventListener('wheel',e=>{const hbLayer=e.target.closest('.layer[data-drag=\"hotbar\"]');if(!hbLayer)return;e.preventDefault();hotbarSelectedSlot=Math.max(0,Math.min(8,hotbarSelectedSlot+(e.deltaY>0?1:-1)));renderPreview()},{passive:false});"
+            + "/* Hotbar wheel、右键与空白平移统一由稳定 DOM 事件委托处理。 */"
             // 拖动：把 CSS 位移换算回 MC 像素写进表单。松手才提交（纵向重打包代价高）。
             + "const DRAG_KEYS={avatar:['trick-hud.avatar-offset-x','trick-hud.avatar-offset-down'],"
             + "card:['trick-hud.card-offset-x','trick-hud.offset-down'],"
             + "counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down'],"
             + "hotbar:['hotbar-hud.offset-x','hotbar-hud.offset-y']};"
+            + "function layerXYKeys(kind){return DRAG_KEYS[kind]||null}"
+            + "function selectLayer(kind){if(!DRAG_KEYS[kind])kind='card';activeLayer=kind;document.querySelectorAll('#layerTabs [data-layer]').forEach(t=>{const active=t.dataset.layer===kind;t.classList.toggle('active',active);t.setAttribute('aria-selected',active?'true':'false')});screen.querySelectorAll('.layer[data-drag]').forEach(el=>el.classList.toggle('selected',el.dataset.drag===kind));updateCoordPanel()}"
+            + "function updateCoordPanel(){const keys=layerXYKeys(activeLayer),vals=collectAll(),box=staticBoxes(vals).boxes[activeLayer];if(coordX)coordX.value=keys?Number(vals[keys[0]]||0):'';if(coordY)coordY.value=keys&&keys[1]?Number(vals[keys[1]]||0):'';if(coordW)coordW.textContent=box?Math.round(box.w):'-';if(coordH)coordH.textContent=box?Math.round(box.h):'-'}"
             + "function controls(k){const q=CSS.escape(k);return form.querySelectorAll(\"[data-key='\"+q+\"']\")}"
             + "function writeValue(k,value){controls(k).forEach(el=>{if(el.type==='checkbox')el.checked=!!value;else el.value=value})}"
             + "function setField(key,val){const el=control(key);if(!el)return false;const f=fieldSpec(key);let next=Math.round(val);"
@@ -752,98 +672,56 @@ public final class DebugWebServer {
             + "f.options.forEach(o=>{if(Math.abs(Number(o)-next)<Math.abs(best-next))best=Number(o)});next=best}"
             + "writeValue(key,next);if(dragging||resizing){updateDirty(key);return true}changed({target:el});return true}"
             // 【拖动为什么不能把监听器挂在被拖的元素上】：拖动过程中要实时更新预览，
-            // 而 renderPreview() 是整段重建 screen.innerHTML 的 —— 那会把正在被拖的
+            // 而旧版 renderPreview() 会整段重建预览节点 —— 那会把正在被拖的
             // 元素本身销毁，挂在它上面的 pointermove 与 setPointerCapture 一起消失，
             // 结果拖动只在第一帧生效然后立刻断掉（表现就是「拖不动」）。
             // 所以监听器挂在 window 上：它不随预览重建而消失。
-            + "function bindDrag(){document.querySelectorAll('.layer').forEach(el=>{el.onpointerdown=e=>{"
-            + "if(busy)return;e.preventDefault();const kind=el.dataset.drag,keys=DRAG_KEYS[kind];if(!keys)return;"
-            // 点击层时同步选中：层标签页、坐标面板和预览高亮同步更新
-            + "selectLayer(kind);"
-            + "const vals=collectAll(),s=cssScale(),baseLeft=parseFloat(el.style.left)/s,baseTop=parseFloat(el.style.top)/s;"
-            + "if(el.setPointerCapture)el.setPointerCapture(e.pointerId);"
-            + "dragging={kind:kind,keys:keys,sx:e.clientX,sy:e.clientY,axis:null,hasMoved:false,"
-            + "bx:Number(vals[keys[0]]||0),by:keys[1]?Number(vals[keys[1]]||0):0,el:el,"
-            + "baseLeft:baseLeft,baseTop:baseTop,width:parseFloat(el.style.width)/s,height:parseFloat(el.style.height)/s,pointerId:e.pointerId};"
-            + "el.style.transform='';el.classList.add('drag')}})}"
-            + "function clampDelta(base,size,extent,delta){const min=extent-size-base,max=-base;return min<=max?Math.max(min,Math.min(max,delta)):(extent-size)/2-base}"
-            + "window.addEventListener('pointermove',ev=>{if(!dragging||busy)return;ev.preventDefault();"
-            + "const s=cssScale(),v=viewport(),k=dragging.keys;let dx=(ev.clientX-dragging.sx)/s,dy=(ev.clientY-dragging.sy)/s;"
-            // 零位移 pointermove（同坐标或亚像素抖动）不触发 snap，避免点击时意外吸附到中心线。
-            + "if(Math.abs(dx)<0.5&&Math.abs(dy)<0.5&&!dragging.hasMoved)return;"
-            + "dragging.hasMoved=true;"
-            + "if(!k[1])dy=0;if(dragCfg.altAxisLock&&ev.altKey&&dragging.axis===null&&(Math.abs(dx)>=2||Math.abs(dy)>=2))dragging.axis=Math.abs(dx)>=Math.abs(dy)?'x':'y';"
-            + "if(dragging.axis==='x')dy=0;if(dragging.axis==='y')dx=0;"
-            + "dx=clampDelta(dragging.baseLeft,dragging.width,v.width,dx);if(k[1])dy=clampDelta(dragging.baseTop,dragging.height,v.height,dy);"
-            // snap 只在轴锁之后生效：先用 axis 过滤，再 snap，最后 clamp；
-            // 这样 Alt 锁 Y 轴后 snap 只作用于 X，不会反向给 Y 施加力。
-            + "if(dragCfg.snapEnabled){const tx=(v.width-dragging.width)/2-dragging.baseLeft,ty=(v.height-dragging.height)/2-dragging.baseTop;"
-            + "if(dragging.axis!=='y'&&Math.abs(dx-tx)<=dragCfg.snapThreshold)dx=tx;if(k[1]&&dragging.axis!=='x'&&Math.abs(dy-ty)<=dragCfg.snapThreshold)dy=ty;"
-            + "dx=clampDelta(dragging.baseLeft,dragging.width,v.width,dx);if(k[1])dy=clampDelta(dragging.baseTop,dragging.height,v.height,dy)}"
-            + "setField(k[0],dragging.bx+dx);if(k[1])setField(k[1],dragging.by+dy);"
-            // transform 必须使用限幅、吸附和资源档位吸附后的实际值，而不是原始指针 dx/dy。
-            + "const actualX=Number(readValue(k[0])),actualY=k[1]?Number(readValue(k[1])):dragging.by;"
-            + "const effectiveDx=Number.isFinite(actualX)?actualX-dragging.bx:dx,effectiveDy=k[1]&&Number.isFinite(actualY)?actualY-dragging.by:0;"
-            // 拖动期间不重建 DOM，只让当前层视觉上跟着指针走；松手后才完整重建。
-            + "dragging.el.classList.add('drag');dragging.el.style.transform='translate('+cssPx(effectiveDx)+'px,'+cssPx(effectiveDy)+'px)';"
-            + "dragHint.textContent='拖动中：'+k[0]+'='+Math.round(actualX)+(k[1]?('，'+k[1]+'='+Math.round(actualY)):'')+(dragging.axis?'，Alt 锁 '+dragging.axis:'');updateCoordPanel()});"
-            + "function finishDrag(){if(!dragging)return;const active=dragging;dragging=null;"
-            + "if(active.el.releasePointerCapture&&active.el.hasPointerCapture&&active.el.hasPointerCapture(active.pointerId))active.el.releasePointerCapture(active.pointerId);"
-            // 松手后才完整重建一次，让吸附后的档位值和所有行的 max-width 居中重新计算。
-            + "renderPreview();renderWarnings();setDirtyPrompt();"
-            + "dragHint.textContent=dirty.size?'已停止拖动，改动尚未保存。点「保存并应用」写回 config.yml。':'当前没有未保存改动。'}"
-            + "window.addEventListener('pointerup',finishDrag);window.addEventListener('pointercancel',finishDrag);"
-            + "window.addEventListener('lostpointercapture',finishDrag);"
-            // ── 缩放手柄：在选中层的四角/边中点拖拽改变尺寸档位 ──
-            // 缩放改变的是档位字段（如牌高、avatar-scale、counter/hotbar scale），
-            // 使用 setField 自动吸附到最近合法档；缩放期间保持对侧锚点固定。
-            // pointermove 只改 CSS transform/style，不重建 DOM。
-            + "let resizing=null;"
-            + "function bindResize(){document.querySelectorAll('.resize-handle').forEach(h=>{h.onpointerdown=e=>{"
-            + "if(busy)return;e.preventDefault();e.stopPropagation();"
-            + "const layer=h.closest('.layer');if(!layer)return;const kind=layer.dataset.drag;const scaleKey=SCALE_KEYS[kind];"
-            + "if(!scaleKey)return;"
-            + "if(h.setPointerCapture)h.setPointerCapture(e.pointerId);"
-            + "const s=cssScale();const f=fieldSpec(scaleKey);"
-            + "resizing={kind:kind,scaleKey:scaleKey,dir:h.dataset.resize,sx:e.clientX,sy:e.clientY,"
-            + "baseVal:Number(readValue(scaleKey)),el:layer,pointerId:e.pointerId,"
-            + "baseW:parseFloat(layer.style.width)/s,baseH:parseFloat(layer.style.height)/s,"
-            + "baseLeft:parseFloat(layer.style.left)/s,baseTop:parseFloat(layer.style.top)/s,"
-            + "field:f,options:f&&f.options?f.options.map(Number).sort((a,b)=>a-b):null};"
-            + "layer.classList.add('drag')}})}"
-            + "window.addEventListener('pointermove',ev=>{if(!resizing||busy)return;ev.preventDefault();"
-            + "const s=cssScale(),dy=(ev.clientY-resizing.sy)/s,dx=(ev.clientX-resizing.sx)/s;"
-            + "const dir=resizing.dir,el=resizing.el;"
-            // 缩放方向：含 s/se/sw/e/w/n/ne/nw，垂直分量改尺寸档位
-            + "let delta=0;if(dir.includes('s'))delta=dy;else if(dir.includes('n'))delta=-dy;else if(dir.includes('e'))delta=dx;else if(dir.includes('w'))delta=-dx;"
-            + "let next=Math.round(resizing.baseVal+delta);"
-            + "setField(resizing.scaleKey,next);"
-            + "const actual=Number(readValue(resizing.scaleKey));"
-            // 用 CSS transform 模拟尺寸变化，让用户看到拖拽响应；松手后完整重建
-            + "const ratio=resizing.baseVal>0?actual/resizing.baseVal:1;"
-            + "const newW=resizing.baseW*ratio,newH=resizing.baseH*ratio;"
-            // 对侧锚点：根据拖拽方向计算 translate 偏移，保持对侧不动
-            + "let tx=0,ty=0;"
-            + "if(dir.includes('n'))ty=(resizing.baseH-newH);if(dir.includes('w'))tx=(resizing.baseW-newW);"
-            + "el.style.width=cssPx(newW)+'px';el.style.height=cssPx(newH)+'px';"
-            + "el.style.transform='translate('+cssPx(tx)+'px,'+cssPx(ty)+'px)';"
-            + "updateCoordPanel();"
-            + "dragHint.textContent='缩放中：'+resizing.scaleKey+'='+actual});"
-            + "function finishResize(){if(!resizing)return;const active=resizing;resizing=null;"
-            + "if(active.el.releasePointerCapture&&active.el.hasPointerCapture&&active.el.hasPointerCapture(active.pointerId))active.el.releasePointerCapture(active.pointerId);"
-            + "active.el.style.transform='';renderPreview();renderWarnings();setDirtyPrompt()}"
-            + "window.addEventListener('pointerup',finishResize);window.addEventListener('pointercancel',finishResize);"
-            + "document.getElementById('guiScale').onchange=()=>renderPreview();"
-            + "document.getElementById('pageScale').onchange=()=>renderPreview();"
-            + "document.getElementById('viewportWidth').onchange=()=>{renderPreview();renderWarnings()};"
-            + "document.getElementById('viewportHeight').onchange=()=>{renderPreview();renderWarnings()};"
-            // 警告合并：服务端快照警告 + 头像/牌行重叠 + 布局越界（renderPreview 期间收集）
-            + "function renderWarnings(){warns.innerHTML='';let list=[...(state.warnings||[])];"
+            + "/* 旧版每层绑定与全局手势已移除；稳定 DOM 委托负责拖拽、缩放、平移、滚轮和右键。 */"
+            + "function renderWarnings(){warns.replaceChildren();let list=[...(state.warnings||[])];"
             + "let current=warningFor(collectAll());if(current&&!list.some(x=>x.includes('头像行会与牌行重叠')))list.push(current);"
             + "layoutWarnings.forEach(w=>{if(!list.includes(w))list.push(w)});"
             + "list.forEach(w=>{let li=document.createElement('li');li.className='warn';li.textContent=w;warns.appendChild(li)});"
             + "if(!warns.children.length){let li=document.createElement('li');li.className='ok';li.textContent='当前快照无重叠警告。';warns.appendChild(li)}}"
-            + "renderForm();"
+            + """
+            // 后续运行期只更新稳定节点的几何与内容，禁止在手势期间拆除 layer/img 节点。
+            let staticDomReady=false, staticEventsReady=false, pendingStaticRender=false;
+            function staticLayer(kind){return screen.querySelector('.layer[data-drag="'+kind+'"]')}
+            function staticContent(el){return el.querySelector('.layer-content')}
+            function createStaticScene(){
+                if(staticDomReady)return;
+                screen.replaceChildren();
+                const boss=document.createElement('div');boss.className='mc-bossbar';boss.innerHTML='<span>MUZ · 斗地主调试 HUD</span><div class="boss-track"><div class="boss-fill"></div></div>';
+                const action=document.createElement('div');action.className='mc-actionbar';action.textContent='拖动 HUD 层调整位置 · 右键查看边界 · Shift+方向键微调';
+                const cross=document.createElement('div');cross.className='mc-crosshair';const world=document.createElement('div');world.className='mc-world-label';
+                const legend=document.createElement('div');legend.className='mc-screen-legend';const bossRef=document.createElement('div');bossRef.className='ref boss';
+                const grid=document.createElement('div');grid.className='ref grid';const mid=document.createElement('div');mid.className='ref mid';const bottom=document.createElement('div');bottom.className='ref bottom';
+                screen.append(boss,action,cross,world,legend,bossRef,grid,mid,bottom);
+                ['avatar','card','counter','hotbar'].forEach(kind=>{const layer=document.createElement('div');layer.className='layer';layer.dataset.drag=kind;layer.id='layer-'+kind;const tag=document.createElement('span');tag.className='tag';const content=document.createElement('div');content.className='layer-content';layer.append(tag,content);['nw','ne','sw','se','n','s','w','e'].forEach(dir=>{const h=document.createElement('div');h.className='resize-handle '+dir;h.dataset.resize=dir;layer.append(h)});screen.append(layer)});
+                staticDomReady=true;
+            }
+            function setStaticBox(el,b){el.hidden=!b;el.style.transform='';if(!b)return;el.style.left=cssPx(b.x)+'px';el.style.top=cssPx(b.y)+'px';el.style.width=cssPx(b.w)+'px';el.style.height=cssPx(b.h)+'px';el.dataset.mcLeft=Math.round(b.x);el.dataset.mcTop=Math.round(b.y);el.dataset.mcWidth=Math.round(b.w);el.dataset.mcHeight=Math.round(b.h)}
+            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-(r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])),w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor((v.width-r.hbAdv)/2)+x,y:v.height-r.hbH+h,w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
+            function staticCards(layer,r){const c=staticContent(layer);for(let i=0;i<r.n;i++){let el=c.querySelector('.cardbox[data-card-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cardbox';el.dataset.cardIndex=i;c.append(el)}const label=String(r.cards[i].label||r.cards[i].rank||'');el.hidden=false;el.dataset.cardRank=label;el.textContent=label;el.style.left=cssPx(i*r.step)+'px';el.style.top='0';el.style.width=cssPx(r.cardW)+'px';el.style.height=cssPx(r.cardHeight)+'px';el.style.lineHeight=cssPx(r.cardHeight)+'px'}c.querySelectorAll('.cardbox').forEach(el=>{el.hidden=Number(el.dataset.cardIndex)>=r.n})}
+            function staticAvatars(layer,r,vals){const c=staticContent(layer),outline=vals['trick-hud.avatar-outline.enabled']?String(vals['trick-hud.avatar-outline.color']):'transparent';for(let i=0;i<3;i++){let slot=c.querySelector('.avslot[data-index="'+i+'"]');if(!slot){slot=document.createElement('div');slot.className='avslot';slot.dataset.index=i;slot.append(document.createElement('div'));c.append(slot)}const data=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true},face=slot.firstElementChild,sw=Number(data.slotWidth||r.avatarSlot),fw=Number(data.contentAdvance||sw),fh=Number(data.rowHeight||r.avatarHeight);slot.style.left=cssPx(i*(r.avatarSlot+r.avGap))+'px';slot.style.top='0';slot.style.width=cssPx(r.avatarSlot)+'px';slot.style.height=cssPx(r.avatarHeight)+'px';face.className='avbox'+(data.crowned?' crowned':'')+(data.empty?' empty':'');face.style.left=cssPx((sw-fw)/2)+'px';face.style.top=cssPx(r.avatarHeight-fh)+'px';face.style.width=cssPx(fw)+'px';face.style.height=cssPx(fh)+'px';face.style.outlineColor=outline}}
+            function staticCounter(layer,r,vals){const c=staticContent(layer);r.counterCells.forEach((cell,i)=>{let el=c.querySelector('.cnt[data-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cnt';el.dataset.index=i;el.append(document.createElement('div'),document.createElement('div'),document.createElement('div'));el.children[0].className='cnt-label';el.children[1].className='cnt-frame';el.children[2].className='cnt-digit';c.append(el)}const hidden=!!cell.exhausted&&!!vals['trick-hud.counter.hide-exhausted'],x=i*(r.counterAdvance+r.counterGap),digitWidth=r.counterCellWidth-2*r.counterDigitInset;el.hidden=false;el.className='cnt'+(cell.exhausted?' exhausted':'');el.style.left=cssPx(x)+'px';el.style.top='0';el.style.width=cssPx(r.counterCellWidth)+'px';el.style.height=cssPx(r.counterCellHeight)+'px';el.children[0].textContent=String(cell.label);el.children[0].style.display=hidden?'none':'';el.children[1].style.display=hidden?'none':'';el.children[2].textContent=String(cell.playedCount);el.children[2].style.display=hidden?'none':'';el.children[0].style.height=cssPx(r.counterLabelHeight)+'px';el.children[0].style.lineHeight=cssPx(r.counterLabelHeight)+'px';el.children[1].style.left='0';el.children[1].style.top=cssPx(r.counterFrameTopDelta)+'px';el.children[1].style.width=cssPx(r.counterCellWidth)+'px';el.children[1].style.height=cssPx(r.counterFrameHeight)+'px';el.children[2].style.left=cssPx(r.counterDigitInset)+'px';el.children[2].style.top=cssPx(r.counterFrameTopDelta+r.counterDigitInset)+'px';el.children[2].style.width=cssPx(digitWidth)+'px';el.children[2].style.height=cssPx(r.counterDigitHeight)+'px';el.children[2].style.lineHeight=cssPx(r.counterDigitHeight)+'px'});c.querySelectorAll('.cnt').forEach(el=>{el.hidden=Number(el.dataset.index)>=r.counterCells.length})}
+            function staticHotbar(layer,r){const c=staticContent(layer);let img=c.querySelector('.hb-img');if(!img){img=document.createElement('img');img.className='hb-img';c.append(img)}let err=c.querySelector('.hb-img-error');if(!err){err=document.createElement('div');err.className='hb-img-error';err.textContent='底图缺失：请构建后重启';c.append(err)}let selected=c.querySelector('.hb-select');if(!selected){selected=document.createElement('img');selected.className='hb-select';c.append(selected)}let selectErr=c.querySelector('.hb-select-error');if(!selectErr){selectErr=document.createElement('span');selectErr.className='hb-select-error';selectErr.textContent='选中框缺失';c.append(selectErr)}const setImage=(node,error,url,alt)=>{if(node.dataset.src===url)return;node.dataset.src=url;node.alt=alt;node.onerror=()=>{node.style.display='none';error.style.display='flex'};node.onload=()=>{node.style.display='block';error.style.display='none'};node.src=url};setImage(img,err,'/api/resource/'+esc(r.hbTexture),'hotbar 构建期真实 PNG');setImage(selected,selectErr,'/api/resource/'+esc(r.hbSelectTexture),'hotbar 选中框');selected.style.left=cssPx(r.hbSelStartX+hotbarSelectedSlot*r.hbSlotStep)+'px';selected.style.top=cssPx(r.hbSelStartY)+'px';selected.style.width=cssPx(r.hbSelW)+'px';selected.style.height=cssPx(r.hbSelH)+'px';let note=c.querySelector('.hb-slot-indicator');if(!note){note=document.createElement('span');note.className='hb-slot-indicator';c.append(note)}note.textContent='持槽 '+hotbarSelectedSlot;for(let i=0;i<r.hbSlotCount;i++){let slot=c.querySelector('.hb[data-slot="'+i+'"]');if(!slot){slot=document.createElement('div');slot.className='hb';slot.dataset.slot=i;c.append(slot)}slot.hidden=false;slot.style.left=cssPx(r.hbSlotsStartX+i*r.hbSlotStep)+'px';slot.style.top=cssPx(r.hbSlotsStartY)+'px';slot.style.width=cssPx(r.hbSlotW)+'px';slot.style.height=cssPx(r.hbSlotH)+'px'}c.querySelectorAll('.hb').forEach(slot=>slot.hidden=Number(slot.dataset.slot)>=r.hbSlotCount)}
+            function hideCoordinate(){const box=document.getElementById('mcCoordinate');if(box)box.classList.remove('show')}
+            function showCoordinate(ev,layer){const box=document.getElementById('mcCoordinate');if(!box)return;const el=layer||staticLayer(activeLayer),kind=el&&el.dataset.drag||activeLayer,b=el&&!el.hidden?{x:Number(el.dataset.mcLeft||0),y:Number(el.dataset.mcTop||0),w:Number(el.dataset.mcWidth||0),h:Number(el.dataset.mcHeight||0)}:null,rect=screen.getBoundingClientRect(),s=cssScale(),z=screenZoom(),px=Math.round((ev.clientX-rect.left)/(z*s)),py=Math.round((ev.clientY-rect.top)/(z*s)),keys=DRAG_KEYS[kind],vals=collectAll(),name=el&&el.dataset.drag||'画布';box.innerHTML='<b>'+esc(name)+'</b><br>左 '+(b?b.x:'-')+' · 右 '+(b?b.x+b.w:'-')+'<br>上 '+(b?b.y:'-')+' · 下 '+(b?b.y+b.h:'-')+'<br>宽 '+(b?b.w:'-')+' · 高 '+(b?b.h:'-')+'<br>配置 offset：'+(keys?Math.round(Number(vals[keys[0]]||0)):'-')+'，'+(keys?Math.round(Number(vals[keys[1]]||0)):'-')+'<br>指针 '+px+', '+py;box.style.left=Math.min(window.innerWidth-box.offsetWidth-8,Math.max(8,ev.clientX+12))+'px';box.style.top=Math.min(window.innerHeight-box.offsetHeight-8,Math.max(8,ev.clientY+12))+'px';box.classList.add('show')}
+            function bindStaticEvents(){if(staticEventsReady)return;staticEventsReady=true;screen.addEventListener('pointerdown',e=>{const handle=e.target.closest('.resize-handle'),layer=e.target.closest('.layer[data-drag]');if(handle){startStaticResize(e,handle);return}if(layer){startStaticDrag(e,layer);return}if(!busy&&e.button===0&&e.shiftKey){e.preventDefault();panning={sx:e.clientX,sy:e.clientY,x:viewPanX,y:viewPanY,pointerId:e.pointerId,__static:true};try{screen.setPointerCapture(e.pointerId)}catch(_){}dragHint.textContent='平移视图中：Shift+拖动'}});screen.addEventListener('pointermove',moveStaticPointer);screen.addEventListener('pointerup',finishStaticPointer);screen.addEventListener('pointercancel',finishStaticPointer);screen.addEventListener('lostpointercapture',finishStaticPointer);window.addEventListener('pointerup',finishStaticPointer);window.addEventListener('pointercancel',finishStaticPointer);window.addEventListener('blur',finishStaticPointer);screen.addEventListener('contextmenu',e=>{e.preventDefault();showCoordinate(e,e.target.closest('.layer[data-drag]'))});screen.addEventListener('wheel',e=>{if(!e.target.closest('.layer[data-drag="hotbar"]'))return;e.preventDefault();hotbarSelectedSlot=Math.max(0,Math.min(8,hotbarSelectedSlot+(e.deltaY>0?1:-1)));scheduleRender()},{passive:false})}
+            function startStaticDrag(e,el){if(busy||dragging||resizing||panning||e.button!==0||e.pointerType==='mouse'&&!(e.buttons&1)||e.target.closest('.resize-handle')||['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)||e.target.isContentEditable)return;const kind=el.dataset.drag,keys=DRAG_KEYS[kind],b=staticBoxes(collectAll()).boxes[kind];if(!keys||!b)return;e.preventDefault();selectLayer(kind);dragging={kind,keys,sx:e.clientX,sy:e.clientY,bx:Number(readValue(keys[0])||0),by:keys[1]?Number(readValue(keys[1])||0):0,baseLeft:b.x,baseTop:b.y,width:b.w,height:b.h,pointerId:e.pointerId,axis:null,hasMoved:false,el,__static:true};el.classList.add('drag');try{el.setPointerCapture(e.pointerId)}catch(_){} }
+            function moveStaticPointer(e){const active=dragging||resizing||panning;if(!active||busy||e.pointerId!==active.pointerId)return;e.preventDefault();if(dragging){if(e.pointerType==='mouse'&&!(e.buttons&1)){finishStaticPointer();return}const d=dragging,s=cssScale()*screenZoom(),v=viewport();let dx=(e.clientX-d.sx)/s,dy=(e.clientY-d.sy)/s;if(Math.abs(dx)<.5&&Math.abs(dy)<.5&&!d.hasMoved)return;d.hasMoved=true;if(!d.keys[1])dy=0;if(dragCfg.altAxisLock&&e.altKey&&d.axis===null&&(Math.abs(dx)>=2||Math.abs(dy)>=2))d.axis=Math.abs(dx)>=Math.abs(dy)?'x':'y';if(d.axis==='x')dy=0;if(d.axis==='y')dx=0;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy);if(dragCfg.snapEnabled){const tx=(v.width-d.width)/2-d.baseLeft,ty=(v.height-d.height)/2-d.baseTop;if(d.axis!=='y'&&Math.abs(dx-tx)<=dragCfg.snapThreshold)dx=tx;if(d.keys[1]&&d.axis!=='x'&&Math.abs(dy-ty)<=dragCfg.snapThreshold)dy=ty;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy)}setField(d.keys[0],d.bx+dx);if(d.keys[1])setField(d.keys[1],d.by+dy);d.el.style.transform='translate('+cssPx(Number(readValue(d.keys[0]))-d.bx)+'px,'+cssPx((d.keys[1]?Number(readValue(d.keys[1])):d.by)-d.by)+'px)';dragHint.textContent='拖动中：'+d.keys[0]+'='+Math.round(Number(readValue(d.keys[0])))+(d.keys[1]?('，'+d.keys[1]+'='+Math.round(Number(readValue(d.keys[1])))):'');updateCoordPanel()}else if(resizing){moveStaticResize(e)}else{viewPanX=panning.x+(e.clientX-panning.sx)/(cssScale()*screenZoom());viewPanY=panning.y+(e.clientY-panning.sy)/(cssScale()*screenZoom());applyScreenTransform()}}
+            function finishStaticPointer(){if(dragging){const d=dragging,el=d.el;dragging=null;try{if(el.hasPointerCapture(d.pointerId))el.releasePointerCapture(d.pointerId)}catch(_){}el.classList.remove('drag');flushStaticRender()}if(resizing){const d=resizing;resizing=null;try{if(d.el.hasPointerCapture(d.pointerId))d.el.releasePointerCapture(d.pointerId)}catch(_){}d.el.classList.remove('drag');flushStaticRender()}if(panning){const p=panning;panning=null;try{if(screen.hasPointerCapture(p.pointerId))screen.releasePointerCapture(p.pointerId)}catch(_){}applyScreenTransform();if(pendingStaticRender)flushStaticRender()}}
+            function renderPreview(){layoutWarnings=[];createStaticScene();bindStaticEvents();const vals=collectAll(),g=geo(),v=viewport(),r=staticBoxes(vals).geometry,boxes=staticBoxes(vals).boxes;screen.style.width=cssPx(v.width)+'px';screen.style.height=cssPx(v.height)+'px';applyScreenTransform();screen.querySelector('.mc-world-label').textContent='世界：HUD_DEBUG · 视口 '+v.width+'×'+v.height;const ref=screen.querySelector('.ref.boss');ref.style.left=cssPx(Math.floor((v.width-182)/2))+'px';ref.style.top=cssPx(Math.max(0,Number(g.bossBarBaselineY)-5))+'px';ref.style.width=cssPx(182)+'px';ref.style.height=cssPx(5)+'px';screen.querySelector('.ref.grid').style.display=dragCfg.centerGuidesEnabled?'block':'none';screen.querySelector('.ref.mid').style.left=cssPx(v.width/2)+'px';screen.querySelector('.ref.bottom').style.top=cssPx(v.height-1)+'px';['avatar','card','counter','hotbar'].forEach(kind=>{const el=staticLayer(kind),b=boxes[kind];setStaticBox(el,b);el.classList.toggle('selected',activeLayer===kind);el.querySelector('.tag').textContent=kind==='hotbar'?'Hotbar offset-x / offset-y（纵向需重载资源包）':kind==='card'?'牌行 card-offset-x / offset-down':kind==='avatar'?'头像行 avatar-offset-x/down':'记牌行 counter.offset-x / offset-down'});Object.entries(boxes).forEach(([kind,b])=>{if(!b)return;const names={avatar:'头像行',card:'牌行',counter:'记牌行',hotbar:'Hotbar'},name=names[kind];if(b.x<0)layoutWarnings.push(name+' 越出屏幕左边界（x='+Math.round(b.x)+'）');if(b.y<0)layoutWarnings.push(name+' 越出屏幕上边界（y='+Math.round(b.y)+'）');if(b.x+b.w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(b.x+b.w)+' > '+v.width+'）');if(b.y+b.h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(b.y+b.h)+' > '+v.height+'）')});staticCards(staticLayer('card'),r);staticAvatars(staticLayer('avatar'),r,vals);staticCounter(staticLayer('counter'),r,vals);staticHotbar(staticLayer('hotbar'),r);updateCoordPanel()}
+            function scheduleRender(){if(renderQueued)return;renderQueued=true;renderFrame=requestAnimationFrame(()=>{renderFrame=0;renderQueued=false;if(dragging||resizing||panning){pendingStaticRender=true;return}renderPreview();renderWarnings()})}
+            function flushStaticRender(){if(renderFrame){cancelAnimationFrame(renderFrame);renderFrame=0}renderQueued=false;pendingStaticRender=false;renderPreview();renderWarnings();setDirtyPrompt()}
+            function applyScreenTransform(){const z=screenZoom();screen.style.setProperty('--screen-zoom',z);screen.style.setProperty('--view-pan-x',cssPx(viewPanX)+'px');screen.style.setProperty('--view-pan-y',cssPx(viewPanY)+'px');screen.style.left='50%';screen.style.top='50%'}
+            function clampDelta(base,size,extent,delta){const min=-base,max=extent-size-base;return min<=max?Math.max(min,Math.min(max,delta)):(extent-size)/2-base}
+            function moveStaticResize(e){const d=resizing;if(!d||busy||e.pointerId!==d.pointerId)return;e.preventDefault();const dy=(e.clientY-d.sy)/(cssScale()*screenZoom()),dx=(e.clientX-d.sx)/(cssScale()*screenZoom()),dir=d.dir;let next=d.baseVal+(dir.includes('s')?dy:dir.includes('n')?-dy:dir.includes('e')?dx:-dx);setField(d.scaleKey,next);let vals=collectAll(),b=staticBoxes(vals).boxes[d.kind];if(!b)return;const vp=viewport(),targetX=dir.includes('w')?d.baseBox.x+d.baseBox.w-b.w:dir.includes('e')?d.baseBox.x:d.baseBox.x+(d.baseBox.w-b.w)/2,targetY=dir.includes('n')?d.baseBox.y+d.baseBox.h-b.h:dir.includes('s')?d.baseBox.y:d.baseBox.y+(d.baseBox.h-b.h)/2,keys=DRAG_KEYS[d.kind];if(keys[0])setField(keys[0],Number(vals[keys[0]]||0)+Math.max(0,Math.min(vp.width-b.w,targetX))-b.x);if(keys[1])setField(keys[1],Number(vals[keys[1]]||0)+Math.max(0,Math.min(vp.height-b.h,targetY))-b.y);b=staticBoxes(collectAll()).boxes[d.kind];if(!b)return;d.el.style.left=cssPx(b.x)+'px';d.el.style.top=cssPx(b.y)+'px';d.el.style.width=cssPx(b.w)+'px';d.el.style.height=cssPx(b.h)+'px';dragHint.textContent='缩放中：'+d.scaleKey+'='+Math.round(next)+'（服务端档位真实几何）'}
+            function startStaticResize(e,h){if(busy||dragging||resizing||panning||e.button!==0)return;const el=h.closest('.layer[data-drag]'),kind=el&&el.dataset.drag,key=SCALE_KEYS[kind],b=staticBoxes(collectAll()).boxes[kind];if(!el||kind!==activeLayer||!el.classList.contains('selected')||!key||!b)return;e.preventDefault();e.stopPropagation();resizing={kind,scaleKey:key,dir:h.dataset.resize,sx:e.clientX,sy:e.clientY,baseVal:Number(readValue(key)),baseBox:b,el,pointerId:e.pointerId,__static:true};el.classList.add('drag');try{el.setPointerCapture(e.pointerId)}catch(_){} }
+            function nudgeActive(dx,dy){if(busy||dragging||resizing||panning||document.activeElement&&['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName))return;const keys=DRAG_KEYS[activeLayer],vals=collectAll(),b=staticBoxes(vals).boxes[activeLayer],v=viewport();if(!keys||!b)return;setField(keys[0],Number(vals[keys[0]]||0)+clampDelta(b.x,b.w,v.width,dx));if(keys[1])setField(keys[1],Number(vals[keys[1]]||0)+clampDelta(b.y,b.h,v.height,dy));scheduleRender()}
+            window.addEventListener('keydown',e=>{if(e.key==='Escape'){hideCoordinate();finishStaticPointer();return}if(e.shiftKey&&/^Arrow/.test(e.key)&&!e.target.closest('input,select,textarea,button,[contenteditable=true]')){const d={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];if(d){e.preventDefault();nudgeActive(d[0],d[1])}}});
+            """
+            + "function showFatal(e){const text='Debug Web 前端错误：'+(e&&e.message?e.message:String(e));msg.className='msg error';msg.textContent=text;dragHint.textContent=text;screen.textContent=text;screen.style.color='#ff8a8a';screen.style.padding='16px';screen.style.whiteSpace='pre-wrap'}window.addEventListener('error',e=>showFatal(e.error||e.message));window.addEventListener('unhandledrejection',e=>showFatal(e.reason));try{renderForm();selectLayer(activeLayer);renderWarnings()}catch(e){showFatal(e)}"
             + "</script></body></html>";
     }
 

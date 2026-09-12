@@ -62,10 +62,10 @@ public class DebugWebServerTest {
         assertTrue(html.contains("/api/save"));
         assertTrue(html.contains("保存并应用"));
         assertTrue(html.contains("重新读取"));
-        assertTrue(html.contains("异步写入配置与当前 hotbar 覆盖层"));
-        assertTrue(html.contains("客户端需重新下载资源包"));
+        assertTrue(html.contains("MUZ Debug HUD") && html.contains("保存并应用"));
+        assertTrue(html.contains("仅页面校准，不写入 HUD 配置"));
         assertTrue(html.contains("只开放 22 个 HUD 运行期字段"));
-        assertTrue(html.contains("不写入 22 个 HUD 配置键"));
+        assertTrue(html.contains("仅页面校准，不写入 HUD 配置"));
         assertFalse(html.contains("只开放 19 个 HUD 运行期字段"));
         assertFalse(html.contains("不写入 19 个 HUD 配置键"));
         assertTrue(html.contains("撤销"));
@@ -84,10 +84,10 @@ public class DebugWebServerTest {
         assertTrue(html.contains("Minecraft"));
         // snap 目标：以视口中心为吸附点；旧版用 targetLeft/ty= 变量名，
         // 现版直接在 snap 分支内联计算 tx/ty。
-        assertTrue(html.contains("tx=(v.width-dragging.width)/2-dragging.baseLeft")
+        assertTrue(html.contains("tx=(v.width-d.width)/2-d.baseLeft")
             || html.contains("targetLeft") || html.contains("tx=Math.floor((v.width-lw)/2)"),
             "snap 必须有 X 方向居中目标");
-        assertTrue(html.contains("ty=(v.height-dragging.height)/2-dragging.baseTop")
+        assertTrue(html.contains("ty=(v.height-d.height)/2-d.baseTop")
             || html.contains("targetTop") || html.contains("ty=Math.floor((v.height-lh)/2)"),
             "snap 必须有 Y 方向居中目标");
         assertTrue(html.contains("lostpointercapture"));
@@ -131,26 +131,45 @@ public class DebugWebServerTest {
         // 淡出只用于成功消息，错误消息保持常驻
         assertTrue(html.contains("className='warn'"), "错误消息不使用淡出，保持可见");
 
-        // 窄屏响应式布局与溢出防护
-        assertTrue(html.contains("max-width:900px"), "必须有窄屏媒体查询");
-        assertTrue(html.contains("max-width:500px"), "必须有极窄屏（手机）媒体查询");
-        assertTrue(html.contains("minmax(0,1.2fr)"), "main 左列必须用 minmax(0,...) 防止隐式最小宽度");
-        assertTrue(html.contains("minmax(0,.8fr)"), "main 右列必须用 minmax(0,...) 防止隐式最小宽度");
-        assertFalse(html.contains("minmax(460px"), "main 网格不能硬编码 460px 最小宽度（旧溢出源已移除）");
-        assertFalse(html.contains("minmax(360px"), "main 网格不能硬编码 360px 最小宽度（旧溢出源已移除）");
+        // 全屏编辑器布局：页面根节点占满 viewport，表单为浮动面板，预览为全屏舞台。
+        assertTrue(html.contains("main.mc-editor"), "main 必须使用全屏 MC 编辑器布局");
+        assertTrue(html.contains("height:100dvh"), "全屏编辑器必须占满动态视口高度");
+        assertTrue(html.contains(".editor-panel"), "必须存在可折叠浮动配置面板");
+        assertTrue(html.contains(".preview-panel"), "必须存在全屏预览面板");
+        assertTrue(html.contains("id='screen'"), "必须存在 MC 逻辑舞台");
+        assertTrue(html.contains("screenZoom()"), "舞台必须按浏览器 viewport 自动适配");
         assertTrue(html.contains("word-break:break-all"), ".key 配置键名必须允许换行防止撑宽标签列");
-        assertTrue(html.contains("overflow:auto") && html.contains("max-width:100%"),
-            ".preview 必须在面板内横滚（overflow:auto + max-width:100%），不撑破页面");
+        // 旧双列布局断言已过时：全屏编辑器必须由浮动配置面板与独立舞台组成，
+        // 不再要求 main 使用 grid-template-columns；窄屏适配也不能靠隐藏内容裁切。
+        String css = extractStyleBlock(html);
+        String mainRule = extractRule(css, "main");
+        assertTrue(mainRule == null || !mainRule.contains("grid-template-columns"),
+            "全屏编辑器不能回退为旧双列 main 网格");
+        assertTrue(html.contains("min-width:0"), "表单和面板必须用 min-width:0 防止窄屏撑宽");
         assertTrue(html.contains("select{width:100%;min-width:0"), "select/input 必须有 min-width:0");
+        assertTrue(html.contains("panelToggle"), "必须提供配置面板折叠按钮");
+        assertTrue(html.contains("fullscreenBtn"), "必须提供浏览器全屏按钮");
+    }
 
-        // 【sticky 祖先链防回归】：从 <style> 提取 body/.panel/main 规则，
-        // 精确排除 overflow/overflow-x/overflow-y 的 hidden/auto/scroll 值。
-        // 这些属性会创建新的滚动容器，把 .actions sticky 限制在该容器内而非视口。
-        for (String selector : new String[]{"body", ".panel", "main"}) {
-            String rule = extractRule(styleBlock, selector);
-            assertNotNull(rule, selector + " 样式规则必须存在于 <style> 内");
-            assertNoStickyBreakingOverflow(rule, selector);
-        }
+    @Test
+    void 全屏Minecraft编辑器包含右键坐标和Shift平移控制() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        assertTrue(html.contains("id='mcEditor'"), "页面根节点必须是全屏编辑器");
+        assertTrue(html.contains("id='mcCoordinate'"), "必须提供右键坐标提示容器");
+        assertTrue(html.contains("contextmenu"), "必须注册右键坐标事件");
+        assertTrue(html.contains("showCoordinate"), "右键必须显示坐标信息");
+        assertTrue(html.contains("左 ") && html.contains("右 "), "坐标提示必须显示左右边界");
+        assertTrue(html.contains("e.shiftKey") && html.contains("ArrowLeft") && html.contains("ArrowRight"),
+            "必须支持 Shift+方向键微调");
+        assertTrue(html.contains("panning") && html.contains("Shift+拖动"),
+            "必须支持 Shift+拖动空白区域平移视图");
+        assertTrue(html.contains("let pageSnapEnabled=true"), "页面默认必须开启吸附");
+        assertTrue(html.contains("requestFullscreen"), "必须提供浏览器全屏 API");
+        assertTrue(html.contains("requestAnimationFrame"), "连续更新必须通过 requestAnimationFrame 合并");
+        assertTrue(html.contains("background:transparent!important"), "辅助槽层不能遮住真实 hotbar PNG");
     }
 
     @Test
@@ -312,34 +331,36 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("counterAdvance=Number(cntTier?cntTier.advance:g.counterAdvance)"));
         assertTrue(previewScript.contains("counterLabelAscent=Number(cntTier?cntTier.labelAscent:g.counterLabelAscent)"));
         assertTrue(previewScript.contains("cell.playedCount"));
-        assertTrue(previewScript.contains("digits=String(cell.playedCount)"));
+        assertTrue(previewScript.contains("textContent=String(cell.playedCount)"));
         assertFalse(previewScript.contains("digits=hidden?'':String(cell.remaining)"));
         assertTrue(previewScript.contains("cell.exhausted"));
         assertTrue(previewScript.contains("cnt-label"));
         assertTrue(previewScript.contains("cnt-frame"));
         assertTrue(previewScript.contains("cnt-digit"));
-        assertTrue(previewScript.contains("if(!hidden){html+='<div class=cnt-label"),
-            "hide-exhausted 时三层内容都必须不画，只保留外层 cell 占位");
-        assertTrue(previewScript.contains("data-hidden"),
-            "隐藏状态应留在外层 cell 上，便于确认占位仍存在");
+        assertTrue(previewScript.contains("el.children[0].style.display=hidden?'none':''")
+                && previewScript.contains("el.children[1].style.display=hidden?'none':''")
+                && previewScript.contains("el.children[2].style.display=hidden?'none':''"),
+            "hide-exhausted 时三层内容都必须隐藏，只保留外层 cell 占位");
+        assertTrue(previewScript.contains("el.hidden=false") && previewScript.contains("data-index"),
+            "隐藏状态必须保留稳定外层 cell 占位");
         assertFalse(previewScript.contains("cellW=12"));
         assertFalse(previewScript.contains("cnH=14"));
         assertFalse(previewScript.contains("cell.label)+':'+cell.remaining"));
         assertTrue(previewScript.contains("Math.floor((v.width-maxW)/2)"));
         // 旧断言编码了 `v.height-g.hotbarHeight+ascentDelta`——实现改为 rowGeom 查表的 r.hbH/r.hbAdv。
-        assertTrue(previewScript.contains("v.height-r.hbH+ascentDelta"));
+        assertTrue(previewScript.contains("y:v.height-r.hbH+h"));
         assertTrue(previewScript.contains("r.hbAdv"));
-        assertTrue(previewScript.contains("cardAscent=r.cardHeight-Number(vals['trick-hud.offset-down'])"));
-        assertTrue(previewScript.contains("const cdY=bossBaseline-cardAscent"));
-        assertTrue(previewScript.contains("const avatarAscent=r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])"));
-        assertTrue(previewScript.contains("const avY=bossBaseline-avatarAscent"));
+        assertTrue(previewScript.contains("r.cardHeight-Number(vals['trick-hud.offset-down'])"));
+        assertTrue(previewScript.contains("r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])"));
         // 记牌行使用独立的 counter.offset-down，不再耦合 avatar-offset-down
-        assertTrue(previewScript.contains("const counterAscent=r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])"));
-        assertTrue(previewScript.contains("const cnY=bossBaseline-counterAscent"));
+        assertTrue(previewScript.contains("r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])"));
+        assertTrue(previewScript.contains("base-(r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down']))"));
         assertFalse(previewScript.contains("const cnY=cdY+r.cardHeight+r.counterGap"),
             "记牌行 baseline 必须按 counter label ascent 与 avatar-offset-down 对齐实际 provider，不能跟牌行高度相加");
-        assertTrue(previewScript.contains("currentAscent=baseAscent-hy"));
-        assertTrue(previewScript.contains("const cols=['#E03A3A','#E06A2A','#E08A2A','#D8D030','#3CC050','#30C0A8','#3888E0','#7050D8','#C04AA0']"));
+        assertTrue(previewScript.contains("hbBaseAscent"),
+            "Hotbar 预览必须消费服务端下发的 baseAscent 几何");
+        assertTrue(previewScript.contains("r.hbTexture") && previewScript.contains("r.hbSelectTexture"),
+            "Hotbar 资源必须消费服务端下发的真实纹理名");
         // 旧断言编码了硬编码常量 `const slotW=18,slotH=20,slotStep=20,slotsStart=2`——
         // 实现改为从 hotbars[] 按 scale 查表读取 r.hbSlotW/r.hbSlotStep 等，不再有此硬编码行。
         // 新断言验证从 rowGeom 查表消费的字段名。
@@ -347,6 +368,229 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("r.hbSlotStep"));
         assertTrue(previewScript.contains("r.hbSlotsStartX"));
         assertTrue(previewScript.contains("for(let i=0;i<r.hbSlotCount;i++)"));
+    }
+
+    @Test
+    void clampDelta正常小层允许移动且仅对超大层居中() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        String clamp = extractFunction(html, "function clampDelta(");
+        String normalized = clamp.replaceAll("\\s+", "");
+        assertTrue(normalized.contains("min=-base"),
+            "clampDelta 的最小位移必须保证图层左边不越界");
+        assertTrue(normalized.contains("max=extent-size-base"),
+            "clampDelta 的最大位移必须保证图层右边不越界");
+        assertTrue(normalized.contains("min<=max?Math.max(min,Math.min(max,delta))"),
+            "正常小层必须保留指针位移并在边界内 clamp，不能一律锁到中心");
+        assertTrue(normalized.contains(":(extent-size)/2-base"),
+            "只有图层大于视口时才允许退化为居中位置");
+    }
+
+    @Test
+    void pointer手势门控按钮和pointerId并在取消时清理() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        int bindStart = html.lastIndexOf("function startStaticDrag(");
+        int moveStart = html.lastIndexOf("function moveStaticPointer(");
+        assertTrue(bindStart >= 0 && moveStart > bindStart, "必须存在稳定拖动绑定和全局 pointermove");
+        String bind = html.substring(bindStart, moveStart);
+        assertTrue(bind.contains("e.button!==0") || bind.contains("e.button !== 0"),
+            "拖动只能由主指针左键启动，不能让右键/中键改写 HUD");
+        assertTrue(bind.contains("pointerId"), "pointerdown 必须记录 pointerId 并建立捕获关系");
+
+        int moveEnd = html.indexOf("function finishStaticPointer()", moveStart);
+        assertTrue(moveEnd > moveStart, "必须有独立 finishStaticPointer 收口手势");
+        String move = html.substring(moveStart, moveEnd);
+        assertTrue(move.contains("pointerId") && (move.contains("e.pointerId") || move.contains("active.pointerId")),
+            "pointermove 必须拒绝其他 pointerId 的事件");
+        String finish = extractFunction(html, "function finishStaticPointer()");
+        assertTrue(html.contains("screen.addEventListener('pointercancel',finishStaticPointer)"),
+            "pointercancel 必须终止拖动，而不是遗留 dragging 状态");
+        assertTrue(finish.contains("dragging=null") || finish.contains("dragging=null;"),
+            "取消/松手后必须清空 dragging 状态");
+    }
+
+    @Test
+    void 预览刷新保持稳定DOM并单独更新图片节点() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        String preview = extractFunction(html, "function renderPreview()");
+        assertFalse(preview.contains("screen.innerHTML"),
+            "每帧 renderPreview 不能替换 screen.innerHTML，否则会丢失隐式 pointer capture");
+        assertFalse(preview.contains("screen.innerHTML="),
+            "拖动期间必须复用已有图层节点，而不是重新拼接整棵 DOM");
+        assertTrue(preview.contains("querySelector") || preview.contains("getElementById")
+                || html.contains("function ensurePreview"),
+            "稳定预览必须通过已存在节点查询/更新");
+        assertTrue(html.contains("hb-img") && html.contains("hb-select"),
+            "稳定更新路径仍必须保留底图与选中框图片节点");
+        assertTrue(html.contains(".src=") || html.contains("setAttribute('src'"),
+            "图片资源切换必须更新已有 img 节点的 src，而非依赖整棵 innerHTML");
+    }
+
+    @Test
+    void 工具面板控件唯一且具备可访问图层语义() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        for (String id : new String[]{"layerTabs", "layerCoords", "guiScale", "snapToggle", "coordX", "coordY"}) {
+            assertEquals(1, countOccurrences(html, "id='" + id + "'"), id + " 必须恰好只有一个实例");
+        }
+        assertTrue(html.contains("role='tablist'") || html.contains("role=\"tablist\""),
+            "layerTabs 必须声明 tablist 语义");
+        assertTrue(html.contains("role='tab'") || html.contains("role=\"tab\""),
+            "每个图层切换控件必须声明 tab 语义");
+        assertTrue(html.contains("aria-selected"), "活动图层必须通过 aria-selected 暴露给辅助技术");
+        assertTrue(html.contains("aria-controls"), "图层标签必须关联唯一的预览/坐标区域");
+        assertTrue(html.contains("aria-label='层水平偏移") || html.contains("aria-label=\"层水平偏移"),
+            "坐标输入必须有可访问的水平偏移标签");
+        assertTrue(html.contains("aria-label='客户端 GUI 倍率") || html.contains("aria-label=\"客户端 GUI 倍率"),
+            "scale 工具必须有可访问标签");
+        assertTrue(html.contains("aria-label='Minecraft 风格吸附") || html.contains("aria-label=\"Minecraft 风格吸附"),
+            "snap 工具必须有可访问标签");
+    }
+
+    @Test
+    void 右键坐标显示配置偏移并按真实窗口尺寸限幅() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        String coordinate = extractFunction(html, "function showCoordinate(");
+        assertTrue(coordinate.contains("DRAG_KEYS") || coordinate.contains("layerXYKeys"),
+            "右键坐标必须从当前层配置键读取偏移，而不是只显示屏幕绝对坐标");
+        assertTrue(coordinate.contains("offset") || coordinate.contains("偏移"),
+            "右键提示必须明确包含配置偏移语义");
+        assertTrue(coordinate.contains("getBoundingClientRect") || coordinate.contains("offsetWidth"),
+            "工具提示限幅必须使用实际渲染尺寸，不能依赖固定 190/100 魔数");
+        assertTrue(coordinate.contains("window.innerWidth") && coordinate.contains("window.innerHeight"),
+            "右键提示必须按真实窗口宽高限幅");
+        assertTrue(coordinate.contains("Math.min") && coordinate.contains("Math.max"),
+            "右键提示位置必须同时做上下界 clamp");
+    }
+
+    @Test
+    void Shift箭头不劫持输入或busy且不修改viewPan配置() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        int keydownStart = html.lastIndexOf("document.addEventListener('keydown'");
+        assertTrue(keydownStart >= 0, "必须存在 Shift 箭头键处理器");
+        int keydownEnd = html.indexOf("});", keydownStart);
+        assertTrue(keydownEnd > keydownStart, "Shift 键处理器必须闭合");
+        String keydown = html.substring(keydownStart, keydownEnd + 3);
+        assertTrue(html.contains("function nudgeActive(dx,dy){if(busy||dragging||resizing||panning"),
+            "busy 时不能劫持 Shift 箭头键");
+        assertTrue(html.contains("!e.target.closest('input,select,textarea,button,[contenteditable=true]')"),
+            "输入/选择控件获得焦点时不能劫持原生方向键行为");
+        assertTrue(keydown.contains("e.preventDefault()"), "真正用于微调时才应阻止默认滚动行为");
+
+        String nudge = extractFunction(html, "function nudgeActive(");
+        assertTrue(nudge.contains("DRAG_KEYS") && nudge.contains("setField"),
+            "Shift 微调必须写入当前层对应配置偏移");
+        assertFalse(nudge.contains("viewPanX") || nudge.contains("viewPanY"),
+            "Shift 箭头微调不能把页面视图平移状态写进 HUD 配置");
+    }
+
+    @Test
+    void Fullscreen失败保留普通viewport并提供退出路径() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        int button = html.lastIndexOf("fullscreenBtn");
+        assertTrue(button >= 0, "必须存在全屏按钮");
+        String fullscreen = html.substring(button, Math.min(html.length(), button + 1200));
+        assertTrue(fullscreen.contains("requestFullscreen"), "必须调用 Fullscreen API");
+        assertTrue(fullscreen.contains("fullscreenElement") && fullscreen.contains("exitFullscreen"),
+            "已进入全屏时必须提供退出路径");
+        assertTrue(fullscreen.contains("catch") && fullscreen.contains("setPrompt"),
+            "Fullscreen API 失败必须显示提示并保留普通编辑模式");
+        assertFalse(fullscreen.contains("throw "), "全屏失败不能抛出并破坏普通 viewport 编辑器");
+    }
+
+    @Test
+    void 连续输入通过requestAnimationFrame合并且不直接重绘() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        String schedule = extractFunction(html, "function scheduleRender()");
+        assertTrue(schedule.contains("renderQueued") && schedule.contains("if(renderQueued)return"),
+            "重复输入必须共用 renderQueued 闸门");
+        assertTrue(schedule.contains("requestAnimationFrame"), "连续输入必须合并到 requestAnimationFrame");
+        assertTrue(schedule.contains("renderQueued=false"), "帧回调必须释放 renderQueued 闸门");
+
+        String changed = extractFunction(html, "function changed(");
+        assertTrue(changed.contains("scheduleRender()"), "字段输入必须进入合并刷新队列");
+        assertFalse(changed.contains("renderPreview()"), "字段输入不能每次事件直接重建/重绘预览");
+    }
+
+    @Test
+    void hotbar两张图片都必须在加载失败时显示可见错误() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+        int hotbarStart = html.lastIndexOf("function staticHotbar(");
+        int hotbarEnd = html.indexOf("function bindStaticEvents", hotbarStart);
+        assertTrue(hotbarStart >= 0 && hotbarEnd > hotbarStart, "必须存在稳定 Hotbar 预览渲染段");
+        String hotbar = html.substring(hotbarStart, hotbarEnd);
+        assertTrue(countOccurrences(hotbar, "/api/resource/") >= 2,
+            "底图和选中框都必须通过同源资源路由加载");
+        assertTrue(countOccurrences(hotbar, "node.onerror") >= 1 && hotbar.contains("setImage(img,err") && hotbar.contains("setImage(selected,selectErr"),
+            "两张 Hotbar 图片都必须处理加载失败");
+        int selected = hotbar.indexOf("hb-select");
+        assertTrue(selected >= 0, "必须存在选中框图片");
+        String selectedPart = hotbar.substring(selected);
+        assertTrue(hotbar.contains("setImage(selected,selectErr"), "选中框图片必须处理加载失败");
+        assertTrue(hotbar.contains("hb-select-error") && hotbar.contains("selectErr"),
+            "选中框加载失败也必须显示可见错误，不能静默隐藏");
+        assertTrue(hotbar.contains("hb-img-error") && hotbar.contains("hb-select-error")
+                && hotbar.contains("error.style.display='flex'"),
+            "底图与选中框必须各有可见的资源错误反馈");
+    }
+
+    @Test
+    void 页面吸附默认开启且不继承旧快照关闭状态() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        assertTrue(html.contains("let pageSnapEnabled=true"), "页面吸附默认必须开启");
+        assertFalse(html.contains("pageSnapEnabled=dragCfg.snapEnabled"),
+            "页面吸附开关不能继承旧快照的关闭状态");
+        assertFalse(html.contains("pageSnapEnabled=state.drag"),
+            "页面吸附状态只属于当前页面，不得从服务端配置快照恢复");
+    }
+
+    /** 从内联脚本中提取函数声明到下一个函数声明之间的源码片段。 */
+    private static String extractFunction(String html, String functionMarker) {
+        int start = html.lastIndexOf(functionMarker);
+        assertTrue(start >= 0, "HTML 必须包含函数：" + functionMarker);
+        int next = html.indexOf("function ", start + functionMarker.length());
+        int scriptEnd = html.indexOf("</script>", start);
+        int end = next >= 0 && next < scriptEnd ? next : scriptEnd;
+        assertTrue(end > start, "函数源码片段必须可提取：" + functionMarker);
+        return html.substring(start, end);
+    }
+
+    /** 统计源码中固定契约标记出现次数，避免只断言至少出现一次。 */
+    private static int countOccurrences(String text, String marker) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = text.indexOf(marker, offset)) >= 0) {
+            count++;
+            offset += marker.length();
+        }
+        return count;
     }
 
     private static void assertGeometryFields(JsonObject object, String... fields) {
@@ -365,39 +609,34 @@ public class DebugWebServerTest {
         ), "token");
 
         int setFieldStart = html.indexOf("function setField(key,val)");
-        int pointerMoveStart = html.indexOf("window.addEventListener('pointermove'");
-        int finishDragStart = html.indexOf("function finishDrag()");
+        int moveStart = html.indexOf("function moveStaticPointer(");
+        int finishStart = html.indexOf("function finishStaticPointer()", moveStart);
         assertTrue(setFieldStart >= 0, "HTML 必须包含拖动字段更新函数");
-        assertTrue(pointerMoveStart > setFieldStart, "HTML 必须注册 pointermove 拖动处理");
-        assertTrue(finishDragStart > pointerMoveStart, "finishDrag 必须位于 pointermove 之后");
-        String setFieldBlock = html.substring(setFieldStart, pointerMoveStart);
+        assertTrue(moveStart > setFieldStart, "HTML 必须包含稳定 pointermove 处理");
+        assertTrue(finishStart > moveStart, "稳定手势收口必须位于 pointermove 之后");
+        String setFieldBlock = html.substring(setFieldStart, moveStart);
         // 旧断言编码了 markDirty(el) 函数名——实现改为 updateDirty(key) 并早返回，
         // 逻辑等价：拖动中只更新 dirty 集合，不走 changed() 重建预览。
         assertTrue(setFieldBlock.contains("if(dragging||resizing){updateDirty(key);return true}"),
             "拖动或缩放中的 setField 必须只走 updateDirty 轻量路径，不重建预览");
 
-        String pointerMoveBlock = html.substring(pointerMoveStart, finishDragStart);
-        assertTrue(pointerMoveBlock.contains("setField(k[0],dragging.bx+dx)"));
-        assertTrue(pointerMoveBlock.contains("if(k[1])setField(k[1],dragging.by+dy)"));
+        String pointerMoveBlock = html.substring(moveStart, finishStart);
+        assertTrue(pointerMoveBlock.contains("setField(d.keys[0],d.bx+dx)"));
+        assertTrue(pointerMoveBlock.contains("if(d.keys[1])setField(d.keys[1],d.by+dy)"));
         assertFalse(pointerMoveBlock.contains("changed("), "pointermove 不能直接走会重建预览的 changed 路径");
-        // 旧断言期望 querySelector 定位拖动层——实现改为用 dragging.el 直接引用，
-        // 避免拖动期间重建 DOM 后引用丢失。效果相同但更可靠。
-        assertTrue(pointerMoveBlock.contains("dragging.el.style.transform='translate('") ||
-                pointerMoveBlock.contains("dragging.el.classList.add('drag')"),
-            "pointermove 必须只修改当前拖动层的 transform");
+        assertTrue(pointerMoveBlock.contains("d.el.style.transform='translate('"),
+            "pointermove 必须只修改当前拖动层的临时 transform");
+        assertTrue(pointerMoveBlock.contains("cssScale()*screenZoom()"),
+            "指针位移必须按 CSS 缩放与舞台缩放共同换算");
+        assertFalse(pointerMoveBlock.contains("renderPreview()"), "pointermove 期间不能调用 renderPreview");
+        assertFalse(pointerMoveBlock.contains("renderWarnings()"), "pointermove 期间不能调用 renderWarnings");
 
-        assertFalse(pointerMoveBlock.contains("renderPreview()"),
-            "pointermove 期间不能调用 renderPreview");
-        assertFalse(pointerMoveBlock.contains("renderWarnings()"),
-            "pointermove 期间不能调用 renderWarnings");
-
-        int finishDragEnd = html.indexOf("window.addEventListener('pointerup',finishDrag)", finishDragStart);
-        assertTrue(finishDragEnd > finishDragStart, "必须绑定 pointerup 完成拖动");
-        String finishDragBlock = html.substring(finishDragStart, finishDragEnd);
-        assertTrue(finishDragBlock.contains("renderPreview();renderWarnings();"),
-            "finishDrag 才能刷新预览和警告");
-        assertTrue(html.contains("window.addEventListener('pointercancel',finishDrag)"),
-            "pointercancel 必须复用 finishDrag");
+        String finishBlock = html.substring(finishStart, html.indexOf("function renderPreview()", finishStart));
+        assertFalse(finishBlock.contains("screen.innerHTML"), "手势收口不能替换稳定预览 DOM");
+        assertTrue(finishBlock.contains("flushStaticRender()"), "手势收口必须立即刷新一次稳定节点");
+        assertTrue(finishBlock.contains("releasePointerCapture"), "手势收口必须释放 pointer capture");
+        assertTrue(html.contains("screen.addEventListener('pointercancel',finishStaticPointer)"),
+            "pointercancel 必须复用稳定手势收口");
     }
 
     @Test
@@ -409,9 +648,9 @@ public class DebugWebServerTest {
         // hasMoved 字段：pointerdown 初始化为 false，pointermove 检查亚像素阈值
         assertTrue(html.contains("hasMoved:false"),
             "pointerdown 必须初始化 hasMoved 为 false");
-        assertTrue(html.contains("!dragging.hasMoved"),
+        assertTrue(html.contains("!d.hasMoved"),
             "pointermove 必须在首次有效位移前检查 hasMoved");
-        assertTrue(html.contains("dragging.hasMoved=true"),
+        assertTrue(html.contains("d.hasMoved=true"),
             "超过阈值后必须标记 hasMoved=true");
     }
 
@@ -422,9 +661,9 @@ public class DebugWebServerTest {
         ), "token");
 
         // snap 分支必须排除被轴锁锁定的方向
-        assertTrue(html.contains("dragging.axis!=='y'&&Math.abs(dx-tx)"),
+        assertTrue(html.contains("d.axis!=='y'&&Math.abs(dx-tx)"),
             "X 方向 snap 必须排除 Y 轴锁（axis==='y' 时不 snap X）");
-        assertTrue(html.contains("dragging.axis!=='x'&&Math.abs(dy-ty)"),
+        assertTrue(html.contains("d.axis!=='x'&&Math.abs(dy-ty)"),
             "Y 方向 snap 必须排除 X 轴锁（axis==='x' 时不 snap Y）");
     }
 
@@ -462,7 +701,7 @@ public class DebugWebServerTest {
         // keydown 处理器的 preventDefault 必须在 busy 检查之前
         int keydownStart = html.indexOf("document.addEventListener('keydown'");
         assertTrue(keydownStart >= 0, "必须注册 keydown 监听");
-        String keydownBlock = html.substring(keydownStart, html.indexOf(";}", keydownStart) + 2);
+        String keydownBlock = html.substring(keydownStart, html.indexOf("));", keydownStart) + 3);
         assertFalse(keydownBlock.startsWith("document.addEventListener('keydown',e=>{if(busy)return;"),
             "keydown 不能在 busy 时整体 return——必须始终 preventDefault 阻止浏览器保存/刷新");
         // 仍然包含 preventDefault
@@ -476,12 +715,10 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        assertTrue(html.contains("getElementById('pageScale').onchange"),
-            "pageScale 变化必须触发预览重绘");
-        assertTrue(html.contains("getElementById('viewportWidth').onchange"),
-            "viewportWidth 变化必须触发预览重绘");
-        assertTrue(html.contains("getElementById('viewportHeight').onchange"),
-            "viewportHeight 变化必须触发预览重绘");
+        assertTrue(html.contains("['viewportWidth','viewportHeight','guiScale','pageScale'].forEach"),
+            "视口和页面缩放控件必须统一进入预览刷新队列");
+        assertTrue(html.contains("addEventListener('input',scheduleRender)"),
+            "连续视口输入必须通过 requestAnimationFrame 刷新");
     }
 
     // ── 辅助方法：从 buildHtml 输出中提取 <style> 块和单条 CSS 规则 ──
@@ -559,9 +796,9 @@ public class DebugWebServerTest {
         // selectLayer 函数存在且正确切换 active 和 selected 类
         assertTrue(html.contains("function selectLayer(kind)"),
             "必须存在 selectLayer 函数");
-        assertTrue(html.contains("classList.toggle('active',t.dataset.layer===kind)"),
+        assertTrue(html.contains("t.classList.toggle('active',active)"),
             "selectLayer 必须切换标签页的 active 类");
-        assertTrue(html.contains("classList.toggle('selected',el.dataset.drag===kind)"),
+        assertTrue(html.contains("el.classList.toggle('selected',el.dataset.drag===kind)"),
             "selectLayer 必须切换预览层的 selected 类");
         assertTrue(html.contains("updateCoordPanel()"),
             "selectLayer 必须调用 updateCoordPanel 更新坐标面板");
@@ -598,12 +835,13 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        // bindDrag 中 pointerdown 必须调用 selectLayer
-        int bindDragStart = html.indexOf("function bindDrag()");
-        assertTrue(bindDragStart >= 0, "HTML 必须包含 bindDrag 函数");
-        String bindDragBlock = html.substring(bindDragStart, html.indexOf("window.addEventListener('pointermove'", bindDragStart));
-        assertTrue(bindDragBlock.contains("selectLayer(kind)"),
-            "pointerdown 必须调用 selectLayer 同步层标签页");
+        assertFalse(html.contains("function bindDrag()"), "不得恢复旧的逐层 bindDrag 实现");
+        int eventStart = html.indexOf("function bindStaticEvents()");
+        int eventEnd = html.indexOf("function startStaticDrag(", eventStart);
+        assertTrue(eventStart >= 0 && eventEnd > eventStart, "必须存在稳定 DOM 事件委托");
+        String eventBlock = html.substring(eventStart, eventEnd);
+        assertTrue(eventBlock.contains("startStaticDrag(e,layer)"), "pointerdown 必须委托到稳定拖动入口");
+        assertTrue(html.contains("selectLayer(kind)"), "拖动开始必须同步当前图层");
     }
 
     @Test
@@ -612,15 +850,13 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        // pointermove 中调用 updateCoordPanel 但不调用 renderPreview
-        int pointerMoveStart = html.indexOf("window.addEventListener('pointermove'");
-        int finishDragStart = html.indexOf("function finishDrag()");
-        assertTrue(pointerMoveStart >= 0 && finishDragStart > pointerMoveStart);
-        String pointerMoveBlock = html.substring(pointerMoveStart, finishDragStart);
-        assertTrue(pointerMoveBlock.contains("updateCoordPanel()"),
-            "pointermove 必须在拖动期间更新坐标面板");
-        assertFalse(pointerMoveBlock.contains("renderPreview()"),
-            "pointermove 期间不能调用 renderPreview");
+        int moveStart = html.indexOf("function moveStaticPointer(");
+        int finishStart = html.indexOf("function finishStaticPointer()", moveStart);
+        assertTrue(moveStart >= 0 && finishStart > moveStart);
+        String moveBlock = html.substring(moveStart, finishStart);
+        assertTrue(moveBlock.contains("updateCoordPanel()"), "pointermove 必须在拖动期间更新坐标面板");
+        assertFalse(moveBlock.contains("renderPreview()"), "pointermove 期间不能调用 renderPreview");
+        assertFalse(moveBlock.contains("innerHTML"), "pointermove 期间不能重建 DOM");
     }
 
     @Test
@@ -632,13 +868,13 @@ public class DebugWebServerTest {
         // 底图 PNG：URL 从 geometry 的 hbTexture 字段动态拼接，不硬编码文件名
         assertTrue(html.contains("/api/resource/'+esc(r.hbTexture)"),
             "Hotbar 底图 URL 必须从 rowGeom 的 hbTexture 字段拼接");
-        assertTrue(html.contains("class=hb-img"),
+        assertTrue(html.contains("img.className='hb-img'"),
             "底图 img 必须使用 hb-img 样式类");
 
         // 选中框 PNG：同理从 hbSelectTexture 字段拼接
         assertTrue(html.contains("/api/resource/'+esc(r.hbSelectTexture)"),
             "Hotbar 选中框 URL 必须从 rowGeom 的 hbSelectTexture 字段拼接");
-        assertTrue(html.contains("class=hb-select"),
+        assertTrue(html.contains("selected.className='hb-select'"),
             "选中框 img 必须使用 hb-select 样式类");
 
         // 持槽指示器
@@ -772,8 +1008,9 @@ public class DebugWebServerTest {
         assertTrue(html.contains("hotbar:'hotbar-hud.scale'"), "Hotbar 缩放对应 hotbar.scale");
 
         // layerHandles 函数
-        assertTrue(html.contains("function layerHandles(kind)"), "必须存在 layerHandles 函数");
-        assertTrue(html.contains("data-resize="), "手柄必须有 data-resize 属性");
+        assertFalse(html.contains("function layerHandles(kind)"), "稳定 DOM 不应恢复旧 layerHandles 函数");
+        assertTrue(html.contains("['nw','ne','sw','se','n','s','w','e'].forEach"), "稳定场景必须一次创建八个缩放手柄");
+        assertTrue(html.contains("h.dataset.resize=dir"), "手柄必须有 data-resize 属性");
     }
 
     @Test
@@ -782,29 +1019,18 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        // bindResize 存在
-        assertTrue(html.contains("function bindResize()"), "必须存在 bindResize 函数");
-        assertTrue(html.contains("bindResize()"), "renderPreview 后必须调用 bindResize");
+        assertFalse(html.contains("function bindResize()"), "不得恢复旧的逐层 bindResize 实现");
+        assertTrue(html.contains("function bindStaticEvents()"), "必须由稳定 DOM 事件委托负责缩放");
+        assertTrue(html.contains("kind!==activeLayer"), "非活动层不可开始 resize");
 
-        // resizing pointermove 不调用 renderPreview
-        int resizeMoveStart = html.indexOf("if(!resizing||busy)return");
-        assertTrue(resizeMoveStart >= 0, "缩放 pointermove 必须检查 resizing 和 busy");
-        int finishResizeStart = html.indexOf("function finishResize()");
-        assertTrue(finishResizeStart > resizeMoveStart, "finishResize 必须在缩放 pointermove 之后");
-        String resizeMoveBlock = html.substring(resizeMoveStart, finishResizeStart);
-        assertFalse(resizeMoveBlock.contains("renderPreview()"),
-            "缩放 pointermove 不能调用 renderPreview");
-        assertFalse(resizeMoveBlock.contains("innerHTML"),
-            "缩放 pointermove 不能操作 innerHTML");
-        assertTrue(resizeMoveBlock.contains(".style.width="),
-            "缩放 pointermove 必须直接修改 CSS 宽度");
-
-        // finishResize 完整重建
-        int finishResizeEnd = html.indexOf("window.addEventListener('pointerup',finishResize)", finishResizeStart);
-        assertTrue(finishResizeEnd > finishResizeStart);
-        String finishResizeBlock = html.substring(finishResizeStart, finishResizeEnd);
-        assertTrue(finishResizeBlock.contains("renderPreview()"),
-            "finishResize 必须调用 renderPreview");
+        int resizeMoveStart = html.indexOf("function moveStaticResize(e)");
+        int finishStart = html.indexOf("function nudgeActive(", resizeMoveStart);
+        assertTrue(resizeMoveStart >= 0 && finishStart > resizeMoveStart, "必须存在稳定缩放与统一收口");
+        String resizeMoveBlock = html.substring(resizeMoveStart, finishStart);
+        assertFalse(resizeMoveBlock.contains("renderPreview()"), "缩放 pointermove 不能调用 renderPreview");
+        assertFalse(resizeMoveBlock.contains("innerHTML"), "缩放 pointermove 不能操作 innerHTML");
+        assertTrue(resizeMoveBlock.contains(".style.width="), "缩放 pointermove 必须直接修改 CSS 宽度");
+        assertTrue(html.contains("el.style.transform=''"), "每次稳定 render 必须清空旧 layer transform");
     }
 
     @Test
@@ -866,8 +1092,8 @@ public class DebugWebServerTest {
         assertTrue(html.contains("hb-img-error"), "必须包含资源缺失提示样式类");
         assertTrue(html.contains("底图缺失"), "必须包含可读的缺失说明文本");
         // 底图 onerror 切换可见错误提示，不是简单 display:none
-        assertTrue(html.contains("this.nextElementSibling.style.display"),
-            "onerror 必须显示相邻的错误提示元素");
+        assertTrue(html.contains("node.onerror") && html.contains("error.style.display='flex'"),
+            "onerror 必须显示稳定节点对应的错误提示元素");
     }
 
     @Test

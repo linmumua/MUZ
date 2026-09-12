@@ -2,7 +2,7 @@
 
 一个 Paper / Purpur 服务端的实体化牌桌斗地主插件。用 Display Entity 在真实世界坐标上渲染牌桌、手牌和悬浮 HUD，玩家通过点击实体与坐下交互完成对局。
 
-**当前版本**：`1.10.15`  
+**当前版本**：`1.10.16`<br>
 **作者**：linmumua  
 **平台**：Paper 1.21.11+ / Purpur 1.21.11+（不支持 Folia）
 
@@ -56,11 +56,13 @@
 
 ## Debug Web HUD 配置面板
 
-在 `config.yml` 中开启 `debug.web-ui.enabled: true`，重载后从服务端本机访问 `http://127.0.0.1:<port>`（默认端口 2000）。
+在 `config.yml` 中开启 `debug.web-ui.enabled: true`，重载后从服务端本机访问 `http://127.0.0.1:<port>`（默认端口 2000）。页面以全屏 Minecraft 风格画布为主，包含像素化背景、BossBar、ActionBar、准星、世界视口标识、操作提示、右键坐标提示和完整 HUD 场景，页首保留“只开放 22 个 HUD 运行期字段”、异步保存与客户端重下资源包提示；配置表单位于可折叠浮动面板，并提供浏览器“全屏”按钮。左键拖拽 HUD 层，右键查看左右位置，Shift+方向键精确平移选中层，Shift+拖拽空白区域平移视图，Minecraft 风格吸附默认开启。
 
 - 可编辑 22 个 HUD 运行期参数（含记牌器独立 Y/缩放与 Hotbar 缩放）
-- 右侧实时预览按 Minecraft 像素坐标系绘制（640×360 基准），几何数据由服务端下发
+- 全屏预览按 Minecraft 像素坐标系绘制（640×360 基准），几何数据由服务端下发；背景、BossBar、ActionBar、准星与 HUD 图层共用同一舞台
 - 牌行、头像行、记牌行和 Hotbar 均支持 X/Y 拖动；牌高、头像倍数、记牌器/Hotbar 缩放使用真实资源档位并自动吸附
+- 右键显示当前层左右/上下边界、指针逻辑坐标与偏移，Shift+方向键做 1 MC 像素微调，Shift+拖拽空白区域平移视图（只改变画布视图，不写 HUD 配置）；浏览器 Fullscreen API 失败时保留普通 viewport 编辑模式；舞台按浏览器 viewport 自动适配并修正全屏缩放后的拖动与缩放指针换算，表单和连续字段更新通过 requestAnimationFrame 合并，并保持拖拽/缩放状态变量单例；默认开启 Minecraft 风格吸附（进入页面时不继承旧快照的关闭状态）
+- 预览静态结构与几何更新分离，连续 pointermove 使用 requestAnimationFrame 合并，避免整页频繁重建；浏览器 Fullscreen API 不可用时保留普通 viewport 编辑模式，资源加载失败只影响对应 hotbar 区域；辅助槽层不覆盖真实 hotbar PNG，图标和数字按构建期资源显示，契约测试已锁定该行为
 - 支持 Ctrl+S 保存、Ctrl+R 重载的键盘快捷键
 - 保存链路：异步写 config → CE 重载 → ZIP 生成与校验 → 主线程应用；任一步失败不报成功
 - `offset-x` 运行期即时生效；`offset-y` 需客户端重新下载资源包
@@ -71,18 +73,21 @@
 
 构建目标由 `MuzTarget` 表驱动，用 `-PmuzTarget=<id>` 选择，默认 `paper-26.2`：
 
+```bash
+./gradlew.bat -PmuzTarget=paper-26.1.2 clean shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml
 ```
-./gradlew.bat build -PmuzTarget=paper-26.1.2
-```
+
+三个目标依次串行构建；仅执行 `shadowJar` 不会生成两种 ZIP。
 
 可选目标：`paper-1.21.11`、`paper-26.1.2`、`paper-26.2`。
 
 产物位于 `build/<targetId>/`（不是 `build/`），以 `paper-26.1.2` 为例：
 
-- `build/paper-26.1.2/libs/MUZ-1.10.15-paper-26.1.2.jar` — 插件 JAR
-- `build/paper-26.1.2/libs/MUZ-1.10.15-sources.jar` — 源码
-- `build/paper-26.1.2/distributions/MUZ-resourcepack-1.10.15.zip` — 客户端资源包
-- `build/paper-26.1.2/distributions/MUZ-craftengine-1.10.15.zip` — CraftEngine bundle
+- `build/paper-26.1.2/libs/MUZ-1.10.16-paper-26.1.2.jar` — 插件 JAR
+- `build/paper-26.1.2/distributions/MUZ-resourcepack-1.10.16.zip` — 客户端资源包
+- `build/paper-26.1.2/distributions/MUZ-craftengine-1.10.16.zip` — CraftEngine bundle
+
+源码包需另外执行 `sourcesJar`；上述发布命令只生成插件 JAR 与两种 ZIP。
 
 把与服务端版本对应的 JAR 放进 `plugins/`。不用 CraftEngine 时直接下发资源包 ZIP 给客户端；用 CraftEngine 时可手动导入 bundle，或让插件检测到 CE 后自动导出。
 
@@ -110,13 +115,19 @@
 
 ## 版本状态
 
-### 1.10.15（当前源码版本）
+### 1.10.16（当前源码版本，验证中）
+
+- 全屏 HUD 编辑器已完成稳定 DOM、四层拖动/缩放、右键坐标、Shift 微调/视图平移、默认吸附、同源 Hotbar 资源回退与异步保存链路；`DebugWebServerTest` 独立实跑 42/42 通过。
+- 三目标九个 1.10.16 产物已完成 5114 项资源审计，包含归档完整性、目标 API/字节码、125 个 OGG、三档 hotbar、三档记牌器、SnakeYAML relocation、bundle 字节一致性与原版 hotbar 覆盖检查；三个 JAR 已复制到 `C:\PluginLibs` 且副本哈希一致。另外两个目标没有当次测试编译输出，未宣称其测试通过。
+- 稳定 DOM 修复后的真实 Chromium/CDP 全流程已实际运行，但仍有 7 项连续拖动 dirty 断言失败；已通过四种 viewport、无应用 JS 错误、四层切换、40px 视图平移、Alt 轴锁、右键坐标、Hotbar 资源复用/失败回退、保存重载和 Fullscreen API。截图文件已更新。新版本尚未部署，游戏内资源包重载、客户端下载和进服渲染仍待人工确认。
+
+### 1.10.15（历史源码与构建记录）
 
 已完成的验证：
 
 - 三个目标（`paper-1.21.11`、`paper-26.1.2`、`paper-26.2`）均完成干净发布构建（`shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml`）
 - 独立 JUnit 定向回归 150/150 通过，无跳过、无失败容器
-- Debug Web 的 Chromium fixture 已验证 22 个字段、15 格记牌器、9 槽 hotbar 和 640×360 几何；本轮修复图层选择、坐标输入、拖动结束及 Hotbar wheel 监听器之间缺少分号的真实脚本语法问题、缩放事件访问不到档位映射及缩放 pointermove 重建 DOM 的问题，并同步修正页面残留的“19 个字段”文案。真实浏览器已验证拖拽、缩放期间 DOM 不重建、松手后刷新、Hotbar wheel、保存失败保留 dirty、保存成功淡出、Ctrl+S/Ctrl+R 防重复及重新读取丢弃未保存值；截图已更新到 `docs/screenshots/muz-hud-debug-web-initial.png` 和 `docs/screenshots/muz-hud-debug-web-final.png`
+- Debug Web 的 Chromium fixture 已验证全屏 MC 编辑器布局、`id='screen'` 舞台、图层交互和资源 22 个字段、15 格记牌器、9 槽 hotbar 和 640×360 几何；本轮修复图层选择、坐标输入、拖动结束及 Hotbar wheel 监听器之间缺少分号的真实脚本语法问题、缩放事件访问不到档位映射及缩放 pointermove 重建 DOM 的问题，并同步修正页面残留的“19 个字段”文案。真实浏览器已验证全屏画布、右键坐标、Shift 平移、拖拽、缩放期间 DOM 不重建、松手后刷新、Hotbar wheel、保存失败保留 dirty、保存成功淡出、Ctrl+S/Ctrl+R 防重复及重新读取丢弃未保存值；截图已更新到 `docs/screenshots/muz-hud-debug-web-initial.png` 和 `docs/screenshots/muz-hud-debug-web-final.png`，2026-09-12 真实 Chromium 已确认全屏 MC 画布、四层 HUD、浮动配置面板及 hotbar 构建期图标/数字可见
 - 三个目标产物均无原版 `hotbar.png` / `hotbar_selection.png` 覆盖，JAR 已复制到 `C:\PluginLibs` 且副本哈希一致
 - 资源包校验器接受全部目标格式 `pack_format` 75/84/88（修正原先只认 84/88 导致 `paper-1.21.11` 误判），并按各 scale 的 `downTier×22` 记牌器码位核对实际字体 JSON；本轮独立 JUnit HUD 定向回归 150/150 通过
 
