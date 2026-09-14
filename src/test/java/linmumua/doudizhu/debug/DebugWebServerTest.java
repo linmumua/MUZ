@@ -96,6 +96,19 @@ public class DebugWebServerTest {
     }
 
     @Test
+    void 内嵌页面是当前真实DebugWeb模板而非旧Java内联回退() throws IOException {
+        try (var input = DebugWebServerTest.class.getClassLoader().getResourceAsStream("debug-hud-preview.html")) {
+            assertNotNull(input, "测试 classpath 必须包含真实内嵌 debug-hud-preview.html");
+            String html = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(html.contains("id=\"screen\""), "内嵌页面必须包含 Minecraft 逻辑舞台");
+            assertTrue(html.contains("/api/preview-resources"), "内嵌页面必须消费真实资源 manifest");
+            assertTrue(html.contains("hotbar-select"), "内嵌页面必须包含 Hotbar 选中框预览");
+            assertFalse(html.contains("1.10.16"), "内嵌页面不得残留旧版本号");
+            assertFalse(html.contains("1.10.3"), "内嵌页面不得残留更旧版本号");
+        }
+    }
+
+    @Test
     void 前端交互改进_粘性操作栏与键盘快捷键与焦点样式() {
         String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
             Map.of(),
@@ -197,8 +210,13 @@ public class DebugWebServerTest {
         assertTrue(coordinator.contains("isTaskActive(task)"));
         assertTrue(coordinator.contains("executor.shutdownNow()"));
         String overlayWriter = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/HotbarDebugOverlayWriter.java"));
-        assertTrue(overlayWriter.contains("Files.createTempFile(root, \"pack.yml.\", \".tmp\")"),
-            "pack.yml 必须先写入唯一临时文件");
+        String bridge = Files.readString(Path.of("src/main/java/linmumua/doudizhu/compat/CraftEngineHudResourceBridge.java"));
+        assertTrue(bridge.contains("access::reload"),
+            "保存与磁盘重载必须先让 CraftEngine 重新读取 overlay，再生成资源包");
+        assertFalse(bridge.contains("跳过 CE 重载"),
+            "不能用旧的 CE 内存快照生成看似成功的资源包");
+        assertFalse(overlayWriter.contains("Files.createTempFile(root, \"pack.yml.\", \".tmp\")"),
+            "直接写入 muz 时不得覆盖正式 pack.yml");
         assertTrue(overlayWriter.contains("Files.createTempFile(imagesDirectory, \"hotbar_debug.yml.\", \".tmp\")"),
             "hotbar_debug.yml 必须先写入唯一临时文件");
         assertTrue(overlayWriter.contains("ATOMIC_MOVE"));
@@ -271,10 +289,10 @@ public class DebugWebServerTest {
             assertEquals(PackAssets.cardGlyphAdvance(tier), card.get("advance").getAsInt());
         }
 
-        int expectedAvatarCount = PackAssets.AVATAR_PIXEL_MAX_SCALE - PackAssets.AVATAR_PIXEL_MIN_SCALE + 1;
+        int expectedAvatarCount = PackAssets.AVATAR_PIXEL_SCALE_TIERS.length;
         assertEquals(expectedAvatarCount, avatars.size());
         for (int index = 0; index < avatars.size(); index++) {
-            int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE + index;
+            int scale = PackAssets.AVATAR_PIXEL_SCALE_TIERS[index];
             JsonObject avatar = avatars.get(index).getAsJsonObject();
             assertGeometryFields(avatar, "scale", "plainAdvance", "outlinedAdvance", "rowHeight");
             assertEquals(scale, avatar.get("scale").getAsInt());
@@ -324,12 +342,13 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("g.cards"));
         assertTrue(previewScript.contains("g.avatars"));
         assertTrue(previewScript.contains("g.counters"));
-        // 新版按当前 scale 从 counterTiers 查表，旧顶层字段仅作兼容回退。
+        // 新版必须按当前 scale 从 counterTiers 查表，缺档显式失败，不得静默回退旧字段。
         assertTrue(previewScript.contains("cntTier=(g.counterTiers||[]).find(x=>Number(x.scale)===cntScale)"));
-        assertTrue(previewScript.contains("counterCellWidth=Number(cntTier?cntTier.cellWidth:g.counterCellWidth)"));
-        assertTrue(previewScript.contains("counterCellHeight=Number(cntTier?cntTier.cellHeight:g.counterCellHeight)"));
-        assertTrue(previewScript.contains("counterAdvance=Number(cntTier?cntTier.advance:g.counterAdvance)"));
-        assertTrue(previewScript.contains("counterLabelAscent=Number(cntTier?cntTier.labelAscent:g.counterLabelAscent)"));
+        assertTrue(previewScript.contains("if(!cntTier)throw new Error"));
+        assertTrue(previewScript.contains("counterCellWidth=Number(cntTier.cellWidth)"));
+        assertTrue(previewScript.contains("counterCellHeight=Number(cntTier.cellHeight)"));
+        assertTrue(previewScript.contains("counterAdvance=Number(cntTier.advance)"));
+        assertTrue(previewScript.contains("counterLabelAscent=Number(cntTier.labelAscent)"));
         assertTrue(previewScript.contains("cell.playedCount"));
         assertTrue(previewScript.contains("textContent=String(cell.playedCount)"));
         assertFalse(previewScript.contains("digits=hidden?'':String(cell.remaining)"));
@@ -352,9 +371,9 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("r.hbAdv"));
         assertTrue(previewScript.contains("r.cardHeight-Number(vals['trick-hud.offset-down'])"));
         assertTrue(previewScript.contains("r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])"));
-        // 记牌行使用独立的 counter.offset-down，不再耦合 avatar-offset-down
-        assertTrue(previewScript.contains("r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])"));
-        assertTrue(previewScript.contains("base-(r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down']))"));
+        // counter.offset-down 已折入服务端下发的 labelAscent，页面直接消费该值，不能二次扣减。
+        assertTrue(previewScript.contains("base-r.counterLabelAscent"));
+        assertFalse(previewScript.contains("r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])"));
         assertFalse(previewScript.contains("const cnY=cdY+r.cardHeight+r.counterGap"),
             "记牌行 baseline 必须按 counter label ascent 与 avatar-offset-down 对齐实际 provider，不能跟牌行高度相加");
         assertTrue(previewScript.contains("hbBaseAscent"),
@@ -368,6 +387,61 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("r.hbSlotStep"));
         assertTrue(previewScript.contains("r.hbSlotsStartX"));
         assertTrue(previewScript.contains("for(let i=0;i<r.hbSlotCount;i++)"));
+    }
+
+    @Test
+    void counter预览按snapshotOffset与当前表单差值计算真实Y() throws Exception {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+        String marker = "<script type='application/json' id='muz-state'>";
+        int stateStart = html.indexOf(marker);
+        int stateEnd = html.indexOf("</script>", stateStart);
+        JsonObject geometry = new Gson().fromJson(
+            html.substring(stateStart + marker.length(), stateEnd), JsonObject.class
+        ).getAsJsonObject("geometry");
+        int scriptStart = html.indexOf("function geo()");
+        int scriptEnd = html.indexOf("function staticCards", scriptStart);
+        assertTrue(scriptStart >= 0 && scriptEnd > scriptStart, "必须能提取几何与 staticBoxes JS");
+
+        String nodeScript = "const assert=require('node:assert/strict');"
+            + "const state={values:{'trick-hud.counter.offset-down':122},geometry:" + geometry + "};"
+            + "const document={getElementById:id=>({value:id==='viewportWidth'?'640':'360'})};"
+            + "const previewPanel={getBoundingClientRect:()=>({width:1000,height:800})};"
+            + html.substring(scriptStart, scriptEnd)
+            + "const base={'trick-hud.enabled':true,'trick-hud.card-step':22,'trick-hud.card-height':53,"
+            + "'trick-hud.avatar-scale':6,'trick-hud.avatar-gap':6,'trick-hud.avatar-outline.enabled':true,"
+            + "'trick-hud.counter.enabled':true,'trick-hud.counter.scale':100,'trick-hud.counter.gap':2,"
+            + "'trick-hud.offset-x':0,'trick-hud.card-offset-x':0,'trick-hud.offset-down':50,"
+            + "'trick-hud.avatar-offset-x':0,'trick-hud.avatar-offset-down':122,"
+            + "'trick-hud.counter.offset-x':0,'hotbar-hud.enabled':false,'hotbar-hud.scale':100};"
+            + "const snapshot=rowGeom({...base,'trick-hud.counter.offset-down':122});"
+            + "assert.equal(snapshot.counterLabelAscent,-110);"
+            + "function top(offset){return staticBoxes({...base,'trick-hud.counter.offset-down':offset}).boxes.counter.y}"
+            + "assert.equal(top(0),8);assert.equal(top(122),130);"
+            + "process.stdout.write('counter Y numeric checks passed');";
+        java.nio.file.Path script = Files.createTempFile("muz-counter-preview-", ".js");
+        try {
+            Files.writeString(script, nodeScript, java.nio.charset.StandardCharsets.UTF_8);
+            Process process = new ProcessBuilder("node", script.toString())
+                .redirectErrorStream(true)
+                .start();
+            String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS), "Node 数值测试超时");
+            assertEquals(0, process.exitValue(), output);
+            assertTrue(output.contains("counter Y numeric checks passed"), output);
+        } finally {
+            Files.deleteIfExists(script);
+        }
+
+        for (Path page : List.of(Path.of("debug-hud-preview.html"),
+            Path.of("src/main/resources/debug-hud-preview.html"))) {
+            String standalone = Files.readString(page);
+            assertFalse(standalone.contains("||33") || standalone.contains("||34") || standalone.contains("||36"),
+                page + " 不得保留旧 counter 几何 fallback");
+            assertTrue(standalone.contains("未在 counterTiers 中声明"),
+                page + " 缺少 counterTiers 缺档提示");
+        }
     }
 
     @Test
@@ -908,19 +982,21 @@ public class DebugWebServerTest {
     }
 
     @Test
-    void 同源资源路由白名单包含三档hotbar共6张PNG() {
-        // 旧断言只有 2 张——三档缩放（75/100/125）× 两个文件后白名单扩展到 6 条
+    void 同源资源路由白名单包含当前profile的hotbarPNG() {
         java.util.Set<String> names = DebugWebServer.resourceWhitelistNames();
-        assertEquals(6, names.size(), "资源白名单必须包含 3 档 × 2 文件 = 6 个条目");
+        long hotbarCount = names.stream()
+            .filter(name -> name.endsWith("hotbar_slots.png") || name.endsWith("hotbar_select.png"))
+            .count();
+        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length * 2, hotbarCount,
+            "资源白名单必须包含当前 profile 每档 × 2 个 hotbar 文件");
         // 100% 默认档
         assertTrue(names.contains("muz:font/hotbar_slots.png"), "缺少 100% 底图");
         assertTrue(names.contains("muz:font/hotbar_select.png"), "缺少 100% 选中框");
-        // 75% 档
-        assertTrue(names.contains("muz:font/scale_75/hotbar_slots.png"), "缺少 75% 底图");
-        assertTrue(names.contains("muz:font/scale_75/hotbar_select.png"), "缺少 75% 选中框");
-        // 125% 档
-        assertTrue(names.contains("muz:font/scale_125/hotbar_slots.png"), "缺少 125% 底图");
-        assertTrue(names.contains("muz:font/scale_125/hotbar_select.png"), "缺少 125% 选中框");
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            String prefix = scale == PackAssets.DEFAULT_HUD_SCALE ? "muz:font/" : "muz:font/scale_" + scale + "/";
+            assertTrue(names.contains(prefix + "hotbar_slots.png"), "缺少 " + scale + "% 底图");
+            assertTrue(names.contains(prefix + "hotbar_select.png"), "缺少 " + scale + "% 选中框");
+        }
     }
 
     @Test
@@ -1043,11 +1119,16 @@ public class DebugWebServerTest {
         assertTrue(html.contains("counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down']"),
             "DRAG_KEYS 中 counter Y 必须是独立的 counter.offset-down");
 
-        // 预览渲染使用 counter.offset-down
-        assertTrue(html.contains("vals['trick-hud.counter.offset-down']"),
-            "counter 预览 Y 定位必须读取 counter.offset-down");
-        // 不使用 avatar-offset-down 定位 counter（已解耦）
+        // CounterTier.labelAscent 已包含 snapshot offset；当前表单偏移只能通过
+        // 「当前表单 offset - snapshot offset」差值叠加，避免重复下移并保留未保存拖动预览。
         String previewScript = html.substring(html.indexOf("function geo()"));
+        assertTrue(previewScript.contains("counterLabelAscent=Number(cntTier.labelAscent)"),
+            "counter 预览 Y 定位必须消费 counterTiers 的真实 labelAscent");
+        assertTrue(previewScript.contains("snapshotCounterOffset:snapshotCounterOffset"),
+            "rowGeom 必须保留生成快照时的 counter offset");
+        assertTrue(previewScript.contains("r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset"),
+            "counter Y 必须使用当前表单 offset 与 snapshot offset 的差值");
+        // 不使用 avatar-offset-down 定位 counter（已解耦）
         int counterSectionStart = previewScript.indexOf("if(vals['trick-hud.counter.enabled']){");
         if (counterSectionStart >= 0) {
             String counterSection = previewScript.substring(counterSectionStart,
@@ -1112,11 +1193,13 @@ public class DebugWebServerTest {
 
     @Test
     void 资源路由白名单拒绝非法文件名() {
-        // 旧断言编码了尾段文件名键——三档支持后键改为完整 muz:font/... 路径
+        // 资源键使用完整 muz:font/... 路径，并严格受当前 profile 白名单约束
         java.util.Set<String> names = DebugWebServer.resourceWhitelistNames();
         // 合法路径能命中
         assertTrue(names.contains("muz:font/hotbar_slots.png"));
-        assertTrue(names.contains("muz:font/scale_75/hotbar_select.png"));
+        int firstScale = PackAssets.HOTBAR_SCALE_TIERS[0];
+        String firstPrefix = firstScale == PackAssets.DEFAULT_HUD_SCALE ? "muz:font/" : "muz:font/scale_" + firstScale + "/";
+        assertTrue(names.contains(firstPrefix + "hotbar_select.png"));
         // 纯文件名不再是白名单键
         assertFalse(names.contains("hotbar_slots.png"), "纯文件名不能命中白名单");
         // 非法路径不在白名单
@@ -1165,5 +1248,119 @@ public class DebugWebServerTest {
 
         assertNotNull(extractRule(css, ".hb-img-error"), "CSS 必须包含 .hb-img-error 规则");
         assertNotNull(extractRule(css, ".resize-handle"), "CSS 必须包含 .resize-handle 规则");
+    }
+
+    @Test
+    void previewResourceManifest和独立路由必须存在并受白名单约束() throws IOException {
+        String server = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/DebugWebServer.java"));
+
+        assertTrue(server.contains("/api/preview-resources"),
+            "必须提供 preview-resource manifest 接口");
+        assertTrue(server.contains("/api/preview-resource/"),
+            "必须提供独立的 preview-resource 图片路由");
+        assertTrue(server.contains("createContext(\"/api/preview-resources\""),
+            "manifest 必须注册为独立 HTTP context");
+        assertTrue(server.contains("createContext(\"/api/preview-resource/\""),
+            "图片预览路由必须注册为独立 HTTP context");
+
+        for (String field : new String[]{"family", "id", "texture", "width", "height", "advance", "scale", "status"}) {
+            assertTrue(server.contains(field), "manifest 条目必须包含字段：" + field);
+        }
+        assertTrue(server.contains("PREVIEW_RESOURCE_WHITELIST")
+                || server.contains("PREVIEW_RESOURCES")
+                || server.contains("previewResourceWhitelist"),
+            "preview-resource 必须拥有独立的固定白名单");
+        assertTrue(server.contains("unavailable") || server.contains("不可用"),
+            "未生成的 profile 资源必须显式标记不可用，不能静默回退");
+        assertTrue(server.contains("image/png"), "预览资源响应必须固定为 image/png");
+        assertTrue(server.contains("X-Content-Type-Options"), "预览资源响应必须保留 nosniff 安全头");
+        assertTrue(server.contains("name.contains(\"..\")") || server.contains("contains(\"..\")"),
+            "预览资源路由必须拒绝路径遍历");
+    }
+
+    @Test
+    void previewResourceManifest只允许当前profile的真实牌记牌器和hotbar资源() throws IOException {
+        String profile = Files.readString(Path.of("muz-resource-profile.yml"));
+        String build = Files.readString(Path.of("build.gradle.kts"));
+        String server = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/DebugWebServer.java"));
+
+        assertTrue(profile.contains("heights: [53]"), "当前 profile 必须明确声明真实牌高档位");
+        assertTrue(profile.contains("offsets: [0, 50]"), "当前 profile 必须保留牌面基准与当前偏移档");
+        assertTrue(profile.contains("scales: [4, 6]"), "当前 profile 必须明确声明稀疏头像 fixture 档位");
+        assertTrue(profile.contains("scales: [100]"), "当前 profile 必须明确声明记牌器档位");
+        assertTrue(profile.contains("scale: 100"), "当前 profile 必须明确声明 hotbar 档位");
+
+        // 资源白名单必须来自构建期真实产物，而不是浏览器 CSS 伪造的矩形。
+        for (String path : new String[]{
+            "textures/font/cards/",
+            "textures/font/avatar/pixel_",
+            "textures/font/avatar/crown_",
+            "textures/font/counter",
+            "hotbar_slots.png",
+            "hotbar_select.png"
+        }) {
+            assertTrue(build.contains(path), "构建期必须生成真实资源：" + path);
+            assertTrue(server.contains(path) || server.contains(path.replace("textures/", "")),
+                "preview manifest/白名单必须引用真实资源：" + path);
+        }
+        assertTrue(server.contains("PackAssets.hotbarTexturePath")
+                || server.contains("PackAssets.hotbarSelectTexturePath")
+                || server.contains("hotbarTexturePath"),
+            "hotbar manifest 必须从 PackAssets 真实路径生成");
+        assertTrue(server.contains("counterRankTexturePath")
+                || server.contains("counterDigitTexturePath")
+                || server.contains("counterFrameTexturePath")
+                || server.contains("counterTexturePath"),
+            "counter manifest 必须使用分层 PNG 路径 helper");
+        assertFalse(server.contains("/api/preview-resource/" + "' + fileName"),
+            "前端不得把任意文件名直接拼入预览资源 URL");
+    }
+
+    @Test
+    void avatar预览必须使用固定fixture和mask而不是猜测玩家皮肤() throws IOException {
+        String server = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/DebugWebServer.java"));
+        String preview = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+
+        assertTrue(server.contains("pixel_") && server.contains("crown_"),
+            "预览数据必须复用构建期 pixel/crown fixture，不能猜测玩家皮肤");
+        assertTrue(server.contains("avatarMask")
+                || server.contains("mask")
+                || server.contains("pixel_") && server.contains("crown_"),
+            "头像资源必须明确使用 pixel/crown fixture 或 mask");
+        assertTrue(preview.contains("avatar") && preview.contains("sampleCards"),
+            "页面状态必须下发头像与牌面 fixture 数据");
+        assertFalse(server.contains("textures/player/") || server.contains("textures/skins/"),
+            "Debug Web 不得开放任意玩家皮肤路径");
+    }
+
+    @Test
+    void 磨砂玻璃控制层覆盖编辑控件但不模糊像素舞台() throws IOException {
+        String html;
+        try (var input = DebugWebServerTest.class.getClassLoader().getResourceAsStream("debug-hud-preview.html")) {
+            assertNotNull(input, "测试 classpath 必须包含真实内嵌页面");
+            html = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        String css = extractStyleBlock(html);
+
+        assertTrue(css.contains("--glass"), "必须定义内嵌页面的玻璃背景变量");
+        assertTrue(css.contains("backdrop-filter:blur(")
+                || css.contains("backdrop-filter: blur(")
+                || css.contains("-webkit-backdrop-filter"),
+            "控制层必须使用 backdrop-filter 磨砂效果");
+        assertTrue(css.contains("#151a1dcc"), "玻璃背景必须保留半透明背景色");
+
+        for (String selector : new String[]{".toolbar", ".panel", ".coordinate", ".hint", ".actions"}) {
+            assertTrue(css.contains(selector), "玻璃控制层必须覆盖：" + selector);
+        }
+        String screenRule = extractRule(css, ".mc-editor");
+        assertNotNull(screenRule, "像素舞台规则必须存在");
+        assertFalse(screenRule.contains("backdrop-filter"), "像素舞台不得被玻璃层 blur");
+        assertFalse(screenRule.contains("filter:blur"), "像素舞台不得被 CSS blur");
+        String actionsRule = extractRule(css, ".actions");
+        assertNotNull(actionsRule, "操作栏规则必须存在");
+        assertTrue(actionsRule.contains("position:sticky"), "玻璃操作栏仍必须保持 sticky");
+        assertTrue(actionsRule.contains("bottom:0"), "玻璃操作栏仍必须吸附底部");
     }
 }

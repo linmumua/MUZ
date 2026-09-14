@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.16"
+version = "1.10.18"
 
 data class MuzTarget(
     val id: String,
@@ -243,19 +243,138 @@ fun tiersOf(min: Int, max: Int, step: Int): List<Int> {
     return values
 }
 
-// 降序：与原表 {53, 48, 42, 37, 32} 方向一致，减少 diff 噪音。
-// 【索引 0 不再承载「默认」语义】—— card-height 的默认值已改为显式常量
-// PackAssets.DEFAULT_CARD_HEIGHT，不再取 cardGlyphHeightAt(0)，所以顺序纯粹是数据。
-val cardGlyphHeightTiers = tiersOf(cardHeightMin, cardHeightMax, cardHeightStep).reversed()
+/**
+ * 构建期资源 profile 的最小 YAML 读取器。
+ *
+ * <p>profile 是显式构建输入，不读取服务端 config.yml，避免构建结果依赖部署目录。
+ * 只接受本文件约定的 version、分段和整数列表；复杂 YAML 结构应在 profile 之外维护，
+ * 这样错误会在配置阶段直接失败，而不是静默生成全量资源。
+ */
+data class MuzResourceProfile(
+    val version: Int,
+    val cardHeights: List<Int>,
+    val cardOffsets: List<Int>,
+    val avatarScales: List<Int>,
+    val avatarOffsets: List<Int>,
+    val counterScales: List<Int>,
+    val counterOffsets: List<Int>,
+    val hotbarScale: Int
+)
 
+fun parseProfileIntList(value: String, path: String, source: File, lineNumber: Int): List<Int> {
+    val text = value.trim()
+    require(text.startsWith("[") && text.endsWith("]")) {
+        "$source:$lineNumber 的 $path 必须是 YAML 整数列表，例如 [53, 48]"
+    }
+    val body = text.substring(1, text.length - 1).trim()
+    require(body.isNotEmpty()) { "$source:$lineNumber 的 $path 不能为空" }
+    return body.split(',').mapIndexed { index, item ->
+        item.trim().toIntOrNull()
+            ?: throw GradleException("$source:$lineNumber 的 $path 第 ${index + 1} 项不是整数：$item")
+    }
+}
 
+fun readMuzResourceProfile(source: File): MuzResourceProfile {
+    require(source.isFile) {
+        "缺少版本化资源 profile：${source.absolutePath}；请通过 -PmuzResourceProfile=<path> 指定 YAML 文件"
+    }
+    val scalars = linkedMapOf<String, Int>()
+    val lists = linkedMapOf<String, List<Int>>()
+    var section = ""
+    var pendingList: String? = null
+    source.readLines(Charsets.UTF_8).forEachIndexed { index, raw ->
+        val lineNumber = index + 1
+        val withoutComment = raw.substringBefore('#').trimEnd()
+        if (withoutComment.trim().isEmpty()) return@forEachIndexed
+        val text = withoutComment.trim()
+        if (text.startsWith("- ")) {
+            val path = pendingList ?: throw GradleException("$source:$lineNumber 的 YAML 列表没有字段名")
+            val item = text.substring(2).trim().toIntOrNull()
+                ?: throw GradleException("$source:$lineNumber 的 $path 列表项不是整数")
+            lists[path] = lists.getValue(path) + item
+            return@forEachIndexed
+        }
+        val colon = text.indexOf(':')
+        require(colon > 0) { "$source:$lineNumber 不是受支持的 YAML 键值：$text" }
+        val key = text.substring(0, colon).trim()
+        val value = text.substring(colon + 1).trim()
+        val indent = withoutComment.length - withoutComment.trimStart().length
+        if (value.isEmpty()) {
+            if (indent == 0) {
+                section = key
+                pendingList = null
+            } else {
+                val path = if (section.isEmpty()) key else "$section.$key"
+                lists[path] = emptyList()
+                pendingList = path
+            }
+            return@forEachIndexed
+        }
+        if (indent == 0) section = ""
+        val path = if (indent == 0 || section.isEmpty()) key else "$section.$key"
+        pendingList = null
+        if (path == "version" || path == "hotbar.scale") {
+            scalars[path] = value.trim('"', '\'').toIntOrNull()
+                ?: throw GradleException("$source:$lineNumber 的 $path 不是整数")
+        } else {
+            lists[path] = parseProfileIntList(value, path, source, lineNumber)
+        }
+    }
+    val requiredLists = setOf(
+        "card.heights", "card.offsets", "avatar.scales", "avatar.offsets",
+        "counter.scales", "counter.offsets"
+    )
+    require(scalars["version"] == 1) {
+        "$source 必须声明 version: 1，收到 ${scalars["version"] ?: "缺失"}"
+    }
+    require(lists.keys == requiredLists) {
+        val missing = requiredLists - lists.keys
+        val unknown = lists.keys - requiredLists
+        throw GradleException("$source 的 profile 字段不完整；缺少=$missing，未知=$unknown")
+    }
+    require(scalars.keys == setOf("version", "hotbar.scale")) {
+        val unknown = scalars.keys - setOf("version", "hotbar.scale")
+        throw GradleException("$source 缺少 hotbar.scale 或存在未知标量字段：$unknown")
+    }
+    fun nonEmpty(path: String): List<Int> = lists.getValue(path).also {
+        require(it.isNotEmpty()) { "$source 的 $path 不能为空" }
+        require(it.distinct().size == it.size) { "$source 的 $path 不能包含重复档位：$it" }
+    }
+    return MuzResourceProfile(
+        version = scalars.getValue("version"),
+        cardHeights = nonEmpty("card.heights"),
+        cardOffsets = nonEmpty("card.offsets"),
+        avatarScales = nonEmpty("avatar.scales"),
+        avatarOffsets = nonEmpty("avatar.offsets"),
+        counterScales = nonEmpty("counter.scales"),
+        counterOffsets = nonEmpty("counter.offsets"),
+        hotbarScale = scalars["hotbar.scale"] ?: throw GradleException("$source 缺少 hotbar.scale")
+    )
+}
 
+val resourceProfilePath = providers.gradleProperty("muzResourceProfile").orElse("muz-resource-profile.yml").get()
+val resourceProfileFile = layout.projectDirectory.file(resourceProfilePath).asFile
+val resourceProfile = readMuzResourceProfile(resourceProfileFile)
 
+// profile 只允许现有构建白名单中的值；不会把非法值静默吸附到邻近档位。
+fun requireProfileTiers(name: String, selected: List<Int>, allowed: List<Int>): List<Int> = selected.also {
+    val invalid = it.filterNot(allowed::contains)
+    require(invalid.isEmpty()) {
+        "资源 profile 的 $name 含未生成白名单档位 $invalid；可用值：${allowed.joinToString()}"
+    }
+}
 
+val cardHeightAllowedTiers = tiersOf(cardHeightMin, cardHeightMax, cardHeightStep)
+val cardOffsetAllowedTiers = tiersOf(cardOffsetMin, cardOffsetMax, cardOffsetStep)
+val avatarOffsetAllowedTiers = tiersOf(avatarOffsetMin, avatarOffsetMax, avatarOffsetStep)
+val counterOffsetAllowedTiers = tiersOf(counterOffsetMin, counterOffsetMax, counterOffsetStep)
 
+// 降序：与旧表方向一致，减少 diff 噪音；集合内容完全由 profile 指定。
+val cardGlyphHeightTiers = requireProfileTiers("card.heights", resourceProfile.cardHeights, cardHeightAllowedTiers)
+    .sortedDescending()
+val cardGlyphDownOffsetTiers = requireProfileTiers("card.offsets", resourceProfile.cardOffsets, cardOffsetAllowedTiers)
+    .sorted()
 
-
-val cardGlyphDownOffsetTiers = tiersOf(cardOffsetMin, cardOffsetMax, cardOffsetStep)
 
 // 头像行（含跟着头像走的 bot 兜底图标）自己的向下偏移档，与上面牌那张表完全独立。
 // 拆两张表是因为头像行永远比牌行深一整个头像盒（12 * avatar-scale，含王冠那 2 行），
@@ -264,10 +383,14 @@ val cardGlyphDownOffsetTiers = tiersOf(cardOffsetMin, cardOffsetMax, cardOffsetS
 //
 // 这张表连同下面的 scale 范围会被写进生成的 PackTiers.java（见 generatePackTiers 任务），
 // 插件端直接读那份生成结果 —— 不再有「两处手写的表必须逐项一致」这种隐患。
-val avatarDownOffsetTiers = tiersOf(avatarOffsetMin, avatarOffsetMax, avatarOffsetStep)
+val avatarDownOffsetTiers = requireProfileTiers(
+    "avatar.offsets", resourceProfile.avatarOffsets, avatarOffsetAllowedTiers
+).sorted()
 
-// 记牌器独立表：与头像表的像素范围相同，但步长固定为 2，保持旧的 201 档码位布局。
-val counterDownOffsetTiers = tiersOf(counterOffsetMin, counterOffsetMax, counterOffsetStep)
+// 记牌器独立表：不再默认生成 0..400 全量档，只生成 profile 指定的偏移。
+val counterDownOffsetTiers = requireProfileTiers(
+    "counter.offsets", resourceProfile.counterOffsets, counterOffsetAllowedTiers
+).sorted()
 
 
 
@@ -286,6 +409,14 @@ val counterDownOffsetTiers = tiersOf(counterOffsetMin, counterOffsetMax, counter
 val avatarPixelCodepointStart = 0xE800
 val avatarPixelMinScale = tierParam("muzAvatarScaleMin", 2)
 val avatarPixelMaxScale = tierParam("muzAvatarScaleMax", 16)
+val avatarScaleAllowedTiers = (avatarPixelMinScale..avatarPixelMaxScale).toList()
+val avatarPixelScaleTiers = requireProfileTiers(
+    "avatar.scales", resourceProfile.avatarScales, avatarScaleAllowedTiers
+).sorted()
+requireProfileTiers("counter.scales", resourceProfile.counterScales, listOf(75, 100, 125))
+require(resourceProfile.hotbarScale in listOf(75, 100, 125)) {
+    "资源 profile 的 hotbar.scale=${resourceProfile.hotbarScale} 不在可用值 75/100/125 内"
+}
 val avatarHeadPixels = 8
 
 
@@ -555,25 +686,27 @@ fun renderRankGlyph(id: String, color: Color = Color.WHITE): BufferedImage {
 // 记牌行分层字形族
 //
 // 【每档固定 22 个 glyph】：标签下标 0..14、数字 15..19、普通/耗尽框 20..21。
-// 码位排列不等于绘制顺序；TrickHudView 按 label → frame → digit 输出，后层 -34 回退。
+// 码位排列不等于绘制顺序；TrickHudView 按 label → frame → digit 输出，后层按紧凑 advance=22 回退。
 // 标签/框/数字是三层独立贴图，同一档只改变 ascent，不为「每个点数 × 每个已出数」
 // 生成组合 PNG，因此不会再出现 30,150 张组合资源。所有图形都由确定性矢量笔画绘制，
 // 不依赖构建机上的系统字体。
 // ============================================================================
 val counterGlyphFont = "minecraft:${resourceNamespace}_counter"
 val counterGlyphCodepointStart = 0xE900
-val counterGlyphLabelWidth = 33
-val counterGlyphLabelHeight = 16
+// 紧凑仪表盘基础几何：标签/框 21×12、数字 21×8；三层通过 ascent 叠到同一格。
+// 这组值必须与 PackAssets 的 counter 几何常量、CraftEngine images 声明保持一致。
+val counterGlyphLabelWidth = 21
+val counterGlyphLabelHeight = 12
 val counterGlyphDigitCount = 5
 val counterGlyphFrameCount = 2
-val counterGlyphDigitWidth = 33
-val counterGlyphDigitHeight = 10
-val counterGlyphDigitAscent = -7
-val counterGlyphFrameWidth = 33
-val counterGlyphFrameHeight = 16
-val counterGlyphFrameAscent = -4
-val counterGlyphLabelAscent = 16
-val counterGlyphAdvance = 34
+val counterGlyphDigitWidth = 21
+val counterGlyphDigitHeight = 8
+val counterGlyphDigitAscent = -6
+val counterGlyphFrameWidth = 21
+val counterGlyphFrameHeight = 12
+val counterGlyphFrameAscent = -3
+val counterGlyphLabelAscent = 12
+val counterGlyphAdvance = 22
 
 // 0xEF00：hotbar HUD 底部物品栏字形（单字形，无档位切分）。
 // 【必须与 PackAssets.HOTBAR_HUD_FONT / HOTBAR_HUD_CODEPOINT 保持一致】
@@ -599,18 +732,26 @@ val hotbarSelectGlyphWidth = 20
 val hotbarSelectGlyphHeight = 22
 val hotbarSelectGlyphAdvance = hotbarSelectGlyphWidth + 1
 
-// counter/hotbar 的构建期缩放档。100 保留旧字体、码位和 PNG 路径；75/125 使用独立字体
-// 与独立码位窗口，避免改动默认 EF00/EF01/EF02 和旧 counter 0xE900..0xFA45 契约。
+// counter/hotbar 的构建期缩放档。profile 只保留当前需要的档位；100 仍保留旧字体、码位
+// 和 PNG 路径，75/125 继续使用独立字体与独立码位窗口。
 // 这些数组会写入 PackTiers.java，PackAssets 运行期直接读取同一份生成结果。
-val counterScaleTiers = listOf(75, 100, 125)
-val hotbarScaleTiers = listOf(75, 100, 125)
-val defaultHudScale = 100
-val counterScaleCodepointStarts = listOf(0xED00, counterGlyphCodepointStart, 0xEE00)
-val hotbarScaleBaseCodepoints = listOf(0xEF10, hotbarHudCodepoint, 0xEF20)
-val hotbarScaleDebugCodepoints = listOf(0xEF11, 0xEF01, 0xEF21)
-val hotbarScaleSelectCodepoints = listOf(0xEF12, hotbarSelectCodepoint, 0xEF22)
+val supportedHudScales = listOf(75, 100, 125)
+val allCounterScaleTiers = supportedHudScales
+val allHotbarScaleTiers = supportedHudScales
+val allCounterScaleCodepointStarts = listOf(0xED00, counterGlyphCodepointStart, 0xEE00)
+val allHotbarScaleBaseCodepoints = listOf(0xEF10, hotbarHudCodepoint, 0xEF20)
+val allHotbarScaleDebugCodepoints = listOf(0xEF11, 0xEF01, 0xEF21)
+val allHotbarScaleSelectCodepoints = listOf(0xEF12, hotbarSelectCodepoint, 0xEF22)
 // EF03 是默认 100 档覆盖层选框；其它缩放档使用同一相对布局的独立码位。
-val hotbarScaleSelectDebugCodepoints = listOf(0xEF13, 0xEF03, 0xEF23)
+val allHotbarScaleSelectDebugCodepoints = listOf(0xEF13, 0xEF03, 0xEF23)
+val defaultHudScale = 100
+val counterScaleTiers = resourceProfile.counterScales.sorted()
+val hotbarScaleTiers = listOf(resourceProfile.hotbarScale)
+val counterScaleCodepointStarts = counterScaleTiers.map { allCounterScaleCodepointStarts[allCounterScaleTiers.indexOf(it)] }
+val hotbarScaleBaseCodepoints = hotbarScaleTiers.map { allHotbarScaleBaseCodepoints[allHotbarScaleTiers.indexOf(it)] }
+val hotbarScaleDebugCodepoints = hotbarScaleTiers.map { allHotbarScaleDebugCodepoints[allHotbarScaleTiers.indexOf(it)] }
+val hotbarScaleSelectCodepoints = hotbarScaleTiers.map { allHotbarScaleSelectCodepoints[allHotbarScaleTiers.indexOf(it)] }
+val hotbarScaleSelectDebugCodepoints = hotbarScaleTiers.map { allHotbarScaleSelectDebugCodepoints[allHotbarScaleTiers.indexOf(it)] }
 
 fun scaleFontName(baseFont: String, scale: Int): String =
     if (scale == defaultHudScale) baseFont else "${baseFont}_s$scale"
@@ -646,9 +787,10 @@ check(counterGlyphFiles.size == counterRankGlyphFiles.size + counterGlyphFrameCo
     "记牌器每档必须严格占用 22 个字形"
 }
 
-/** 在固定 33×16 视觉盒内描一枚确定性矢量符号。 */
+/** 在传入的紧凑视觉盒内描一枚确定性矢量符号；所有坐标随宽高按比例计算。 */
 fun appendCounterSymbol(path: GeneralPath, symbol: String, ox: Float, oy: Float, width: Float, height: Float) {
-    val m = 1.5f
+    // 紧凑 21×12/21×8 字形仍保留稳定留白；数字层高度更小时自动收紧边距。
+    val m = maxOf(0.75f, minOf(width, height) * 0.12f)
     val x0 = ox + m
     val x1 = ox + width - m
     val y0 = oy + m
@@ -673,33 +815,39 @@ fun appendCounterSymbol(path: GeneralPath, symbol: String, ox: Float, oy: Float,
         "K" -> { path.moveTo(x0, y0); path.lineTo(x0, y1); path.moveTo(x1, y0); path.lineTo(x0, ym); path.lineTo(x1, y1) }
         "A" -> { path.moveTo(x0, y1); path.lineTo(xm, y0); path.lineTo(x1, y1); path.moveTo(x0 + w * .2f, ym + h * .08f); path.lineTo(x1 - w * .2f, ym + h * .08f) }
         // 中文王牌不用系统字体：小、大均使用固定盒内的专用短标签图形。
-        "small" -> { path.moveTo(xm, y0); path.lineTo(xm, y1); path.moveTo(xm, ym); path.lineTo(x0 + w * .2f, y0 + h * .35f); path.moveTo(xm, ym); path.lineTo(x1 - w * .2f, y0 + h * .35f); path.moveTo(x0 + w * .2f, y1); path.lineTo(x0 + w * .35f, y1 - h * .2f) }
-        "big" -> { path.moveTo(x0, y0 + h * .25f); path.lineTo(x1, y0 + h * .25f); path.moveTo(xm, y0); path.lineTo(xm, y1); path.moveTo(xm, ym); path.lineTo(x0 + w * .12f, y1); path.moveTo(xm, ym); path.lineTo(x1 - w * .12f, y1) }
+        "small" -> { path.moveTo(xm, y0); path.lineTo(xm, y1); path.lineTo(xm - w * .18f, y1 - h * .1f); path.moveTo(x0 + w * .2f, y0 + h * .35f); path.lineTo(x0, y0 + h * .7f); path.moveTo(x1 - w * .2f, y0 + h * .35f); path.lineTo(x1, y0 + h * .7f) }
+        "big" -> { path.moveTo(x0, y0 + h * .3f); path.lineTo(x1, y0 + h * .3f); path.moveTo(xm, y0); path.lineTo(xm, ym); path.lineTo(x0, y1); path.moveTo(xm, ym); path.lineTo(x1, y1) }
         else -> error("没有这个记牌器矢量符号：$symbol")
     }
 }
 
-/** 生成固定宽度的标签/数字矢量字形；10 标签由两个短符号并排绘制。 */
-fun renderCounterSymbol(symbol: String, height: Int): BufferedImage {
-    val out = BufferedImage(counterGlyphLabelWidth, height, BufferedImage.TYPE_INT_ARGB)
+/** 生成指定宽高的紧凑标签/数字矢量字形；10 按字形宽度比例并排绘制。 */
+fun renderCounterSymbol(symbol: String, width: Int, height: Int): BufferedImage {
+    val out = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
     val g = out.createGraphics()
     g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
     g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
     g.color = Color.WHITE
-    g.stroke = BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+    g.stroke = BasicStroke(maxOf(1.0f, minOf(width, height) * 0.14f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
     val path = GeneralPath()
     if (symbol == "10") {
-        appendCounterSymbol(path, "1", 7f, 0f, 8f, 16f)
-        appendCounterSymbol(path, "0", 17f, 0f, 9f, 16f)
+        // 21px 紧凑双字符格按比例拆分：左右留白 8%、间距 8%，1/0 分别占 30%/46%。
+        val left = width * 0.08f
+        val oneWidth = width * 0.30f
+        val gap = width * 0.08f
+        val zeroWidth = width * 0.46f
+        appendCounterSymbol(path, "1", left, 0f, oneWidth, height.toFloat())
+        appendCounterSymbol(path, "0", left + oneWidth + gap, 0f, zeroWidth, height.toFloat())
     } else {
-        appendCounterSymbol(path, symbol, 0f, 0f, counterGlyphLabelWidth.toFloat(), 16f)
+        // 格子宽度用于固定排版，不是笔画宽度；按高度限定字身，避免数字被拉成扁平椭圆。
+        val symbolWidth = minOf(width.toFloat(), height * 0.8f)
+        appendCounterSymbol(path, symbol, (width - symbolWidth) / 2f, 0f, symbolWidth, height.toFloat())
     }
-    if (height != 16) g.scale(1.0, height.toDouble() / 16.0)
     g.draw(path)
     g.dispose()
     // Minecraft BitmapProvider 按 alpha 是否为 0 扫描实际 glyph 宽度，而不是读取 PNG 声明宽度。
-    // 矢量笔画可能没有触及最右列；alpha=1 锚点锁住 33px 实际宽度（advance=34px），文字 shader 会丢弃它。
-    out.setRGB(counterGlyphLabelWidth - 1, height - 1, 0x01FFFFFF)
+    // 矢量笔画可能没有触及最右列；alpha=1 锚点锁住紧凑字形声明宽度（advance=22px），文字 shader 会丢弃它。
+    out.setRGB(width - 1, height - 1, 0x01FFFFFF)
     return out
 }
 
@@ -1156,12 +1304,14 @@ val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
 // 更直接，也不会有「资源没打进 jar」的问题；而且能被测试直接 import 比对。
 // ============================================================================
 val generatePackTiers = tasks.register("generatePackTiers") {
+    // profile 本身也是输入；即便档位数值不变，版本/来源变化也不应被增量缓存吞掉。
+    inputs.file(resourceProfileFile)
     // 这些参数进 inputs，改了 -P 参数就会重新生成（否则 Gradle 会误判 UP-TO-DATE）。
     inputs.property("cardHeightTiers", cardGlyphHeightTiers.toString())
     inputs.property("cardOffsetTiers", cardGlyphDownOffsetTiers.toString())
     inputs.property("avatarOffsetTiers", avatarDownOffsetTiers.toString())
     inputs.property("counterOffsetTiers", counterDownOffsetTiers.toString())
-    inputs.property("avatarScaleRange", "$avatarPixelMinScale..$avatarPixelMaxScale")
+    inputs.property("avatarScaleTiers", avatarPixelScaleTiers.toString())
     inputs.property("counterScaleTiers", counterScaleTiers.toString())
     inputs.property("hotbarScaleTiers", hotbarScaleTiers.toString())
     inputs.property("counterScaleCodepointStarts", counterScaleCodepointStarts.toString())
@@ -1208,17 +1358,17 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                     ${javaArray(cardGlyphHeightTiers)}
                 };
 
-                /** 牌行向下偏移档位（升序，首项必须是 0）。 */
+                /** 牌行向下偏移档位（升序；profile 若需兼容无档位调用方应包含 0）。 */
                 public static final int[] CARD_DOWN_OFFSET_TIERS = {
                     ${javaArray(cardGlyphDownOffsetTiers)}
                 };
 
-                /** 头像行向下偏移档位（升序，首项必须是 0）。 */
+                /** 头像行向下偏移档位（升序；profile 若需兼容无档位调用方应包含 0）。 */
                 public static final int[] AVATAR_DOWN_OFFSET_TIERS = {
                     ${javaArray(avatarDownOffsetTiers)}
                 };
 
-                /** 记牌器独立向下偏移档位（升序，0..400，步长 2，保持旧 201 档契约）。 */
+                /** 记牌器独立向下偏移档位（升序，profile 精确指定；通常应包含 0 基准）。 */
                 public static final int[] COUNTER_DOWN_OFFSET_TIERS = {
                     ${javaArray(counterDownOffsetTiers)}
                 };
@@ -1266,18 +1416,18 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int COUNTER_FRAME_GLYPHS = $counterGlyphFrameCount;
                 /** 记牌器数字字形数，仅生成 0..4 五个剩余张数。 */
                 public static final int COUNTER_DIGIT_GLYPHS = $counterGlyphDigitCount;
-                /** 记牌器标签/框字形的渲染高度，单位像素。 */
+                /** 记牌器标签/框基础渲染高度，单位像素（紧凑几何 21×12）。 */
                 public static final int COUNTER_GLYPH_HEIGHT = $counterGlyphLabelHeight;
-                /** 记牌器每层字形的固定视觉宽度，单位像素。 */
+                /** 记牌器每层字形的固定视觉宽度，单位像素（紧凑几何 21px）。 */
                 public static final int COUNTER_GLYPH_WIDTH = $counterGlyphLabelWidth;
                 public static final int COUNTER_GLYPH_WIDE_WIDTH = $counterGlyphLabelWidth;
-                /** 记牌器数字层渲染高度，单位像素。 */
+                /** 记牌器数字层基础渲染高度，单位像素（紧凑几何 21×8）。 */
                 public static final int COUNTER_DIGIT_GLYPH_HEIGHT = $counterGlyphDigitHeight;
-                /** 记牌器分层 ascent：label=16-downOffset、frame=-4-downOffset、digit=-7-downOffset。 */
+                /** 记牌器分层 ascent：label=12-downOffset、frame=-3-downOffset、digit=-6-downOffset。 */
                 public static final int COUNTER_LABEL_ASCENT = $counterGlyphLabelAscent;
                 public static final int COUNTER_FRAME_ASCENT = $counterGlyphFrameAscent;
                 public static final int COUNTER_DIGIT_ASCENT = $counterGlyphDigitAscent;
-                /** 记牌器字形前进量，标签、数字、框三层统一为 34px。 */
+                /** 记牌器字形前进量，标签、数字、框三层统一为 22px。 */
                 public static final int COUNTER_GLYPH_ADVANCE = $counterGlyphAdvance;
                 public static final int COUNTER_LABEL_WIDTH = $counterGlyphLabelWidth;
                 public static final int COUNTER_LABEL_HEIGHT = $counterGlyphLabelHeight;
@@ -1295,11 +1445,16 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int HOTBAR_SLOT_COUNT = $hotbarHudSlotCount;
                 public static final int HOTBAR_BASE_ASCENT = -128;
 
-                /** 头像放大倍数下限（资源包只生成了这个范围内的 PNG）。 */
-                public static final int AVATAR_MIN_SCALE = $avatarPixelMinScale;
+                /** 头像放大倍数档位（按资源 profile 精确生成，可能不是连续范围）。 */
+                public static final int[] AVATAR_SCALE_TIERS = {
+                    ${javaArray(avatarPixelScaleTiers)}
+                };
 
-                /** 头像放大倍数上限。 */
-                public static final int AVATAR_MAX_SCALE = $avatarPixelMaxScale;
+                /** 头像放大倍数下限（资源包只生成了这些档位中的最小值）。 */
+                public static final int AVATAR_MIN_SCALE = ${avatarPixelScaleTiers.min()};
+
+                /** 头像放大倍数上限（资源包只生成了这些档位中的最大值）。 */
+                public static final int AVATAR_MAX_SCALE = ${avatarPixelScaleTiers.max()};
 
                 /**
                  * 可用码位上界。字体切分算式用它算「一张字体能装几档」：
@@ -1313,10 +1468,12 @@ val generatePackTiers = tasks.register("generatePackTiers") {
             """.trimIndent() + "\n"
         )
         logger.lifecycle(
-            "[muz] PackTiers：牌高 %d 档、牌偏移 %d 档、头像偏移 %d 档、记牌偏移 %d 档、counter/hotbar scale %s".format(
-                cardGlyphHeightTiers.size, cardGlyphDownOffsetTiers.size,
-                avatarDownOffsetTiers.size, counterDownOffsetTiers.size,
-                counterScaleTiers.joinToString("/")
+            "[muz] PackTiers profile=%s(v%d)：牌高=%s、牌偏移=%s、头像 scale=%s、头像偏移=%s、记牌 scale=%s、记牌偏移=%s、hotbar scale=%s".format(
+                resourceProfileFile.name, resourceProfile.version,
+                cardGlyphHeightTiers.joinToString("/"), cardGlyphDownOffsetTiers.joinToString("/"),
+                avatarPixelScaleTiers.joinToString("/"), avatarDownOffsetTiers.joinToString("/"),
+                counterScaleTiers.joinToString("/"), counterDownOffsetTiers.joinToString("/"),
+                hotbarScaleTiers.single()
             )
         )
     }
@@ -1328,6 +1485,7 @@ sourceSets.named("main") {
 
 val generateResourcePack = tasks.register("generateResourcePack") {
     inputs.dir(resourcePackSourceDir)
+    inputs.file(resourceProfileFile)
     outputs.dir(generatedResourcePackDir)
 
     doLast {
@@ -1385,9 +1543,9 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         val counterFontDir = outputAssetsRoot.resolve("textures/font/counter")
         val counterBaseImages = linkedMapOf<String, BufferedImage>()
         counterRankGlyphFiles.forEachIndexed { index, file ->
-            counterBaseImages[file] = renderCounterSymbol(counterRankGlyphSymbols[index], counterGlyphLabelHeight)
+            counterBaseImages[file] = renderCounterSymbol(counterRankGlyphSymbols[index], counterGlyphLabelWidth, counterGlyphLabelHeight)
         }
-        for (digit in 0..4) counterBaseImages["digit_$digit"] = renderCounterSymbol(digit.toString(), counterGlyphDigitHeight)
+        for (digit in 0..4) counterBaseImages["digit_$digit"] = renderCounterSymbol(digit.toString(), counterGlyphDigitWidth, counterGlyphDigitHeight)
         counterBaseImages["frame_normal"] = renderCounterFrame(false)
         counterBaseImages["frame_exhausted"] = renderCounterFrame(true)
         counterBaseImages.forEach { (file, image) ->
@@ -1403,7 +1561,7 @@ val generateResourcePack = tasks.register("generateResourcePack") {
             }
         }
 
-        for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
+        for (scale in avatarPixelScaleTiers) {
             for (row in 0 until avatarOutlinedPixels) {
                 writeAvatarPixelGlyph(
                     outputAssetsRoot.resolve("textures/font/avatar/pixel_${scale}_$row.png"),
@@ -1528,6 +1686,7 @@ val generateResourcePack = tasks.register("generateResourcePack") {
 val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
     dependsOn(generateResourcePack)
     inputs.dir(resourcePackSourceDir)
+    inputs.file(resourceProfileFile)
     outputs.dir(generatedJarResourcesDir)
 
     doLast {
@@ -1645,7 +1804,7 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
 
         // 头像族走 avatarDownOffsetTiers：牌那张表的浅档头像永远用不到，
         // 生成出来只是白占 images.yml 条目与私有区码位。
-        val avatarScaleCount = avatarPixelMaxScale - avatarPixelMinScale + 1
+        val avatarScaleCount = avatarPixelScaleTiers.size
         val avatarGlyphsPerTier = avatarScaleCount * avatarOutlinedPixels
         // 【按 scale 分组产出】：头像像素条目是 201 偏移档 × 15 scale × 10 行 = 30,150 条。
         // 用 scale 而不是偏移档做切分键：偏移档有 201 个，按它切会产生 201 个碎文件；
@@ -1654,14 +1813,14 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
         // 注意码位仍由 downTier 决定（tierFontSlot 的入参没变），切分只影响
         // 「这些行写进哪个文件」，不影响任何一个字形的码位与字体归属。
         val avatarPixelImagesByScale = linkedMapOf<Int, String>()
-        for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
+        for (scale in avatarPixelScaleTiers) {
             avatarPixelImagesByScale[scale] = buildString {
                 avatarDownOffsetTiers.forEachIndexed { downTier, downOffset ->
                     val (fontIndex, tierBase) =
                         tierFontSlot(downTier, avatarGlyphsPerTier, avatarPixelCodepointStart)
                     val font = fontNameOf(avatarPixelFont, fontIndex)
                     for (row in 0 until avatarOutlinedPixels) {
-                        val index = (scale - avatarPixelMinScale) * avatarOutlinedPixels + row
+                        val index = avatarPixelScaleTiers.indexOf(scale) * avatarOutlinedPixels + row
                         val codepoint = tierBase + index
                         checkGlyphCodepoint(codepoint, "头像", downTier)
                         val charEscape = "\\u%04x".format(codepoint)
@@ -1687,9 +1846,9 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 val (fontIndex, tierBase) =
                     tierFontSlot(downTier, crownGlyphsPerTier, avatarCrownCodepointStart)
                 val font = fontNameOf(avatarCrownFont, fontIndex)
-                for (scale in avatarPixelMinScale..avatarPixelMaxScale) {
+                for (scale in avatarPixelScaleTiers) {
                     for (row in 0 until avatarCrownPixels) {
-                        val index = (scale - avatarPixelMinScale) * avatarCrownPixels + row
+                        val index = avatarPixelScaleTiers.indexOf(scale) * avatarCrownPixels + row
                         val codepoint = tierBase + index
                         checkGlyphCodepoint(codepoint, "王冠", downTier)
                         val charEscape = "\\u%04x".format(codepoint)
@@ -1708,8 +1867,9 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
 
 
 
-        // 记牌行分层字形族：使用独立 counterDownOffsetTiers（0..400 step2），保持默认 201 档
-        // × 22 码位与 PNG 契约；75/125 档拥有独立字体、码位窗口和最近邻派生 PNG。
+        // 记牌行分层字形族：使用 profile 指定的 counterDownOffsetTiers（默认 0..400、步长 2），
+        // 每档仍占用 22 个码位；紧凑基础 PNG 为标签/框 21×12、数字 21×8，75/125 档拥有
+        // 独立字体、码位窗口和最近邻派生 PNG。
         val counterImagesByScale = linkedMapOf<String, String>()
         counterScaleTiers.forEachIndexed { scaleIndex, scale ->
             val scaleCodepointStart = counterScaleCodepointStarts[scaleIndex]

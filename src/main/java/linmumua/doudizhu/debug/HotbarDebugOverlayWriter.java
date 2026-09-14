@@ -33,12 +33,12 @@ import java.util.Objects;
  * 这个结论在 {@code PackAssets} 的注释里已有记录（「ascent 减小就行，能复用同一张贴图；
  * 向上则要求 height 跟着涨，那等于把牌拉伸，不是纯位移」）。
  *
- * <h2>为什么写在独立目录而不是覆盖 bundle</h2>
- *
- * <p>{@code CraftEngineBundleExporter} 的目标根目录是 {@code resources/muz}，它会
- * {@code Files.walk} 整棵子树，把【清单外】的文件当残留删掉、把清单内的文件用 jar 内版本
- * 覆盖回去。所以任何写进 {@code resources/muz/} 的运行期产物都活不过下一次导出。
- * 这里改写到 {@code resources/muz_hotbar_debug/}，在那棵子树之外，导出流程完全不会碰它。
+     * <h2>为什么写入 muz bundle 目录</h2>
+     *
+     * <p>运行期 overlay 直接写入 {@code resources/muz/configuration/images/hotbar_debug.yml}，
+     * 与正式 bundle 的 {@code hotbar_hud.yml} 分离；导出器会保留这一份受保护的运行期文件，
+     * 不会把它当成清单残留删除，也不会覆盖正式 {@code pack.yml}。
+
  *
  * <p>覆盖层【只生成 YAML，不生成 PNG】：贴图直接引用 bundle 提供的
  * {@code muz:font/hotbar_slots.png}，所以绘图逻辑仍然只有构建期一份，不存在两处画图
@@ -48,7 +48,7 @@ public final class HotbarDebugOverlayWriter {
     private static final String CRAFT_ENGINE_PLUGIN = "CraftEngine";
 
     /** 覆盖层的命名空间与目录名，刻意与 bundle 的 {@code muz} 区分开。 */
-    private static final String OVERLAY_NAMESPACE = "muz_hotbar_debug";
+    private static final String OVERLAY_NAMESPACE = "muz";
 
     /**
      * bundle 内烘焙的基准 ascent，与 build.gradle.kts 生成 {@code hotbar_hud.yml} 时
@@ -242,27 +242,19 @@ public final class HotbarDebugOverlayWriter {
             return false;
         }
         Path imagesDirectory = root.resolve("configuration").resolve("images");
-        Path packFile = root.resolve("pack.yml");
         Path imagesFile = imagesDirectory.resolve("hotbar_debug.yml");
-        Path packTemp = null;
         Path imagesTemp = null;
         try {
             Files.createDirectories(imagesDirectory);
-            // 两份 YAML 分别先写唯一临时文件再替换，避免并发旧调用互相覆盖或被 CraftEngine 读到半写内容。
-            packTemp = Files.createTempFile(root, "pack.yml.", ".tmp");
+            // 只原子替换运行期 images 文件；resources/muz/pack.yml 属于正式 bundle，不得被覆盖。
             imagesTemp = Files.createTempFile(imagesDirectory, "hotbar_debug.yml.", ".tmp");
-            Files.writeString(packTemp, buildPackYaml(), StandardCharsets.UTF_8);
             Files.writeString(imagesTemp, buildImagesYaml(offsetY, scale), StandardCharsets.UTF_8);
-            atomicReplace(packTemp, packFile);
             atomicReplace(imagesTemp, imagesFile);
             plugin.getLogger().info("hotbar 调试覆盖层已写出，scale=" + scale + "%，offset-y="
                 + clampOffsetY(offsetY, scale) + "（ascent=" + ascentFor(offsetY, scale) + "）：" + root);
             return true;
         } catch (Exception exception) {
             try {
-                if (packTemp != null) {
-                    Files.deleteIfExists(packTemp);
-                }
                 if (imagesTemp != null) {
                     Files.deleteIfExists(imagesTemp);
                 }
@@ -283,12 +275,52 @@ public final class HotbarDebugOverlayWriter {
         }
     }
 
+    /** 在保存事务开始前捕获当前 overlay 文件，供后续资源失败时补偿。 */
+    OverlayFileState capture(Path root) throws IOException {
+        Path file = overlayFile(root);
+        return Files.isRegularFile(file)
+            ? new OverlayFileState(true, Files.readAllBytes(file))
+            : new OverlayFileState(false, new byte[0]);
+    }
+
+    /** 原子恢复保存前的 overlay；不存在的旧文件会被删除。 */
+    void restore(Path root, OverlayFileState state) throws IOException {
+        Objects.requireNonNull(state, "state");
+        Path file = overlayFile(root);
+        if (!state.exists()) {
+            Files.deleteIfExists(file);
+            return;
+        }
+        Files.createDirectories(file.getParent());
+        Path temp = Files.createTempFile(file.getParent(), "hotbar_debug.yml.rollback.", ".tmp");
+        try {
+            Files.write(temp, state.bytes());
+            atomicReplace(temp, file);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private static Path overlayFile(Path root) {
+        return root.resolve("configuration").resolve("images").resolve("hotbar_debug.yml");
+    }
+
+    record OverlayFileState(boolean exists, byte[] bytes) {
+        OverlayFileState {
+            bytes = bytes.clone();
+        }
+
+        @Override
+        public byte[] bytes() {
+            return bytes.clone();
+        }
+    }
+
     /**
      * 覆盖层目录；CraftEngine 未安装时返回 null。
      *
-     * <p>路径取 {@code plugins/CraftEngine/resources/muz_hotbar_debug}，
-     * 与 {@code CraftEngineBundleExporter} 的 {@code resources/muz} 是兄弟目录，
-     * 不在它的清理范围内。
+     * <p>路径取 {@code plugins/CraftEngine/resources/muz}，与正式 bundle 共用目录，
+     * 文件名使用 {@code configuration/images/hotbar_debug.yml}，由导出器专门保留。
      */
     private Path overlayRoot() {
         Plugin craftEngine = plugin.getServer().getPluginManager().getPlugin(CRAFT_ENGINE_PLUGIN);

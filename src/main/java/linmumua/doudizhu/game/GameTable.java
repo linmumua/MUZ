@@ -1542,11 +1542,16 @@ public final class GameTable {
     private void broadcast(Component message) {
         Component full = MuzTheme.banner("斗地主", name + " 号桌", message);
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
+        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID seat : seats) {
             Player player = onlinePlayer(seat);
             if (player != null) {
                 player.sendMessage(full);
-                player.sendActionBar(actionBar);
+                if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
+                    hotbarHud.showOverlay(seat, actionBar);
+                } else {
+                    player.sendActionBar(actionBar);
+                }
             }
         }
     }
@@ -1622,7 +1627,8 @@ public final class GameTable {
     }
 
     private Player onlinePlayer(UUID playerId) {
-        return Bukkit.getPlayer(playerId);
+        Player player = Bukkit.getPlayer(playerId);
+        return player != null && player.isOnline() ? player : null;
     }
 
     private void playSoundAll(String soundKey, float volume, float pitch) {

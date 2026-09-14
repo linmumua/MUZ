@@ -37,8 +37,9 @@ class TrickHudCounterCellsTest {
         List<TrickHudView.CounterCell> cells = counterCells(counts, counts, true);
 
         assertEquals(CardRank.values().length, cells.size(), "固定 15 格，每个点数都要有一格");
-        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS, cells.get(0).advancePixels());
+        assertEquals(PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance(), cells.get(0).advancePixels());
         assertEquals(3, cells.get(0).layers().size(), "每格必须有标签、框、数字三层");
+        assertEquals(CardRank.values().length, cells.size(), "记牌器必须固定输出全部 15 个 rank 格");
         assertTrue(cells.get(0).layers().get(0).contains(
             PackAssets.counterRankChar(CardRank.values()[0], 0)), "第一层必须是点数标签");
         assertTrue(cells.get(0).layers().get(1).contains(
@@ -67,11 +68,12 @@ class TrickHudCounterCellsTest {
 
         assertEquals(CardRank.values().length, cells.size(), "耗尽点数也必须保留在固定 15 格中");
         assertTrue(cells.get(0).isEmpty(), "出完的点数不画内容");
-        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS, cells.get(0).advancePixels(),
-            "空格子仍必须占据固定 34 像素，否则后面的格子会左移");
+        int advance = counterAdvance();
+        assertEquals(advance, cells.get(0).advancePixels(),
+            "空格子仍必须占据当前 CounterTier 的 advance，否则后面的格子会左移");
         assertFalse(cells.get(1).isEmpty(), "未耗尽点数必须继续绘制");
         for (TrickHudView.CounterCell cell : cells) {
-            assertEquals(34, cell.advancePixels(), "每一格净前进量必须严格为 34");
+            assertEquals(advance, cell.advancePixels(), "每一格净前进量必须严格来自当前 CounterTier");
         }
     }
 
@@ -109,10 +111,10 @@ class TrickHudCounterCellsTest {
     }
 
     /**
-     * 记牌器每格固定 34 像素；点数标签、数字宽度变化不能改变格子位置。
+     * 记牌器每格使用当前资源档的 advance；点数标签、数字宽度变化不能改变格子位置。
      */
     @Test
-    void 每格净前进量固定为34像素() throws Exception {
+    void 每格净前进量来自当前CounterTier() throws Exception {
         Map<CardRank, Integer> played = new EnumMap<>(CardRank.class);
         Map<CardRank, Integer> remaining = new EnumMap<>(CardRank.class);
         played.put(CardRank.THREE, 0);
@@ -122,8 +124,9 @@ class TrickHudCounterCellsTest {
 
         List<TrickHudView.CounterCell> cells = counterCells(played, remaining, false);
         assertEquals(CardRank.values().length, cells.size(), "记牌器必须固定输出 CardRank.values() 的 15 格");
+        int advance = counterAdvance();
         for (TrickHudView.CounterCell cell : cells) {
-            assertEquals(34, cell.advancePixels(), "每格净前进量必须严格为 34");
+            assertEquals(advance, cell.advancePixels(), "每格净前进量必须严格来自当前 CounterTier");
         }
         assertEquals(3, cells.get(CardRank.THREE.ordinal()).layers().size());
         assertTrue(cells.get(CardRank.TEN.ordinal()).text().contains(
@@ -217,6 +220,10 @@ class TrickHudCounterCellsTest {
             counts.put(rank, rank.isJoker() ? 1 : 4);
         }
         return counts;
+    }
+
+    private static int counterAdvance() {
+        return PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
     }
 
     private static Unsafe unsafe() throws Exception {

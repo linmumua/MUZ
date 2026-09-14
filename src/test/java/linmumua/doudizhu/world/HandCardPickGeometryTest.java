@@ -34,6 +34,16 @@ class HandCardPickGeometryTest {
     /** 手牌张数，取斗地主发牌后的实际上限。 */
     private static final int HAND_SIZE = 17;
 
+    @Test
+    void scaleEnvelopeOnlyShrinksHitAreaAndKeepsCenter() {
+        HandCardPickGeometry.Envelope source = new HandCardPickGeometry.Envelope(0.5, 1.25, 0.75);
+        HandCardPickGeometry.Envelope scaled = HandCardPickGeometry.scaleEnvelope(source, 0.90);
+
+        assertEquals(0.45, scaled.halfWidth(), 1.0e-12);
+        assertEquals(1.25, scaled.centerVOffset(), 1.0e-12);
+        assertEquals(0.675, scaled.halfHeight(), 1.0e-12);
+    }
+
     /** 牌这一帧的静止缩放，取服务器实配：private-card-scale 0.8 / private-card-size 三轴 0.5。 */
     private static final double REST_SCALE = 0.8;
 

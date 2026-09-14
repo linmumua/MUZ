@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -30,6 +31,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import linmumua.doudizhu.assets.PackAssets;
+import linmumua.doudizhu.assets.PackTiers;
 import linmumua.doudizhu.game.PlayerRole;
 import linmumua.doudizhu.model.CardRank;
 import linmumua.doudizhu.model.CardSuit;
@@ -1006,7 +1008,7 @@ class CraftEngineBundleResourcesTest {
     void avatarPixelGlyphBoxIsTenRowsTall() throws IOException {
         Map<String, Map<String, String>> entries = glyphEntries();
 
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
             for (int row = 0; row < PackAssets.AVATAR_OUTLINED_PIXELS; row++) {
                 String entry = PackAssets.avatarPixelAssetName(scale, row, 0);
                 Map<String, String> fields = entries.get(entry);
@@ -1022,15 +1024,17 @@ class CraftEngineBundleResourcesTest {
 
         // 把「行整体高 = 12*scale」钉在两行布局用的算式上，避免有人只改算式不改字形。
         // 【12 而不是 10】：王冠向上凸出 2 行也占位置，按 10 算地主王冠会压进牌行。
-        assertEquals(
-            72,
-            PackAssets.avatarRowDownOffset(0, 6),
-            "6 倍头像行整体必须按 72 像素算（12*6 = 描边 10 行 + 王冠 2 行），不是 60 也不是 48"
-        );
+        for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
+            assertEquals(
+                PackAssets.AVATAR_ROW_TOTAL_PIXELS * scale,
+                PackAssets.avatarRowDownOffset(0, scale),
+                scale + " 倍头像行整体必须按 12*scale 计算，不能按可见脸部的 8*scale 计算"
+            );
+        }
 
         // 全倍数都钉一遍：只钉 6 倍的话，有人把算式改成「6 倍特判 + 其余按 8 算」也能全绿。
-        // 逐档验的区间就是 avatar-scale 放行的那个区间（现在是 2..16，随资源包参数走）。
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        // 逐档验的集合就是 avatar-scale 放行的 profile 显式档位集合。
+        for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
             assertEquals(
                 PackAssets.AVATAR_ROW_TOTAL_PIXELS * scale,
                 PackAssets.avatarRowDownOffset(0, scale),
@@ -1247,25 +1251,21 @@ class CraftEngineBundleResourcesTest {
                 + "档 0 不生成是刻意的：桌边座位牌与 Title 用的是那三个原始码位，不能跟着 HUD 沉。"
         );
 
-        // 档 1（头像表里第一个非 0 档）的三个角色必须正好占码位起点起的前三个。
-        // 这就是 (档 - 1) 那个减一的全部含义，写错就整体平移三个码位。
-        int firstTierBase = PackAssets.botAvatarChar(null, 1).codePointAt(0);
-        assertEquals(
-            firstTierBase + 1,
-            PackAssets.botAvatarChar(PlayerRole.LANDLORD, 1).codePointAt(0),
-            "地主 bot 图标不在「无角色 + 1」上，roleIndex 排布和构建侧对不上"
-        );
-        assertEquals(
-            firstTierBase + 2,
-            PackAssets.botAvatarChar(PlayerRole.FARMER, 1).codePointAt(0),
-            "农民 bot 图标不在「无角色 + 2」上，roleIndex 排布和构建侧对不上"
-        );
-        // 第二个非 0 档必须紧接着，步长恰好等于角色数 3。
-        assertEquals(
-            firstTierBase + 3,
-            PackAssets.botAvatarChar(null, 2).codePointAt(0),
-            "相邻两个 bot 偏移档的码位间隔不是 3（角色数），档位一多就会互相盖穿"
-        );
+        // 当前 profile 可能只生成头像表档 0；此时 bot 不应偷偷发出未生成的档 1。
+        if (PackAssets.avatarDownOffsetTierCount() == 1) {
+            assertTrue(generated.isEmpty(), "头像只生成档 0 时不应生成任何 bot 偏移档");
+            assertThrows(IllegalArgumentException.class, () -> PackAssets.botAvatarChar(null, 1),
+                "profile 未生成的 bot 偏移档必须被运行期拒绝");
+        } else {
+            // 档 1（头像表里第一个非 0 档）的三个角色必须正好占码位起点起的前三个。
+            int firstTierBase = PackAssets.botAvatarChar(null, 1).codePointAt(0);
+            assertEquals(firstTierBase + 1, PackAssets.botAvatarChar(PlayerRole.LANDLORD, 1).codePointAt(0));
+            assertEquals(firstTierBase + 2, PackAssets.botAvatarChar(PlayerRole.FARMER, 1).codePointAt(0));
+            if (PackAssets.avatarDownOffsetTierCount() > 2) {
+                assertEquals(firstTierBase + 3, PackAssets.botAvatarChar(null, 2).codePointAt(0),
+                    "相邻两个 bot 偏移档的码位间隔必须是角色数 3");
+            }
+        }
         // 档 0 必须仍是原码位，不许落进 _d 那一段。
         assertEquals(
             PackAssets.botAvatarChar(null),
@@ -1376,8 +1376,7 @@ class CraftEngineBundleResourcesTest {
         Set<Integer> emitted = new HashSet<>();
         // 头像走自己那张档位表（拆表后与牌表相互独立）。
         for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
-            for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-                 scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
                 for (int row = 0; row < PackAssets.AVATAR_OUTLINED_PIXELS; row++) {
                     emitted.add(PackAssets.avatarPixelChar(scale, row, tier).codePointAt(0));
                 }
@@ -1420,8 +1419,7 @@ class CraftEngineBundleResourcesTest {
 
         Set<String> plugin = new HashSet<>();
         for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
-            for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-                 scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
                 for (int row = 0; row < PackAssets.AVATAR_OUTLINED_PIXELS; row++) {
                     plugin.add(PackAssets.avatarPixelAssetName(scale, row, tier));
                 }
@@ -1584,36 +1582,76 @@ class CraftEngineBundleResourcesTest {
 
     /**
      * label/digit 的最右下角 alpha=1 锚点必须保留，避免 Minecraft BitmapProvider 按透明边界
-     * 把 33px PNG 的实际 advance 缩短；文字 shader 会丢弃该不可见像素，因此不改变视觉。
+     * 把 PNG 的实际 advance 缩短；文字 shader 会丢弃该不可见像素，因此不改变视觉。
      */
     @Test
     void counterLabelAndDigitTexturesKeepInvisibleRightEdgeAnchors() throws IOException {
         for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
-            int expectedLabelWidth = scale == PackAssets.DEFAULT_HUD_SCALE ? 33 : Math.max(1, Math.round(33 * scale / 100.0f));
-            int expectedLabelHeight = scale == PackAssets.DEFAULT_HUD_SCALE ? 16 : Math.max(1, Math.round(16 * scale / 100.0f));
-            int expectedDigitHeight = scale == PackAssets.DEFAULT_HUD_SCALE ? 10 : Math.max(1, Math.round(10 * scale / 100.0f));
-            String directory = scale == PackAssets.DEFAULT_HUD_SCALE ? "counter" : "counter/scale_" + scale;
-            for (String file : new String[] {
-                "label_3", "label_4", "label_5", "label_6", "label_7", "label_8", "label_9", "label_10",
-                "label_j", "label_q", "label_k", "label_a", "label_2", "label_small", "label_big"
-            }) {
-                String path = "craftengine/muz/resourcepack/assets/muz/textures/font/" + directory + "/" + file + ".png";
+            PackAssets.CounterTier tier = PackAssets.counterTier(scale, 0);
+            for (CardRank rank : CardRank.values()) {
+                String texture = PackAssets.counterRankTexturePath(rank, scale);
+                String path = "craftengine/muz/resourcepack/assets/muz/textures/"
+                    + texture.substring("muz:".length());
                 BufferedImage image = readImage(path);
-                assertEquals(expectedLabelWidth, image.getWidth(), path + " 的视觉盒宽度与 scale 不一致");
-                assertEquals(expectedLabelHeight, image.getHeight(), path + " 的高度与 scale 不一致");
-                int anchor = image.getRGB(image.getWidth() - 1, image.getHeight() - 1);
-                assertEquals(1, (anchor >>> 24) & 0xFF,
+                assertEquals(tier.labelWidth(), image.getWidth(), path + " 的视觉盒宽度与 CounterTier 不一致");
+                assertEquals(tier.labelHeight(), image.getHeight(), path + " 的高度与 CounterTier 不一致");
+                assertEquals(1, (image.getRGB(image.getWidth() - 1, image.getHeight() - 1) >>> 24) & 0xFF,
                     path + " 缺少右下角 alpha=1 宽度锚点；BitmapProvider 会缩短该字形 advance");
             }
             for (int digit = 0; digit < PackAssets.COUNTER_DIGIT_COUNT; digit++) {
-                String path = "craftengine/muz/resourcepack/assets/muz/textures/font/" + directory
-                    + "/digit_" + digit + ".png";
+                String texture = PackAssets.counterDigitTexturePath(digit, scale);
+                String path = "craftengine/muz/resourcepack/assets/muz/textures/"
+                    + texture.substring("muz:".length());
                 BufferedImage image = readImage(path);
-                assertEquals(expectedLabelWidth, image.getWidth(), path + " 的视觉盒宽度与 scale 不一致");
-                assertEquals(expectedDigitHeight, image.getHeight(), path + " 的高度与 scale 不一致");
-                int anchor = image.getRGB(image.getWidth() - 1, image.getHeight() - 1);
-                assertEquals(1, (anchor >>> 24) & 0xFF,
+                assertEquals(tier.digitWidth(), image.getWidth(), path + " 的视觉盒宽度与 CounterTier 不一致");
+                assertEquals(tier.digitHeight(), image.getHeight(), path + " 的高度与 CounterTier 不一致");
+                assertEquals(1, (image.getRGB(image.getWidth() - 1, image.getHeight() - 1) >>> 24) & 0xFF,
                     path + " 缺少右下角 alpha=1 宽度锚点；BitmapProvider 会缩短该字形 advance");
+            }
+        }
+    }
+
+    @Test
+    void counterFrameTexturesMatchTierGeometryAndContainOnlyFramePixels() throws IOException {
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            PackAssets.CounterTier tier = PackAssets.counterTier(scale, 0);
+            for (boolean exhausted : new boolean[] {false, true}) {
+                String texture = PackAssets.counterFrameTexturePath(exhausted, scale);
+                String path = "craftengine/muz/resourcepack/assets/muz/textures/"
+                    + texture.substring("muz:".length());
+                BufferedImage image = readImage(path);
+                assertEquals(tier.frameWidth(), image.getWidth(), path + " 的宽度与 CounterTier 不一致");
+                assertEquals(tier.frameHeight(), image.getHeight(), path + " 的高度与 CounterTier 不一致");
+
+                boolean sawTransparent = false;
+                boolean sawFramePixel = false;
+                for (int y = 0; y < image.getHeight(); y++) {
+                    for (int x = 0; x < image.getWidth(); x++) {
+                        int alpha = (image.getRGB(x, y) >>> 24) & 0xFF;
+                        sawTransparent |= alpha == 0;
+                        sawFramePixel |= alpha > 0;
+                    }
+                }
+                assertTrue(sawFramePixel, path + " 必须包含可见框像素");
+                assertTrue(sawTransparent, path + " 内部必须保留透明区域，不能退化成实心矩形");
+                for (int y = 0; y < image.getHeight(); y++) {
+                    for (int x = 0; x < image.getWidth(); x++) {
+                        boolean outerFrame = x == 0 || y == 0
+                            || x == image.getWidth() - 1 || y == image.getHeight() - 1;
+                        boolean coreInterior = x > 0 && x < image.getWidth() - 2
+                            && y > 0 && y < image.getHeight() - 2;
+                        int alpha = (image.getRGB(x, y) >>> 24) & 0xFF;
+                        if (outerFrame) {
+                            assertTrue(alpha > 0, path + " 外框像素 (" + x + "," + y + ") 不得透明");
+                        } else if (coreInterior) {
+                            assertEquals(0, alpha, path + " 核心内部像素 (" + x + "," + y + ") 必须透明");
+                        }
+                    }
+                }
+                String index = read("craftengine/muz/_bundle_index.txt");
+                assertTrue(index.lines().anyMatch(line -> line.trim().equals(
+                    "resourcepack/assets/muz/textures/" + texture.substring("muz:".length()))),
+                    path + " 未进入 bundle 索引");
             }
         }
     }
@@ -1740,8 +1778,8 @@ class CraftEngineBundleResourcesTest {
     }
 
     /**
-     * hotbar 75/100/125 档必须是独立字体、独立码位、1:1 原生 PNG 几何；
-     * 额外档只允许从默认底图/选中框最近邻派生。
+     * Hotbar 当前 profile 生成的每一档必须是独立字体、独立码位、1:1 原生 PNG 几何。
+     * 生成集合来自 PackAssets，不得假设旧版固定的 75/100/125 全量档位。
      */
     @Test
     void hotbarScaleAssetsMatchPackAssetsGeometryAndCodepoints() throws IOException {
@@ -1792,18 +1830,39 @@ class CraftEngineBundleResourcesTest {
         assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length, fonts.size(), "每个 hotbar scale 必须独立字体");
         assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length * 2, fontChars.size(),
             "hotbar 底图与选中框不能共享同一组(font,char)");
-        assertEquals(0xEF00, PackAssets.hotbarTier(100).baseCodepoint());
-        assertEquals(0xEF02, PackAssets.hotbarTier(100).selectCodepoint());
-        assertEquals(0xEF03, PackAssets.hotbarTier(100).selectDebugCodepoint());
-        assertEquals(183, PackAssets.hotbarTier(100).advance());
-        assertEquals(21, PackAssets.hotbarTier(100).selectAdvance());
+        PackAssets.HotbarTier defaultTier = PackAssets.hotbarTier(PackAssets.DEFAULT_HUD_SCALE);
+        assertEquals(0xEF00, defaultTier.baseCodepoint());
+        assertEquals(0xEF02, defaultTier.selectCodepoint());
+        assertEquals(0xEF03, defaultTier.selectDebugCodepoint());
+        assertEquals(defaultTier.width() + 1, defaultTier.advance());
+        assertEquals(defaultTier.selectWidth() + 1, defaultTier.selectAdvance());
+    }
+
+    /** 当前资源 profile 只生成一个 Hotbar 档位，未生成的旧档位不能被测试默认为存在。 */
+    @Test
+    void hotbarProfileGeneratesExactlyOneScale() {
+        assertEquals(1, PackAssets.HOTBAR_SCALE_TIERS.length,
+            "当前 profile 的 Hotbar 资源契约是单档；切换档位应重新生成并下发资源包");
+        assertEquals(PackAssets.DEFAULT_HUD_SCALE, PackAssets.HOTBAR_SCALE_TIERS[0],
+            "单档 Hotbar 必须保持默认 scale，避免运行期发出未声明的固定码位");
     }
 
     @Test
     void hotbarScaleSlotGeometryIsIntegerAndAnchored() {
-        assertHotbarGeometry(PackAssets.hotbarTier(75), 137, 17, 14, 15, 2, 1, 1, 0);
-        assertHotbarGeometry(PackAssets.hotbarTier(100), 182, 22, 18, 20, 2, 1, 1, 0);
-        assertHotbarGeometry(PackAssets.hotbarTier(125), 228, 28, 23, 25, 3, 1, 1, 0);
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+            assertHotbarGeometry(
+                tier,
+                tier.width(),
+                tier.height(),
+                tier.slotWidth(),
+                tier.slotStep(),
+                tier.slotsStartX(),
+                tier.slotsStartY(),
+                tier.selectStartX(),
+                tier.selectStartY()
+            );
+        }
     }
 
     private static void assertHotbarGeometry(

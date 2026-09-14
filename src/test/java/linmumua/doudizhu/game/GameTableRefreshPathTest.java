@@ -57,19 +57,21 @@ class GameTableRefreshPathTest {
     }
 
     /**
-     * 出牌回合推进后仍然必须刷新一次牌桌，否则牌面根本不更新。
+     * 出牌回合推进必须经由 {@code promptPlayTurn()} 进入统一刷新链路，否则牌面不会更新。
      *
-     * <p>上一条只说「不许绕过闸门」，不能变成「干脆不刷新」——那会把闪烁换成
-     * 「打出去的牌还留在手上」。这条守住正路仍然在：
-     * {@code advanceAfterResolvedTurn} 与 {@code promptPlayTurn} 都得走 refreshPhysicalTable。
+     * <p>{@code advanceAfterResolvedTurn(..., false)} 是真人自动不要的状态推进分支；它故意不
+     * 直接刷新，回调随后只调用一次 {@code promptPlayTurn()}，避免同一回合重复重建整手牌。
+     * 因此这里同时锁住「推进方法委托给 prompt」和「prompt 仍保留唯一物理刷新」。
      */
     @Test
     void turnAdvanceStillRefreshesThroughTheSignatureGate() throws IOException {
         String source = Files.readString(TABLE);
 
-        assertTrue(methodBody(source, "private void advanceAfterResolvedTurn(UUID playerId, boolean continueFlow)")
-                .contains("refreshPhysicalTable()"),
-            "回合推进后不再刷新牌桌：打出去的牌会留在手上不消失");
+        String advance = methodBody(source, "private void advanceAfterResolvedTurn(UUID playerId, boolean continueFlow)");
+        assertTrue(advance.contains("promptPlayTurn();\n        runBotActionIfNeeded();"),
+            "回合推进后必须经 promptPlayTurn 继续正常刷新与机器人流程");
+        assertTrue(!advance.contains("refreshPhysicalTable();"),
+            "回合推进不得绕过统一入口重复刷新物理牌桌");
         assertTrue(methodBody(source, "private void promptPlayTurn()").contains("refreshPhysicalTable()"),
             "出牌回合开始时不再刷新牌桌：按钮与牌面停留在上一个回合的状态");
     }

@@ -34,6 +34,24 @@ class DoudizhuRuntimeSyncTest {
     }
 
     @Test
+    void Hotbar默认配置与当前资源profile一致() throws IOException {
+        String config = Files.readString(Path.of("src/main/resources/config.yml"));
+        String profile = Files.readString(Path.of("muz-resource-profile.yml"));
+        assertTrue(config.contains("hotbar-hud:\n")
+                && config.contains("  enabled: false\n")
+                && config.contains("  scale: 100\n")
+                && config.contains("  offset-x: 0\n")
+                && config.contains("  offset-y: 0\n"),
+            "Hotbar 默认配置必须保持关闭、100% 档、零位移，避免默认启动时误推送或选到未生成档位");
+        assertTrue(profile.contains("hotbar:\n") && profile.contains("  scale: 100\n"),
+            "默认资源 profile 必须生成与 config.yml 对齐的 100% Hotbar 档位");
+        assertTrue(config.contains("plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml"),
+            "offset-y 注释必须指向实际 Hotbar 调试覆盖层路径");
+        assertFalse(config.contains("plugins/CraftEngine/resources/muz_hotbar_debug/"),
+            "配置说明不得继续引用已不存在的旧 Hotbar 覆盖层目录");
+    }
+
+    @Test
     void HUD轻量重载同时覆盖TrickHud和Hotbar运行态() throws IOException {
         String source = Files.readString(PLUGIN);
         int at = source.indexOf("public void reloadHudRuntimeState()");
@@ -59,13 +77,19 @@ class DoudizhuRuntimeSyncTest {
         String hotbar = Files.readString(HOTBAR);
         int at = hotbar.indexOf("public void reloadEnabled(boolean configuredEnabled, boolean suspended)");
         assertTrue(at > 0, "reloadEnabled 应当存在");
-        String body = hotbar.substring(at, at + 260);
+        String body = hotbar.substring(at, Math.min(hotbar.length(), at + 500));
         assertTrue(body.contains("if (configuredEnabled) {"),
             "启停只能由 configuredEnabled 决定；把 suspended 也纳入判断会让面板一开就停推送");
         assertTrue(body.contains("this.useDebugOverlayGlyph = suspended && overlayReady;"),
             "suspended 应当只在覆盖层已验证就绪时切换字形来源，不再用于停推送");
+        assertTrue(body.contains("overlayReadyScale != scale"),
+            "Debug Web 覆盖层必须绑定当前 hotbar scale，不能跨档发送未声明码位");
         assertTrue(hotbar.contains("hotbarHudDebugGlyphText(scale)"),
             "接管状态下必须改用当前缩放档的覆盖层字形，否则拖动 offset-y 在游戏内没有任何效果");
+        assertTrue(hotbar.contains("private int overlayReadyScale = -1"),
+            "overlay 就绪状态必须记录具体 scale，不能用全局布尔值跨档复用");
+        assertTrue(hotbar.contains("overlayReadyScale == scale"),
+            "发送调试字形前必须确认 overlay scale 与当前 Hotbar scale 一致");
     }
 
     @Test
@@ -97,6 +121,9 @@ class DoudizhuRuntimeSyncTest {
             "必须排除机器人后才查 Bukkit Player，不能把机器人 UUID 当真人接收者");
         assertTrue(receiverAdd > playerLookup && customSend > receiverAdd,
             "只有通过 PLAYING、真人座位、在线玩家三道门后，才允许加入接收集合并发送自定义 Hotbar");
+        assertTrue(body.indexOf("!player.isOnline()", playerLookup) > playerLookup
+                && body.indexOf("!player.isOnline()", playerLookup) < receiverAdd,
+            "Bukkit Player 查找后必须显式确认 isOnline，不能把离线/失效对象当作 Hotbar 接收者");
         assertFalse(body.contains("Bukkit.getOnlinePlayers()"),
             "不能退回给所有在线玩家推送，否则非牌桌玩家也会被替换物品栏");
 
@@ -105,8 +132,34 @@ class DoudizhuRuntimeSyncTest {
         String predicate = stripComments(hotbar.substring(predicateAt, hotbar.indexOf("public void clearOverlay", predicateAt)));
         assertTrue(predicate.contains("table.getPhase() == GamePhase.PLAYING"),
             "单玩家判断也必须锁定 PLAYING，不能让 BIDDING/DOUBLING/LOBBY 排入 overlay 队列");
+        assertTrue(predicate.contains("!player.isOnline()"),
+            "单玩家判断必须显式确认在线，不能只靠 Bukkit.getPlayer 的偶然空值兜底");
         assertTrue(predicate.contains("!table.isBot(player.getUniqueId())"),
             "单玩家判断必须排除机器人座位，不能只靠 Bukkit.getPlayer 的偶然空值兜底");
+    }
+
+    @Test
+    void PLAYING阶段所有ActionBar路由都经过Hotbar服务() throws IOException {
+        String source = Files.readString(GAME_TABLE);
+        int broadcastAt = source.indexOf("private void broadcast(Component message)");
+        int actionAt = source.indexOf("private void broadcastActionBar(Component message)", broadcastAt);
+        int persistentAt = source.indexOf("private void broadcastPersistentActionBar(int remainingSeconds)");
+        assertTrue(broadcastAt >= 0 && actionAt > broadcastAt && persistentAt > actionAt,
+            "GameTable 的三条 ActionBar 路由必须可定位");
+
+        String broadcast = source.substring(broadcastAt, actionAt);
+        String action = source.substring(actionAt, persistentAt);
+        String persistent = source.substring(persistentAt, source.indexOf("    /**", persistentAt));
+        for (String route : new String[] {broadcast, action, persistent}) {
+            assertTrue(route.contains("phase == GamePhase.PLAYING")
+                    && route.contains("hotbarHud.showOverlay"),
+                "PLAYING 阶段的 ActionBar 必须交给 HotbarHudService，不能绕回裸 sendActionBar");
+        }
+        int onlineAt = source.indexOf("private Player onlinePlayer(UUID playerId)");
+        assertTrue(onlineAt >= 0, "GameTable 必须集中提供在线玩家查询");
+        String online = source.substring(onlineAt, source.indexOf("    private void playSoundAll", onlineAt));
+        assertTrue(online.contains("player != null && player.isOnline()"),
+            "GameTable 的 ActionBar 路由必须显式排除离线玩家");
     }
 
     @Test

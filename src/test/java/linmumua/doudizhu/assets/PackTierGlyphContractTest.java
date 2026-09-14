@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import linmumua.doudizhu.assets.PackTiers;
 import linmumua.doudizhu.model.CardRank;
 import linmumua.doudizhu.model.CardSuit;
 import linmumua.doudizhu.model.DoudizhuCard;
@@ -80,8 +81,8 @@ class PackTierGlyphContractTest {
     /**
      * 列出构建产物里 configuration/images/ 下的所有拆分文件。
      *
-     * <p>【为什么是目录而不是单份 images.yml】：这些条目是乘出来的（牌 55 张 ×
-     * 25 高度档 × 41 偏移档，头像 201 偏移档 × 15 scale × 10 行），合计 9 万多条。
+     * <p>【为什么是目录而不是单份 images.yml】：这些条目是按当前 profile 乘出来的
+     * （牌 55 张 × 生成的高度档 × 生成的偏移档，头像生成的偏移档 × 生成的 scale × 10 行）。
      * 单份会超过 SnakeYAML Engine 的 3,145,728 code point 上限，CraftEngine 直接抛
      * YamlEngineException、整包不生效——线上已经因此炸过一次，所以生成器按牌高与
      * scale 切成了多份。
@@ -117,12 +118,13 @@ class PackTierGlyphContractTest {
         int downTierCount = PackAssets.cardGlyphDownOffsetTierCount();
         int tiersPerFont = 144;
 
-        // 逐档全覆盖代价太大（1025 档），挑这些：两端、跨字体边界前后各一档、
-        // 以及第二三次切分的边界。边界那几档是算式写歪时唯一会暴露的地方。
+        // 逐档全覆盖代价太大；按当前生成集合挑选两端和字体切分边界。
+        // profile 缩减到单档时，越过实际集合的候选值会被安全跳过。
+        int totalTiers = PackAssets.cardGlyphHeightTierCount() * downTierCount;
         int[] interesting = {
             0, 1, tiersPerFont - 1, tiersPerFont, tiersPerFont + 1,
             2 * tiersPerFont - 1, 2 * tiersPerFont, 3 * tiersPerFont,
-            downTierCount * PackAssets.cardGlyphHeightTierCount() - 1,
+            totalTiers - 1,
         };
         for (int tier : interesting) {
             int heightTier = tier / downTierCount;
@@ -148,15 +150,14 @@ class PackTierGlyphContractTest {
         int tiersPerFont = 40;
         int last = PackAssets.avatarDownOffsetTierCount() - 1;
         int[] interesting = {
-            0, 1, tiersPerFont - 1, tiersPerFont, tiersPerFont + 1,
-            2 * tiersPerFont, 3 * tiersPerFont, 4 * tiersPerFont, 5 * tiersPerFont, last,
+            0, Math.min(1, last), Math.min(tiersPerFont - 1, last),
+            Math.min(tiersPerFont, last), Math.min(tiersPerFont + 1, last), last,
         };
         for (int downTier : interesting) {
             if (downTier > last) {
                 continue;
             }
-            for (int scale : new int[] {
-                PackAssets.AVATAR_PIXEL_MIN_SCALE, 6, PackAssets.AVATAR_PIXEL_MAX_SCALE}) {
+            for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
                 for (int row : new int[] {0, PackAssets.AVATAR_OUTLINED_PIXELS - 1}) {
                     String name = PackAssets.avatarPixelAssetName(scale, row, downTier);
                     Entry entry = images.get(name);
@@ -179,8 +180,7 @@ class PackTierGlyphContractTest {
             if (downTier > last) {
                 continue;
             }
-            for (int scale : new int[] {
-                PackAssets.AVATAR_PIXEL_MIN_SCALE, 6, PackAssets.AVATAR_PIXEL_MAX_SCALE}) {
+            for (int scale : PackTiers.AVATAR_SCALE_TIERS) {
                 for (int row = 0; row < PackAssets.AVATAR_CROWN_PIXELS; row++) {
                     String name = PackAssets.avatarCrownAssetName(scale, row, downTier);
                     Entry entry = images.get(name);
@@ -238,8 +238,8 @@ class PackTierGlyphContractTest {
         }
         assertTrue(!metrics.isEmpty(), "没解析到任何 height/ascent");
 
-        int scale = 6;
-        int downTier = PackAssets.nearestAvatarDownOffsetTier(122);
+        int scale = PackTiers.AVATAR_SCALE_TIERS[0];
+        int downTier = PackAssets.avatarDownOffsetTierCount() - 1;
         int downOffset = PackAssets.avatarDownOffsetAt(downTier);
 
         // 白块（可见的那一格）在基线上方的区间是 [height - d - scale, height - d]。
@@ -289,7 +289,8 @@ class PackTierGlyphContractTest {
         int last = PackAssets.avatarDownOffsetTierCount() - 1;
         for (int downTier = 0; downTier <= last; downTier++) {
             int cp = codepointOf(PackAssets.avatarPixelChar(
-                PackAssets.AVATAR_PIXEL_MAX_SCALE, PackAssets.AVATAR_OUTLINED_PIXELS - 1, downTier));
+                PackTiers.AVATAR_SCALE_TIERS[PackTiers.AVATAR_SCALE_TIERS.length - 1],
+                PackAssets.AVATAR_OUTLINED_PIXELS - 1, downTier));
             assertTrue(cp <= PackTiers.MAX_GLYPH_CODEPOINT,
                 "头像档 " + downTier + " 的码位 0x" + Integer.toHexString(cp) + " 超出 BMP");
         }

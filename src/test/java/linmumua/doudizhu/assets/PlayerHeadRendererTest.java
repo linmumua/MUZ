@@ -133,8 +133,7 @@ class PlayerHeadRendererTest {
      */
     @Test
     void 同一行相邻两列的方块必须紧邻无缝() {
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             int rows = PackAssets.AVATAR_HEAD_PIXELS;
             List<Ink> inks = layout(
                 PlayerHeadRenderer.renderMiniMessage(opaqueHead(), scale, FAKE_OFFSET), scale);
@@ -188,8 +187,7 @@ class PlayerHeadRendererTest {
      */
     @Test
     void advanceWidth必须等于渲染的净前进量() {
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             String plain = PlayerHeadRenderer.renderMiniMessage(opaqueHead(), scale, FAKE_OFFSET);
             assertEquals(PlayerHeadRenderer.advanceWidth(scale, false), netAdvance(plain, scale),
                 "倍数 " + scale + "（无描边）：advanceWidth 与实际净前进量脱钩，槽内居中会整体偏");
@@ -211,8 +209,7 @@ class PlayerHeadRendererTest {
      */
     @Test
     void 净前进量必须等于最右一列墨水的右缘() {
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             String rendered = PlayerHeadRenderer.renderMiniMessage(opaqueHead(), scale, FAKE_OFFSET);
             int rightmost = layout(rendered, scale).stream().mapToInt(Ink::right).max().orElseThrow();
             assertEquals(rightmost, netAdvance(rendered, scale),
@@ -328,14 +325,13 @@ class PlayerHeadRendererTest {
     /**
      * 列距必须跟着倍数走，不能写死。
      *
-     * <p>倍数是 config 可调的（4..10）。这里对每个倍数都验「行首归零 + 净前进量 = rows * scale」，
+     * <p>倍数是 config 可调的，按当前 profile 的显式头像档位生成。这里对每个倍数都验「行首归零 + 净前进量 = rows * scale」，
      * 写死某个倍数的值会在服主改 avatar-scale 之后错位。
      */
     @Test
     void 列距与换行回退都跟着倍数走() {
         int rows = PackAssets.AVATAR_HEAD_PIXELS;
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             String rendered = PlayerHeadRenderer.renderMiniMessage(opaqueHead(), scale, FAKE_OFFSET);
             List<Ink> inks = layout(rendered, scale);
             for (int row = 0; row < rows; row++) {
@@ -390,16 +386,32 @@ class PlayerHeadRendererTest {
     }
 
     @Test
+    void skinsTooSmallForTheBaseHeadReturnATransparentHeadInsteadOfThrowing() {
+        BufferedImage skin = new BufferedImage(8, 8, BufferedImage.TYPE_INT_ARGB);
+
+        int[][] head = assertDoesNotThrow(() -> PlayerHeadRenderer.extractHead(skin));
+
+        assertEquals(PackAssets.AVATAR_HEAD_PIXELS, head.length);
+        for (int[] row : head) {
+            assertEquals(PackAssets.AVATAR_HEAD_PIXELS, row.length);
+            for (int argb : row) {
+                assertEquals(0, argb, "缺少 base 头部区域时应返回透明头像");
+            }
+        }
+    }
+
+    @Test
     void scalesOutsideThePregeneratedRangeAreRejected() {
-        // 资源包只预生成了 4..10 倍的方块字形，越界会渲染成豆腐块，必须当场报错。
+        // 资源包只预生成 profile 声明的头像档位，未声明倍数会渲染成豆腐块，必须当场报错。
         assertThrows(IllegalArgumentException.class,
             () -> PackAssets.avatarPixelChar(PackAssets.AVATAR_PIXEL_MIN_SCALE - 1, 0));
         assertThrows(IllegalArgumentException.class,
             () -> PackAssets.avatarPixelChar(PackAssets.AVATAR_PIXEL_MAX_SCALE + 1, 0));
         // 行号上界是描边后的 10 行，不是 8 行：描边多出的两行也预生成了字形。
         assertThrows(IllegalArgumentException.class,
-            () -> PackAssets.avatarPixelChar(6, PackAssets.AVATAR_OUTLINED_PIXELS));
-        assertThrows(IllegalArgumentException.class, () -> PackAssets.avatarPixelChar(6, -1));
+            () -> PackAssets.avatarPixelChar(PackAssets.AVATAR_PIXEL_SCALE_TIERS[0], PackAssets.AVATAR_OUTLINED_PIXELS));
+        assertThrows(IllegalArgumentException.class,
+            () -> PackAssets.avatarPixelChar(PackAssets.AVATAR_PIXEL_SCALE_TIERS[0], -1));
     }
 
     @Test
@@ -420,9 +432,11 @@ class PlayerHeadRendererTest {
         assertNotEquals("minecraft:default", PackAssets.BOT_AVATAR_FONT,
             "不能挂回 default");
 
-        assertNotEquals(PackAssets.avatarPixelChar(6, 0), PackAssets.avatarPixelChar(7, 0),
+        int firstScale = PackAssets.AVATAR_PIXEL_SCALE_TIERS[0];
+        int secondScale = PackAssets.AVATAR_PIXEL_SCALE_TIERS[1];
+        assertNotEquals(PackAssets.avatarPixelChar(firstScale, 0), PackAssets.avatarPixelChar(secondScale, 0),
             "不同倍数必须是不同字形");
-        assertFalse(PackAssets.avatarPixelChar(6, 0).equals(PackAssets.avatarPixelChar(6, 1)),
+        assertFalse(PackAssets.avatarPixelChar(firstScale, 0).equals(PackAssets.avatarPixelChar(firstScale, 1)),
             "不同行必须是不同字形");
     }
 
@@ -451,8 +465,7 @@ class PlayerHeadRendererTest {
         // 拿牌表的档数来遍历会漏掉或多出档位，唯一性就验不全。
         for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
             String font = PackAssets.avatarPixelFont(tier);
-            for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-                 scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
                 for (int row = 0; row < PackAssets.AVATAR_OUTLINED_PIXELS; row++) {
                     String glyph = PackAssets.avatarPixelChar(scale, row, tier);
                     // key 是「字体 + 码位」：同一个码位落在不同字体上是两个不同字形。
@@ -482,8 +495,7 @@ class PlayerHeadRendererTest {
             assertEquals(PackAssets.AVATAR_CROWN_FONT, font,
                 "王冠族本该单张字体装下全部档位；出现切分说明码位预算变了，"
                     + "crownMiniMessage 的字体标签要跟着核对");
-            for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-                 scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+            for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
                 for (int row = 0; row < PackAssets.AVATAR_CROWN_PIXELS; row++) {
                     String glyph = PackAssets.avatarCrownChar(scale, row, tier);
                     String slot = font + "@" + Integer.toHexString(glyph.codePointAt(0));
@@ -511,18 +523,12 @@ class PlayerHeadRendererTest {
         }
         java.util.function.IntFunction<String> offsets = px -> "[" + px + "]";
 
-        int deepTier = 40;
-        assertNotEquals(PackAssets.avatarPixelFont(0), PackAssets.avatarPixelFont(deepTier),
-            "档 0 与档 " + deepTier + " 必须落在不同字体上，否则这条测试验不到东西");
-
-        String shallow = PlayerHeadRenderer.renderMiniMessage(face, scale, offsets, 0);
-        String deep = PlayerHeadRenderer.renderMiniMessage(face, scale, offsets, deepTier);
-
-        assertTrue(shallow.contains("<font:" + PackAssets.avatarPixelFont(0) + ">"),
-            "浅档必须套档 0 的字体：" + shallow.substring(0, Math.min(80, shallow.length())));
-        assertTrue(deep.contains("<font:" + PackAssets.avatarPixelFont(deepTier) + ">"),
-            "深档必须套 " + PackAssets.avatarPixelFont(deepTier) + "，套错整片脸是豆腐块："
-                + deep.substring(0, Math.min(80, deep.length())));
+        for (int tier = 0; tier < PackAssets.avatarDownOffsetTierCount(); tier++) {
+            String rendered = PlayerHeadRenderer.renderMiniMessage(face, scale, offsets, tier);
+            assertTrue(rendered.contains("<font:" + PackAssets.avatarPixelFont(tier) + ">"),
+                "档 " + tier + " 必须套 " + PackAssets.avatarPixelFont(tier)
+                    + "，套错整片脸是豆腐块：" + rendered.substring(0, Math.min(80, rendered.length())));
+        }
     }
 
     /**

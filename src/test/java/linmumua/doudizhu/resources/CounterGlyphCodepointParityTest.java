@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import linmumua.doudizhu.assets.PackAssets;
+import linmumua.doudizhu.assets.PackTiers;
 import linmumua.doudizhu.model.CardRank;
 import org.junit.jupiter.api.Test;
 
@@ -116,54 +117,73 @@ class CounterGlyphCodepointParityTest {
     }
 
     @Test
-    void counterOffsetTableKeepsOld201EntriesAndDoesNotBorrowAvatarStep() {
-        assertEquals(201, PackAssets.counterDownOffsetTierCount(), "counter 必须保留 0..400 step2 的 201 档");
-        assertEquals(0, PackAssets.counterDownOffsetAt(0));
-        assertEquals(400, PackAssets.counterDownOffsetAt(200));
-        assertEquals(2, PackAssets.counterDownOffsetAt(1));
-        assertEquals(-1, PackAssets.counterDownOffsetTierOf(1), "counter 不应生成 step1 的偏移声明");
-        assertEquals(401, PackAssets.avatarDownOffsetTierCount(), "头像表应独立使用 0..400 step1");
-        assertEquals(1, PackAssets.avatarDownOffsetAt(1));
+    void counterAndAvatarOffsetTablesMatchTheProfileGeneratedCollections() {
+        assertEquals(PackTiers.COUNTER_DOWN_OFFSET_TIERS.length, PackAssets.counterDownOffsetTierCount());
+        assertEquals(PackTiers.AVATAR_DOWN_OFFSET_TIERS.length, PackAssets.avatarDownOffsetTierCount());
+        assertTrue(PackAssets.counterDownOffsetTierCount() > 0, "当前 profile 至少要生成一个 counter 偏移档");
+        assertTrue(PackAssets.avatarDownOffsetTierCount() > 0, "当前 profile 至少要生成一个头像偏移档");
+        assertEquals(PackTiers.COUNTER_DOWN_OFFSET_TIERS[0], PackAssets.counterDownOffsetAt(0));
+        assertEquals(PackTiers.AVATAR_DOWN_OFFSET_TIERS[0], PackAssets.avatarDownOffsetAt(0));
+        assertTrue(PackAssets.counterDownOffsetTierCount() < 201,
+            "当前 profile 已精简 counter 资源，不应退回旧版 0..400 step2 全量 201 档");
+        assertTrue(PackAssets.avatarDownOffsetTierCount() < 401,
+            "当前 profile 已精简头像资源，不应退回旧版 0..400 step1 全量 401 档");
+        int ungenerated = PackAssets.counterDownOffsetAt(0) + 1;
+        if (PackAssets.counterDownOffsetTierOf(ungenerated) >= 0) {
+            ungenerated++;
+        }
+        assertEquals(-1, PackAssets.counterDownOffsetTierOf(ungenerated),
+            "counter 不应为 profile 未生成的偏移档提供声明");
     }
 
     @Test
     void counterScaleGeometryAndLayerAnchorsAreIntegerAndStable() {
+        // 独立锁定批准的基础几何，不能仅让生成侧与运行期互相证明自洽。
         PackAssets.CounterTier base = PackAssets.counterTier(100, 0);
-        assertEquals(33, base.width());
-        assertEquals(36, base.height());
-        assertEquals(34, base.advance());
-        assertEquals(16, base.labelHeight());
-        assertEquals(16, base.labelAscent());
-        assertEquals(-4, base.frameAscent());
-        assertEquals(-7, base.digitAscent());
-        assertEquals(20, base.frameTopDelta());
-        assertEquals(3, base.digitInset());
-        assertEquals(20, base.frameY());
-        assertEquals(23, base.digitY());
+        assertEquals(21, base.width());
+        assertEquals(27, base.height());
+        assertEquals(22, base.advance());
+        assertEquals(12, base.labelHeight());
+        assertEquals(12, base.frameHeight());
+        assertEquals(8, base.digitHeight());
+        assertEquals(12, base.labelAscent());
+        assertEquals(-3, base.frameAscent());
+        assertEquals(-6, base.digitAscent());
+        assertEquals(358, 15 * base.advance() + 14 * 2);
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            PackAssets.CounterTier tier = PackAssets.counterTier(scale, 0);
 
-        PackAssets.CounterTier small = PackAssets.counterTier(75, 0);
-        assertEquals(25, small.width());
-        assertEquals(27, small.height());
-        assertEquals(26, small.advance());
-        assertEquals(12, small.labelHeight());
-        assertEquals(8, small.digitHeight());
-        assertEquals(12, small.labelAscent());
-        assertEquals(-3, small.frameAscent());
-        assertEquals(-5, small.digitAscent());
-        assertEquals(15, small.frameTopDelta());
-        assertEquals(2, small.digitInset());
+            assertEquals(tier.labelWidth(), tier.width());
+            assertEquals(tier.labelAdvance(), tier.advance());
+            assertEquals(tier.frameAdvance(), tier.advance());
+            assertEquals(tier.digitAdvance(), tier.advance());
+            assertEquals(tier.labelWidth(), tier.frameWidth());
+            assertEquals(tier.labelWidth(), tier.digitWidth());
+            assertEquals(Math.max(
+                tier.frameY() + tier.frameHeight(),
+                tier.digitY() + tier.digitHeight()), tier.height());
+            assertEquals(tier.labelAscent() - tier.frameAscent(), tier.frameTopDelta());
+            assertEquals(tier.frameAscent() - tier.digitAscent(), tier.digitInset());
+            assertEquals(tier.frameTopDelta(), tier.frameY());
+            assertEquals(tier.labelAscent() - tier.digitAscent(), tier.digitY());
+        }
+    }
 
-        PackAssets.CounterTier large = PackAssets.counterTier(125, 0);
-        assertEquals(41, large.width());
-        assertEquals(45, large.height());
-        assertEquals(42, large.advance());
-        assertEquals(20, large.labelHeight());
-        assertEquals(13, large.digitHeight());
-        assertEquals(20, large.labelAscent());
-        assertEquals(-5, large.frameAscent());
-        assertEquals(-9, large.digitAscent());
-        assertEquals(25, large.frameTopDelta());
-        assertEquals(4, large.digitInset());
+    @Test
+    void counterDefaultCodepointStartsAtE900AndKeepsFifteenRanks() {
+        assertEquals(0xE900, PackAssets.COUNTER_GLYPH_CODEPOINT_START);
+        assertEquals(CardRank.values().length, PackAssets.COUNTER_LABEL_COUNT);
+        assertEquals(15, PackAssets.COUNTER_LABEL_COUNT);
+
+        PackAssets.CounterTier tier = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0);
+        assertEquals(PackAssets.COUNTER_GLYPH_CODEPOINT_START, tier.codepointStart());
+        for (CardRank rank : CardRank.values()) {
+            assertEquals(
+                tier.codepointStart() + rank.ordinal(),
+                PackAssets.counterRankChar(rank, PackAssets.DEFAULT_HUD_SCALE, 0).codePointAt(0),
+                "默认 counter 起点后的标签必须严格按 CardRank 顺序连续分配"
+            );
+        }
     }
 
     @Test
@@ -192,11 +212,14 @@ class CounterGlyphCodepointParityTest {
             seen.put(tier.font(), codepoints);
         }
         assertEquals(PackAssets.COUNTER_SCALE_TIERS.length, seen.size(), "每个 counter scale 必须使用独立字体");
-        assertEquals(0xE900, PackAssets.counterTier(100, 0).codepointStart());
-        assertEquals(0xFA45,
-            PackAssets.counterTier(100, PackAssets.counterDownOffsetTierCount() - 1).codepointStart()
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            PackAssets.CounterTier tier = PackAssets.counterTier(scale, 0);
+            int lastCodepoint = tier.codepointStart()
                 + (PackAssets.counterDownOffsetTierCount() - 1) * PackAssets.COUNTER_GLYPHS_PER_TIER
-                + PackAssets.COUNTER_GLYPHS_PER_TIER - 1);
+                + PackAssets.COUNTER_GLYPHS_PER_TIER - 1;
+            assertTrue(tier.codepointStart() >= 0xE000 && lastCodepoint <= 0xFFFF,
+                "counter scale=" + scale + " 的当前 profile 码位必须留在 BMP 内");
+        }
     }
 
     private static void assertFrameEntry(

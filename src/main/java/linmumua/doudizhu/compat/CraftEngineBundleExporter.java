@@ -29,6 +29,9 @@ public final class CraftEngineBundleExporter {
      * 否则每次导出都会把刚写下的指纹当成「清单外的残留」删掉，判定就永久失效。
      */
     private static final String BUNDLE_FINGERPRINT_FILE = ".muz-bundle-fingerprint";
+    /** 运行期 Hotbar overlay 直接位于 muz bundle 内，但不是 JAR 固定清单。 */
+    private static final String RUNTIME_HOTBAR_OVERLAY = "configuration/images/hotbar_debug.yml";
+    private static final String LEGACY_HOTBAR_OVERLAY_DIR = "muz_hotbar_debug";
 
     private final DoudizhuPlugin plugin;
 
@@ -50,11 +53,13 @@ public final class CraftEngineBundleExporter {
             return BundleExportResult.skipped("CraftEngine 未检测到，已跳过");
         }
 
-        Path targetRoot = craftEngine.getDataFolder().toPath().resolve("resources").resolve("muz");
+        Path resourcesRoot = craftEngine.getDataFolder().toPath().resolve("resources");
+        Path targetRoot = resourcesRoot.resolve("muz");
         List<String> entries = List.of();
         int copiedEntries = 0;
         try (InputStream stream = plugin.getResource(BUNDLE_INDEX)) {
             cleanupLegacyGlobalHotbarSprites(targetRoot);
+            cleanupLegacyHotbarOverlay(resourcesRoot);
             if (stream == null) {
                 plugin.getLogger().warning("CraftEngine bundle index is missing, skipping bundle export.");
                 return BundleExportResult.failed("bundle 索引缺失", 0, 0);
@@ -211,6 +216,27 @@ public final class CraftEngineBundleExporter {
         Files.deleteIfExists(spriteRoot.resolve("hotbar_selection.png"));
     }
 
+    private static void cleanupLegacyHotbarOverlay(Path resourcesRoot) throws IOException {
+        Path legacyRoot = resourcesRoot.resolve(LEGACY_HOTBAR_OVERLAY_DIR);
+        if (!Files.exists(legacyRoot)) {
+            return;
+        }
+        try (var walk = Files.walk(legacyRoot)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException exception) {
+                    throw new RuntimeException(exception);
+                }
+            });
+        } catch (RuntimeException exception) {
+            if (exception.getCause() instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw exception;
+        }
+    }
+
     private void cleanupStaleFiles(Path targetRoot, List<String> bundledEntries) throws IOException {
         if (!Files.exists(targetRoot)) {
             return;
@@ -221,6 +247,7 @@ public final class CraftEngineBundleExporter {
             .collect(Collectors.toCollection(java.util.HashSet::new));
         // 指纹存档不在清单里，但它是我们自己写的，不能当残留删掉
         expectedFiles.add(targetRoot.resolve(BUNDLE_FINGERPRINT_FILE));
+        expectedFiles.add(targetRoot.resolve(RUNTIME_HOTBAR_OVERLAY));
 
         try (var walk = Files.walk(targetRoot)) {
             List<Path> existing = walk

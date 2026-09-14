@@ -147,7 +147,7 @@ public final class PackAssets {
     public static final int COUNTER_FRAME_WIDTH = PackTiers.COUNTER_FRAME_WIDTH;
     public static final int COUNTER_FRAME_HEIGHT = PackTiers.COUNTER_FRAME_HEIGHT;
 
-    /** 分层记牌器 ascent 基准：label=16、frame=-4、digit=-7，均再减头像下移档。 */
+    /** 分层记牌器 ascent 基准：由构建期紧凑几何生成，均再减记牌器自己的下移档。 */
     public static final int COUNTER_LABEL_ASCENT = PackTiers.COUNTER_LABEL_ASCENT;
     public static final int COUNTER_FRAME_ASCENT = PackTiers.COUNTER_FRAME_ASCENT;
     public static final int COUNTER_DIGIT_ASCENT = PackTiers.COUNTER_DIGIT_ASCENT;
@@ -167,7 +167,7 @@ public final class PackAssets {
     /** 框层下标为 20..21；码位表顺序不限制 View 按 label → frame → digit 绘制。 */
     public static final int COUNTER_FRAME_START_INDEX = COUNTER_LABEL_COUNT + COUNTER_DIGIT_COUNT;
 
-    /** 固定 cell 几何供 View 与 Debug Web 共用，全部由生成的层尺寸及 ascent 推导。 */
+    /** 默认生成档的兼容 cell 几何；运行期缩放档必须使用 {@link #counterGeometry(int, int)}。 */
     public static final int COUNTER_CELL_WIDTH = COUNTER_LABEL_WIDTH;
     public static final int COUNTER_CELL_ADVANCE = COUNTER_GLYPH_ADVANCE;
     public static final int COUNTER_FRAME_TOP_DELTA = COUNTER_LABEL_ASCENT - COUNTER_FRAME_ASCENT;
@@ -618,6 +618,25 @@ public final class PackAssets {
         return AVATAR_DOWN_OFFSET_TIERS.length;
     }
 
+    /** 头像 scale 档数；profile 可以稀疏，调用方不要用最小/最大值相减代替。 */
+    public static int avatarPixelScaleTierCount() {
+        return AVATAR_PIXEL_SCALE_TIERS.length;
+    }
+
+    /** 按 profile 顺序读取头像 scale 档。 */
+    public static int avatarPixelScaleAt(int tier) {
+        if (tier < 0 || tier >= AVATAR_PIXEL_SCALE_TIERS.length) {
+            throw new IllegalArgumentException(
+                "头像 scale 档越界（0.." + (AVATAR_PIXEL_SCALE_TIERS.length - 1) + "）：" + tier);
+        }
+        return AVATAR_PIXEL_SCALE_TIERS[tier];
+    }
+
+    /** 把头像 scale 映射到 profile 档序号；未生成的 scale 返回 -1。 */
+    public static int avatarPixelScaleTierOf(int scale) {
+        return indexOf(AVATAR_PIXEL_SCALE_TIERS, scale);
+    }
+
     /** 第 {@code tier} 档的渲染高度，单位像素。 */
     public static int cardGlyphHeightAt(int tier) {
         if (tier < 0 || tier >= CARD_GLYPH_HEIGHT_TIERS.length) {
@@ -910,7 +929,7 @@ public final class PackAssets {
         return counterTier(scale, 0);
     }
 
-    /** counter 完整几何；downTier 只改变三层实际 ascent，偏移表独立于头像表。 */
+    /** counter 完整紧凑几何；downTier 只改变三层实际 ascent，偏移表独立于头像表。 */
     public static CounterTier counterTier(int scale, int downTier) {
         counterScaleIndex(scale);
         int downOffset = counterDownOffsetAt(downTier);
@@ -1214,12 +1233,16 @@ public final class PackAssets {
     public static final int AVATAR_PIXEL_CODEPOINT_START = 0xE800;
 
     /**
-     * 头像放大倍数的可选范围，资源包只预生成了这个区间内的方块字形。
+     * 头像放大倍数档位；构建期 profile 可以只生成稀疏子集，运行期必须按这张表查索引。
      *
-     * <p>与偏移档不同，scale 是【连续整数】不需要吸附：2..16 每个值都有字形。
-     * 所以校验它只是范围检查（越界钳到边界），不存在「就近吸附」。
+     * <p>不要再用 min/max 推导连续区间：例如 profile=[4,6] 时，5 没有对应贴图和 provider。
      */
+    public static final int[] AVATAR_PIXEL_SCALE_TIERS = PackTiers.AVATAR_SCALE_TIERS;
+
+    /** 头像放大倍数的最小已生成档位，保留给范围提示与兼容调用方。 */
     public static final int AVATAR_PIXEL_MIN_SCALE = PackTiers.AVATAR_MIN_SCALE;
+
+    /** 头像放大倍数的最大已生成档位，保留给范围提示与兼容调用方。 */
     public static final int AVATAR_PIXEL_MAX_SCALE = PackTiers.AVATAR_MAX_SCALE;
 
     /** 皮肤头部是 8x8 像素，头像就是 8 行 x 8 列个方块。 */
@@ -1263,8 +1286,7 @@ public final class PackAssets {
      * <p>贴图是纯白的，调用方要自己套颜色标签 —— Minecraft 对字形是乘算着色，
      * 白底乘上皮肤像素色就得到该像素本身的颜色。
      *
-     * @param scale 放大倍数，必须在 {@link #AVATAR_PIXEL_MIN_SCALE} 到
-     *              {@link #AVATAR_PIXEL_MAX_SCALE} 之间（资源包只生成了这些）
+     * @param scale 放大倍数，必须存在于 {@link #AVATAR_PIXEL_SCALE_TIERS}（资源包只生成 profile 中的这些档位）
      * @param row   行号，0 是头像最上面那行
      */
     public static String avatarPixelChar(int scale, int row) {
@@ -1281,18 +1303,18 @@ public final class PackAssets {
      * <p>偏移不需要新贴图：同一档 scale 的贴图照用，只把 ascent 减掉偏移量。
      */
     public static String avatarPixelChar(int scale, int row, int downOffsetTier) {
-        if (scale < AVATAR_PIXEL_MIN_SCALE || scale > AVATAR_PIXEL_MAX_SCALE) {
+        int scaleTier = avatarPixelScaleTierOf(scale);
+        if (scaleTier < 0) {
             // 资源包里没有这个倍数的贴图，硬拼出来只会显示豆腐块，当场报出来。
             throw new IllegalArgumentException(
-                "头像倍数超出资源包预生成范围（" + AVATAR_PIXEL_MIN_SCALE + ".."
-                    + AVATAR_PIXEL_MAX_SCALE + "）：" + scale);
+                "头像倍数不是当前资源包已生成档位（" + join(AVATAR_PIXEL_SCALE_TIERS) + "）：" + scale);
         }
         if (row < 0 || row >= AVATAR_OUTLINED_PIXELS) {
             throw new IllegalArgumentException("头像行号越界（0.." + (AVATAR_OUTLINED_PIXELS - 1) + "）：" + row);
         }
         // 同时承担偏移档的越界校验，查的是头像自己那张表。
         avatarDownOffsetAt(downOffsetTier);
-        int index = (scale - AVATAR_PIXEL_MIN_SCALE) * AVATAR_OUTLINED_PIXELS + row;
+        int index = scaleTier * AVATAR_OUTLINED_PIXELS + row;
         return new String(Character.toChars(
             tierCodepointBase(downOffsetTier, avatarGlyphsPerTier(), AVATAR_PIXEL_CODEPOINT_START) + index));
     }
@@ -1302,14 +1324,14 @@ public final class PackAssets {
         return "avatar_px_" + scale + "_" + row + "_d" + avatarDownOffsetAt(downOffsetTier);
     }
 
-    /** 头像族一档占几个码位：每个 scale 一整列描边行。 */
+    /** 头像族一档占几个码位：profile 中每个 scale 一整列描边行。 */
     private static int avatarGlyphsPerTier() {
-        return (AVATAR_PIXEL_MAX_SCALE - AVATAR_PIXEL_MIN_SCALE + 1) * AVATAR_OUTLINED_PIXELS;
+        return AVATAR_PIXEL_SCALE_TIERS.length * AVATAR_OUTLINED_PIXELS;
     }
 
     /** 王冠族一档占几个码位。 */
     private static int crownGlyphsPerTier() {
-        return (AVATAR_PIXEL_MAX_SCALE - AVATAR_PIXEL_MIN_SCALE + 1) * AVATAR_CROWN_PIXELS;
+        return AVATAR_PIXEL_SCALE_TIERS.length * AVATAR_CROWN_PIXELS;
     }
 
     /**
@@ -1323,16 +1345,16 @@ public final class PackAssets {
      * <p>贴图纯白，颜色由调用方套 {@code <color>} 给 —— 金色王冠和黑色描边共用这些字形。
      */
     public static String avatarCrownChar(int scale, int row, int downOffsetTier) {
-        if (scale < AVATAR_PIXEL_MIN_SCALE || scale > AVATAR_PIXEL_MAX_SCALE) {
+        int scaleTier = avatarPixelScaleTierOf(scale);
+        if (scaleTier < 0) {
             throw new IllegalArgumentException(
-                "王冠倍数超出资源包预生成范围（" + AVATAR_PIXEL_MIN_SCALE + ".."
-                    + AVATAR_PIXEL_MAX_SCALE + "）：" + scale);
+                "王冠倍数不是当前资源包已生成档位（" + join(AVATAR_PIXEL_SCALE_TIERS) + "）：" + scale);
         }
         if (row < 0 || row >= AVATAR_CROWN_PIXELS) {
             throw new IllegalArgumentException("王冠行号越界（0.." + (AVATAR_CROWN_PIXELS - 1) + "）：" + row);
         }
         avatarDownOffsetAt(downOffsetTier);
-        int index = (scale - AVATAR_PIXEL_MIN_SCALE) * AVATAR_CROWN_PIXELS + row;
+        int index = scaleTier * AVATAR_CROWN_PIXELS + row;
         return new String(Character.toChars(
             tierCodepointBase(downOffsetTier, crownGlyphsPerTier(), AVATAR_CROWN_CODEPOINT_START) + index));
     }
@@ -1342,7 +1364,7 @@ public final class PackAssets {
         return "avatar_crown_" + scale + "_" + row + "_d" + avatarDownOffsetAt(downOffsetTier);
     }
 
-    /** 记牌器标签层字形字符（默认头像下移档）。 */
+    /** 记牌器标签层字形字符（默认记牌器下移档）。 */
     public static String counterRankChar(CardRank rank) {
         return counterRankChar(rank, 0);
     }
@@ -1371,7 +1393,7 @@ public final class PackAssets {
         return counterDigitChar(digit, 0);
     }
 
-    /** 记牌器数字层字形字符（指定头像下移档）。 */
+    /** 记牌器数字层字形字符（指定记牌器下移档）。 */
     public static String counterDigitChar(int digit, int downOffsetTier) {
         return counterDigitChar(digit, DEFAULT_HUD_SCALE, downOffsetTier);
     }
@@ -1390,7 +1412,7 @@ public final class PackAssets {
         return counterFrameChar(exhausted, 0);
     }
 
-    /** 记牌器框层字形字符（指定头像下移档）。 */
+    /** 记牌器框层字形字符（指定记牌器下移档）。 */
     public static String counterFrameChar(boolean exhausted, int downOffsetTier) {
         return counterFrameChar(exhausted, DEFAULT_HUD_SCALE, downOffsetTier);
     }

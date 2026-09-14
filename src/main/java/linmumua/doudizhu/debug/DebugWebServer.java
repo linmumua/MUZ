@@ -5,6 +5,7 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.PackAssets;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -50,32 +51,158 @@ public final class DebugWebServer {
     private static final Gson GSON = new Gson();
     private static final int MAX_BODY_BYTES = 16 * 1024;
     /**
-     * 同源只读资源白名单：只允许前端请求构建期生成的 hotbar 相关 PNG。
+     * 同源只读资源白名单：只允许前端请求构建期生成的 HUD PNG。
      *
-     * <p>键是后端 {@code hotbars[].texture / selectTexture} 下发的资源名（如
-     * {@code "muz:font/hotbar_slots.png"}、{@code "muz:font/scale_75/hotbar_select.png"}），
+     * <p>键是后端 geometry 或预览 manifest 下发的资源名（如
+     * {@code "muz:font/hotbar_slots.png"}、{@code "muz:font/scale_<n>/hotbar_select.png"}），
      * 前端用 {@code /api/resource/<资源名>} 请求。值是 JAR classpath 内嵌路径。
      *
-     * <p>三档（75/100/125）× 两个文件（底图 + 选中框）= 固定 6 条。
+     * <p>当前 profile 的 hotbar scale × 两个文件（底图 + 选中框）。
      * 不要添加非 HUD 调试用途的资源条目，不要开放任意路径。
      */
     private static final Map<String, String> RESOURCE_WHITELIST = buildResourceWhitelist();
+    /** Debug Web 页面专用资源清单；只暴露当前构建 profile 的真实 PNG。 */
+    private static final Map<String, PreviewResource> PREVIEW_RESOURCE_WHITELIST = buildPreviewResourceWhitelist();
 
     private static Map<String, String> buildResourceWhitelist() {
         // 构建期产物的 classpath 根路径；与 build.gradle.kts 的 outputAssetsRoot 对应
         final String classpathBase = "craftengine/muz/resourcepack/assets/muz/textures/font/";
         LinkedHashMap<String, String> map = new LinkedHashMap<>();
-        // 100% 默认档：muz:font/hotbar_slots.png → classpath .../font/hotbar_slots.png
-        map.put("muz:font/hotbar_slots.png", classpathBase + "hotbar_slots.png");
-        map.put("muz:font/hotbar_select.png", classpathBase + "hotbar_select.png");
-        // 75% 档：muz:font/scale_75/hotbar_slots.png → classpath .../font/scale_75/hotbar_slots.png
-        map.put("muz:font/scale_75/hotbar_slots.png", classpathBase + "scale_75/hotbar_slots.png");
-        map.put("muz:font/scale_75/hotbar_select.png", classpathBase + "scale_75/hotbar_select.png");
-        // 125% 档：muz:font/scale_125/hotbar_slots.png → classpath .../font/scale_125/hotbar_slots.png
-        map.put("muz:font/scale_125/hotbar_slots.png", classpathBase + "scale_125/hotbar_slots.png");
-        map.put("muz:font/scale_125/hotbar_select.png", classpathBase + "scale_125/hotbar_select.png");
+        // 只登记当前 profile 已生成的 hotbar 档位；100% 使用字体根目录，其余档位使用 scale_<n>/。
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            String folder = scale == PackAssets.DEFAULT_HUD_SCALE ? "" : "scale_" + scale + "/";
+            map.put("muz:font/" + folder + "hotbar_slots.png", classpathBase + folder + "hotbar_slots.png");
+            map.put("muz:font/" + folder + "hotbar_select.png", classpathBase + folder + "hotbar_select.png");
+        }
+        // 牌面、头像、记牌器三层同样是构建期产物；Debug Web 预览必须显示真实 PNG，
+        // 因此把当前 profile 会生成的这些资源一并加入同源只读白名单。
+        // 仍然只允许固定资源键，不开放任意路径。
+        for (String name : previewTextureNames()) {
+            map.put("muz:" + name, "craftengine/muz/resourcepack/assets/muz/textures/" + name);
+        }
         return Map.copyOf(map);
     }
+
+    private static Map<String, PreviewResource> buildPreviewResourceWhitelist() {
+        final String textureBase = "muz:font/";
+        final String classpathBase = "craftengine/muz/resourcepack/assets/muz/textures/font/";
+        LinkedHashMap<String, PreviewResource> map = new LinkedHashMap<>();
+        int cardTier = 0;
+        int cardWidth = PackAssets.cardGlyphWidth(cardTier);
+        int cardHeight = PackAssets.cardGlyphHeightAt(cardTier);
+        int cardAdvance = PackAssets.cardGlyphAdvance(cardTier);
+        String[] suits = {"spades", "hearts", "clubs", "diamonds"};
+        String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "10", "jack", "queen", "king", "ace"};
+        for (String suit : suits) {
+            for (String rank : ranks) {
+                addPreviewResource(map, "card:" + suit + "_" + rank,
+                    "card", textureBase + "cards/" + suit + "_" + rank + ".png",
+                    classpathBase + "cards/" + suit + "_" + rank + ".png",
+                    cardWidth, cardHeight, cardAdvance, 100);
+            }
+        }
+        // 大小王必须独立列出，避免预览牌行遗漏王牌。
+        addPreviewResource(map, "card:small_joker", "card", textureBase + "cards/small_joker.png",
+            classpathBase + "cards/small_joker.png", cardWidth, cardHeight, cardAdvance, 100);
+        addPreviewResource(map, "card:big_joker", "card", textureBase + "cards/big_joker.png",
+            classpathBase + "cards/big_joker.png", cardWidth, cardHeight, cardAdvance, 100);
+
+        int avatarScale = 6;
+        int avatarAdvance = linmumua.doudizhu.assets.PlayerHeadRenderer.advanceWidth(avatarScale, false);
+        int avatarHeight = linmumua.doudizhu.assets.PackAssets.AVATAR_ROW_TOTAL_PIXELS * avatarScale;
+        for (int index = 0; index < 10; index++) {
+            String file = "pixel_" + avatarScale + "_" + index + ".png";
+            addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
+                textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
+                avatarAdvance, avatarHeight, avatarAdvance, avatarScale);
+        }
+        for (int index = 0; index < 2; index++) {
+            String file = "crown_" + avatarScale + "_" + index + ".png";
+            addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
+                textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
+                avatarAdvance, avatarHeight, avatarAdvance, avatarScale);
+        }
+
+        int counterScale = PackAssets.COUNTER_DEFAULT_SCALE;
+        String[] labels = {"2", "3", "4", "5", "6", "7", "8", "9", "10", "j", "q", "k", "a", "small", "big"};
+        for (String label : labels) {
+            String texture = PackAssets.counterTexturePath(counterScale, "label_" + label);
+            addPreviewResource(map, "counter:label_" + label, "counter-label", texture,
+                classpathBase + texture.substring("muz:font/".length()),
+                PackAssets.COUNTER_CELL_WIDTH, PackAssets.COUNTER_LABEL_HEIGHT, PackAssets.COUNTER_CELL_ADVANCE, counterScale);
+        }
+        for (int digit = 0; digit < 5; digit++) {
+            String texture = PackAssets.counterTexturePath(counterScale, "digit_" + digit);
+            addPreviewResource(map, "counter:digit_" + digit, "counter-digit", texture,
+                classpathBase + texture.substring("muz:font/".length()),
+                PackAssets.COUNTER_CELL_WIDTH, PackAssets.COUNTER_DIGIT_HEIGHT, PackAssets.COUNTER_CELL_ADVANCE, counterScale);
+        }
+        for (boolean exhausted : new boolean[]{false, true}) {
+            String fileName = "frame_" + (exhausted ? "exhausted" : "normal");
+            String texture = PackAssets.counterFrameTexturePath(exhausted, counterScale);
+            addPreviewResource(map, "counter:" + fileName, "counter-frame", texture,
+                classpathBase + texture.substring("muz:font/".length()),
+                PackAssets.COUNTER_CELL_WIDTH, PackAssets.COUNTER_FRAME_HEIGHT, PackAssets.COUNTER_CELL_ADVANCE, counterScale);
+        }
+
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+            String texture = PackAssets.hotbarTexturePath(scale);
+            String selectTexture = PackAssets.hotbarSelectTexturePath(scale);
+            addPreviewResource(map, "hotbar:" + tier.scale(), "hotbar", texture,
+                classpathBase + texture.substring("muz:font/".length()), tier.width(), tier.height(), tier.advance(), tier.scale());
+            addPreviewResource(map, "hotbar-select:" + tier.scale(), "hotbar-select", selectTexture,
+                classpathBase + selectTexture.substring("muz:font/".length()), tier.selectWidth(), tier.selectHeight(), tier.selectAdvance(), tier.scale());
+        }
+        return Map.copyOf(map);
+    }
+
+    private static void addPreviewResource(Map<String, PreviewResource> map, String id, String family,
+                                           String texture, String classpath, int width, int height,
+                                           int advance, int scale) {
+        map.put(id, new PreviewResource(id, family, texture, classpath, width, height, advance, scale));
+    }
+
+    private static void addCardNames(java.util.List<String> names) {
+        String[] suits = {"spades", "hearts", "clubs", "diamonds"};
+        String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "10", "jack", "queen", "king", "ace"};
+        for (String suit : suits) {
+            for (String rank : ranks) {
+                names.add("font/cards/" + suit + "_" + rank + ".png");
+            }
+        }
+    }
+
+    private static void addAvatarNames(java.util.List<String> names) {
+        for (int row = 0; row < 10; row++) {
+            names.add("font/avatar/pixel_6_" + row + ".png");
+        }
+        names.add("font/avatar/crown_6_0.png");
+        names.add("font/avatar/crown_6_1.png");
+    }
+
+    private static void addCounterNames(java.util.List<String> names) {
+        String[] labels = {"2", "3", "4", "5", "6", "7", "8", "9", "10",
+            "j", "q", "k", "a", "small", "big"};
+        for (String label : labels) {
+            names.add("font/counter/label_" + label + ".png");
+        }
+        for (int digit = 0; digit < 5; digit++) {
+            names.add("font/counter/digit_" + digit + ".png");
+        }
+        names.add("font/counter/frame_normal.png");
+        names.add("font/counter/frame_exhausted.png");
+    }
+
+    private static java.util.List<String> previewTextureNames() {
+        java.util.List<String> names = new java.util.ArrayList<>();
+        names.add("font/bot_avatar.png");
+        addCardNames(names);
+        addAvatarNames(names);
+        addCounterNames(names);
+        return names;
+    }
+
     /**
      * HTTP 层仅保留比协调器 120 秒结果租约略长的保护等待；超时只结束本次请求，
      * 不取消 coordinator 底层任务。迟到结果由 coordinator 自己按 generation 丢弃。
@@ -133,6 +260,9 @@ public final class DebugWebServer {
             httpServer.createContext("/api/save", this::handleSave);
             httpServer.createContext("/api/reload", this::handleReload);
             httpServer.createContext("/api/resource/", this::handleResource);
+            httpServer.createContext("/api/preview-resources", this::handlePreviewResources);
+            httpServer.createContext("/api/preview-resource/", this::handlePreviewResource);
+            httpServer.createContext("/api/state", this::handleState);
             // 守护线程：随 JVM 退出自动终止，不阻塞 shutdown
             executor = Executors.newFixedThreadPool(2, r -> {
                 Thread t = new Thread(r, "muz-debug-web");
@@ -204,7 +334,7 @@ public final class DebugWebServer {
             sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("接口不存在。")));
             return;
         }
-        byte[] bytes = buildHtml(snapshot, token).getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = loadEmbeddedPage(token);
         addSecurityHeaders(exchange.getResponseHeaders());
         exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
         exchange.sendResponseHeaders(200, bytes.length);
@@ -213,7 +343,24 @@ public final class DebugWebServer {
         }
     }
 
-    /** /api/save（POST）：只保存提交的白名单键，成功后轻量应用 HUD 运行态。 */
+    /**
+     * 读取 JAR 内嵌的 Debug HUD 页面；内嵌 HTML 是唯一前端。
+     *
+     * <p>token 通过 data-token 注入，避免前端再走内联模板拼接。
+     * 资源缺失时明确失败，不再静默回退到旧内联页面（旧页面的版本号是硬编码的，
+     * 曾导致重启后仍显示旧版本，误判为部署未生效）。
+     */
+    private byte[] loadEmbeddedPage(String token) throws IOException {
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("debug-hud-preview.html")) {
+            if (in == null) {
+                throw new IOException("缺少内嵌页面 debug-hud-preview.html");
+            }
+            String html = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return html.replace("__MUZ_TOKEN__", htmlEscape(token))
+                .getBytes(StandardCharsets.UTF_8);
+        }
+    }
     private void handleSave(HttpExchange exchange) throws IOException {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "POST");
@@ -323,6 +470,64 @@ public final class DebugWebServer {
      * 用于前端 hotbar 各缩放档的真实图片预览。
      * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
      */
+    private void handlePreviewResources(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        List<Map<String, Object>> resources = new java.util.ArrayList<>();
+        for (PreviewResource resource : PREVIEW_RESOURCE_WHITELIST.values()) {
+            resources.add(resource.manifest());
+        }
+        sendJson(exchange, 200, Map.of("ok", true, "resources", resources));
+    }
+
+    private void handlePreviewResource(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        final String prefix = "/api/preview-resource/";
+        String path = exchange.getRequestURI().getPath();
+        if (!path.startsWith(prefix) || path.length() <= prefix.length()) {
+            sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("预览资源路径无效。")));
+            return;
+        }
+        String id = path.substring(prefix.length());
+        if (id.isEmpty() || id.contains("..") || id.startsWith("/") || id.contains("/")) {
+            sendJson(exchange, 400, Map.of("ok", false, "messages", List.of("预览资源路径包含非法字符。")));
+            return;
+        }
+        PreviewResource resource = PREVIEW_RESOURCE_WHITELIST.get(id);
+        if (resource == null) {
+            sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("预览资源不在当前 profile 白名单内：" + id)));
+            return;
+        }
+        byte[] data;
+        try (InputStream stream = getClass().getClassLoader().getResourceAsStream(resource.classpath())) {
+            if (stream == null) {
+                sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("预览资源不可用：" + resource.texture())));
+                return;
+            }
+            data = stream.readAllBytes();
+        }
+        addSecurityHeaders(exchange.getResponseHeaders());
+        exchange.getResponseHeaders().set("Content-Type", "image/png");
+        exchange.getResponseHeaders().set("Cache-Control", "public, max-age=86400, immutable");
+        exchange.sendResponseHeaders(200, data.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(data);
+        }
+    }
+
+    private void handleState(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        sendJson(exchange, 200, apiPayload(true, snapshot, List.of(), List.of()));
+    }
+
     private void handleResource(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "GET");
@@ -434,6 +639,15 @@ public final class DebugWebServer {
         return RESOURCE_WHITELIST.keySet();
     }
 
+    private record PreviewResource(String id, String family, String texture, String classpath,
+                                   int width, int height, int advance, int scale) {
+        private Map<String, Object> manifest() {
+            return Map.of("family", family, "id", id, "texture", texture,
+                "width", width, "height", height, "advance", advance,
+                "scale", scale, "status", "available", "url", "/api/preview-resource/" + id);
+        }
+    }
+
     static String buildHtml(DebugHudConfigController.Snapshot snapshot, String token) {
         DebugHudConfigController.Snapshot safeSnapshot = snapshot == null
             ? new DebugHudConfigController.Snapshot(Map.of(), List.of("配置快照尚未初始化。"), List.of())
@@ -502,7 +716,7 @@ public final class DebugWebServer {
         return "<!DOCTYPE html><html lang='zh'><head><meta charset='UTF-8'>"
             + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             + "<title>MUZ Debug HUD · Minecraft HUD 编辑器</title><style>" + styles + "</style></head>"
-            + "<body id='mcEditor' data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD</h1><span id='muzVersion' class='key'>版本 1.10.16</span>"
+            + "<body id='mcEditor' data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD</h1><span id='muzVersion' class='key'>版本由插件描述提供</span>"
             + "<div>只开放 22 个 HUD 运行期字段；Minecraft 风格全屏编辑器 · 左键拖动 · 右键查看边界 · Shift+方向键微调 · Shift+空白拖动平移</div>"
             + "<button type='button' class='header-btn' id='topSaveBtn'>保存</button><button type='button' class='header-btn' id='topReloadBtn'>重载</button>"
             + "<button type='button' class='header-btn' id='panelToggle' aria-expanded='false'>配置</button><button type='button' class='header-btn' id='fullscreenBtn'>全屏</button>"
@@ -593,7 +807,7 @@ public final class DebugWebServer {
             + "const required=down+Number(av.rowHeight);"
             + "return avatarDown<required?'头像行会与牌行重叠：建议 avatar-offset-down 至少为 '+required+'。':null}"
             // rowGeom 只查表，不复算：card/avatar 从 geometry 数组按档位匹配；
-            // counter 优先从 counterTiers[] 按 trick-hud.counter.scale 查表，找不到则降级到顶层默认字段（兼容旧快照）。
+            // counter 只从 counterTiers[] 按 trick-hud.counter.scale 查表，缺档直接报错，禁止静默回退旧字段。
             // hotbar 同理优先从 hotbars[] 按 hotbar-hud.scale 查表。
             + "function rowGeom(vals){const g=geo();"
             + "const cards=g.sampleCards||[],n=cards.length,step=Number(vals['trick-hud.card-step']),h=Number(vals['trick-hud.card-height']);"
@@ -607,19 +821,21 @@ public final class DebugWebServer {
             + "const slotWidth=layout?Number(layout.slotWidth||0):0;"
             + "const avatarRowWidth=3*slotWidth+2*avGap;"
             + "const avatarHeight=layout?Number(layout.rowHeight||0):Number(avatar.rowHeight);"
-            // counter 几何按 scale 从 counterTiers 数组查表，降级到顶层字段
+            // counter 几何只按 scale 从 counterTiers 数组查表；缺档必须显式失败，不能静默使用旧字段。
             + "const cntScale=Number(vals['trick-hud.counter.scale'])||100;"
             + "const cntTier=(g.counterTiers||[]).find(x=>Number(x.scale)===cntScale);"
+            + "if(!cntTier)throw new Error('记牌器资源档位 '+cntScale+' 未在 counterTiers 中声明，无法预览；请重新生成资源包。');"
             + "const counterCells=g.counters||[],counterGap=Number(vals['trick-hud.counter.gap']);"
-            + "const counterCellWidth=Number(cntTier?cntTier.cellWidth:g.counterCellWidth);"
-            + "const counterCellHeight=Number(cntTier?cntTier.cellHeight:g.counterCellHeight);"
-            + "const counterAdvance=Number(cntTier?cntTier.advance:g.counterAdvance);"
-            + "const counterLabelHeight=Number(cntTier?cntTier.labelHeight:g.counterLabelHeight);"
-            + "const counterFrameHeight=Number(cntTier?cntTier.frameHeight:g.counterFrameHeight);"
-            + "const counterDigitHeight=Number(cntTier?cntTier.digitHeight:g.counterDigitHeight);"
-            + "const counterLabelAscent=Number(cntTier?cntTier.labelAscent:g.counterLabelAscent);"
-            + "const counterFrameTopDelta=Number(cntTier?cntTier.frameTopDelta:g.counterFrameTopDelta);"
-            + "const counterDigitInset=Number(cntTier?cntTier.digitInset:g.counterDigitInset);"
+            + "const counterCellWidth=Number(cntTier.cellWidth);"
+            + "const counterCellHeight=Number(cntTier.cellHeight);"
+            + "const counterAdvance=Number(cntTier.advance);"
+            + "const counterLabelHeight=Number(cntTier.labelHeight);"
+            + "const counterFrameHeight=Number(cntTier.frameHeight);"
+            + "const counterDigitHeight=Number(cntTier.digitHeight);"
+            + "const counterLabelAscent=Number(cntTier.labelAscent);"
+            + "const snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);"
+            + "const counterFrameTopDelta=Number(cntTier.frameTopDelta);"
+            + "const counterDigitInset=Number(cntTier.digitInset);"
             + "let counterRowWidth=0;if(counterCells.length){counterRowWidth=counterCells.length*counterAdvance+(counterCells.length-1)*counterGap}"
             // hotbar 几何按 scale 从 hotbars 数组查表，降级到顶层字段
             + "const hbScale=Number(vals['hotbar-hud.scale'])||100;"
@@ -637,7 +853,7 @@ public final class DebugWebServer {
             + "counterCells:counterCells,counterRowWidth:counterRowWidth,counterGap:counterGap,counterCellWidth:counterCellWidth,"
             + "counterCellHeight:counterCellHeight,counterAdvance:counterAdvance,counterLabelHeight:counterLabelHeight,"
             + "counterFrameHeight:counterFrameHeight,counterDigitHeight:counterDigitHeight,counterLabelAscent:counterLabelAscent,"
-            + "counterFrameTopDelta:counterFrameTopDelta,counterDigitInset:counterDigitInset,"
+            + "snapshotCounterOffset:snapshotCounterOffset,counterFrameTopDelta:counterFrameTopDelta,counterDigitInset:counterDigitInset,"
             + "hbW:hbW,hbH:hbH,hbAdv:hbAdv,hbBaseAscent:hbBaseAscent,hbSlotW:hbSlotW,hbSlotH:hbSlotH,hbSlotStep:hbSlotStep,"
             + "hbSlotsStartX:hbSlotsStartX,hbSlotsStartY:hbSlotsStartY,hbSelW:hbSelW,hbSelH:hbSelH,"
             + "hbSelStartX:hbSelStartX,hbSelStartY:hbSelStartY,hbSlotCount:hbSlotCount,"
@@ -700,7 +916,7 @@ public final class DebugWebServer {
                 staticDomReady=true;
             }
             function setStaticBox(el,b){el.hidden=!b;el.style.transform='';if(!b)return;el.style.left=cssPx(b.x)+'px';el.style.top=cssPx(b.y)+'px';el.style.width=cssPx(b.w)+'px';el.style.height=cssPx(b.h)+'px';el.dataset.mcLeft=Math.round(b.x);el.dataset.mcTop=Math.round(b.y);el.dataset.mcWidth=Math.round(b.w);el.dataset.mcHeight=Math.round(b.h)}
-            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-(r.counterLabelAscent-Number(vals['trick-hud.counter.offset-down'])),w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor((v.width-r.hbAdv)/2)+x,y:v.height-r.hbH+h,w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
+            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset,w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor((v.width-r.hbAdv)/2)+x,y:v.height-r.hbH+h,w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
             function staticCards(layer,r){const c=staticContent(layer);for(let i=0;i<r.n;i++){let el=c.querySelector('.cardbox[data-card-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cardbox';el.dataset.cardIndex=i;c.append(el)}const label=String(r.cards[i].label||r.cards[i].rank||'');el.hidden=false;el.dataset.cardRank=label;el.textContent=label;el.style.left=cssPx(i*r.step)+'px';el.style.top='0';el.style.width=cssPx(r.cardW)+'px';el.style.height=cssPx(r.cardHeight)+'px';el.style.lineHeight=cssPx(r.cardHeight)+'px'}c.querySelectorAll('.cardbox').forEach(el=>{el.hidden=Number(el.dataset.cardIndex)>=r.n})}
             function staticAvatars(layer,r,vals){const c=staticContent(layer),outline=vals['trick-hud.avatar-outline.enabled']?String(vals['trick-hud.avatar-outline.color']):'transparent';for(let i=0;i<3;i++){let slot=c.querySelector('.avslot[data-index="'+i+'"]');if(!slot){slot=document.createElement('div');slot.className='avslot';slot.dataset.index=i;slot.append(document.createElement('div'));c.append(slot)}const data=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true},face=slot.firstElementChild,sw=Number(data.slotWidth||r.avatarSlot),fw=Number(data.contentAdvance||sw),fh=Number(data.rowHeight||r.avatarHeight);slot.style.left=cssPx(i*(r.avatarSlot+r.avGap))+'px';slot.style.top='0';slot.style.width=cssPx(r.avatarSlot)+'px';slot.style.height=cssPx(r.avatarHeight)+'px';face.className='avbox'+(data.crowned?' crowned':'')+(data.empty?' empty':'');face.style.left=cssPx((sw-fw)/2)+'px';face.style.top=cssPx(r.avatarHeight-fh)+'px';face.style.width=cssPx(fw)+'px';face.style.height=cssPx(fh)+'px';face.style.outlineColor=outline}}
             function staticCounter(layer,r,vals){const c=staticContent(layer);r.counterCells.forEach((cell,i)=>{let el=c.querySelector('.cnt[data-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cnt';el.dataset.index=i;el.append(document.createElement('div'),document.createElement('div'),document.createElement('div'));el.children[0].className='cnt-label';el.children[1].className='cnt-frame';el.children[2].className='cnt-digit';c.append(el)}const hidden=!!cell.exhausted&&!!vals['trick-hud.counter.hide-exhausted'],x=i*(r.counterAdvance+r.counterGap),digitWidth=r.counterCellWidth-2*r.counterDigitInset;el.hidden=false;el.className='cnt'+(cell.exhausted?' exhausted':'');el.style.left=cssPx(x)+'px';el.style.top='0';el.style.width=cssPx(r.counterCellWidth)+'px';el.style.height=cssPx(r.counterCellHeight)+'px';el.children[0].textContent=String(cell.label);el.children[0].style.display=hidden?'none':'';el.children[1].style.display=hidden?'none':'';el.children[2].textContent=String(cell.playedCount);el.children[2].style.display=hidden?'none':'';el.children[0].style.height=cssPx(r.counterLabelHeight)+'px';el.children[0].style.lineHeight=cssPx(r.counterLabelHeight)+'px';el.children[1].style.left='0';el.children[1].style.top=cssPx(r.counterFrameTopDelta)+'px';el.children[1].style.width=cssPx(r.counterCellWidth)+'px';el.children[1].style.height=cssPx(r.counterFrameHeight)+'px';el.children[2].style.left=cssPx(r.counterDigitInset)+'px';el.children[2].style.top=cssPx(r.counterFrameTopDelta+r.counterDigitInset)+'px';el.children[2].style.width=cssPx(digitWidth)+'px';el.children[2].style.height=cssPx(r.counterDigitHeight)+'px';el.children[2].style.lineHeight=cssPx(r.counterDigitHeight)+'px'});c.querySelectorAll('.cnt').forEach(el=>{el.hidden=Number(el.dataset.index)>=r.counterCells.length})}

@@ -115,6 +115,8 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
             }
         };
         return HudResourcePackSync.run(
+            // overlay YAML 只有在 CE 真实 reload 完成后才会进入 pack manager；不能只生成旧内存快照。
+            // 保存与磁盘重载都经过同一条 reload → generate → verify 链，避免“写成功但包未更新”。
             access::reload,
             access::generateResourcePack,
             access::generatedPackPath,

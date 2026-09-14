@@ -88,7 +88,7 @@ public final class HotbarHudService {
      */
     private boolean useDebugOverlayGlyph;
 
-    /** 当前使用的构建期 hotbar 缩放档（百分比），只接受 75/100/125。 */
+    /** 当前使用的构建期 hotbar 缩放档（百分比），只接受当前 profile/PackTiers 已生成的档位。 */
     private int scale = 100;
 
     /**
@@ -96,6 +96,15 @@ public final class HotbarHudService {
      * 未就绪时即使 Debug Web 正在接管，也必须退回 bundle 固定码位，避免客户端豆腐块。
      */
     private boolean overlayReady;
+
+    /**
+     * 已通过资源重载与 ZIP 校验的 overlay 所属 scale；-1 表示没有可用覆盖层。
+     *
+     * <p>覆盖层只为本次应用的 hotbar scale 生成。不能只记一个全局 ready 布尔值，
+     * 否则从 100% 切到 75% 后会误把 100% 的 EF01/EF03 声明套到 75% 字形上，
+     * 客户端收到未声明码位就会显示豆腐块。
+     */
+    private int overlayReadyScale = -1;
 
     /**
      * 当前正在合成的玩家持槽下标（0..8），供 {@link #buildActionBar(OverlayEntry)} 叠加选中框。
@@ -142,6 +151,10 @@ public final class HotbarHudService {
     public void reloadEnabled(boolean configuredEnabled, boolean suspended) {
         this.enabled = configuredEnabled;
         this.useDebugOverlayGlyph = suspended && overlayReady;
+        if (this.useDebugOverlayGlyph && overlayReadyScale != scale) {
+            // overlay 只对应生成并校验过的那一档；切换 scale 后必须先重生成资源包。
+            this.useDebugOverlayGlyph = false;
+        }
         if (configuredEnabled) {
             start();
         } else {
@@ -161,18 +174,55 @@ public final class HotbarHudService {
         this.offsetX = offsetX;
     }
 
-    /** 设置构建期 hotbar 缩放档；非法值回退到默认 100%。 */
+    /** 设置构建期 hotbar 缩放档；非法值拒绝切换并保留当前档位。 */
     public void setScale(int scale) {
-        this.scale = PackAssets.hotbarScaleTierOf(scale) < 0 ? 100 : scale;
+        if (PackAssets.hotbarScaleTierOf(scale) < 0) {
+            plugin.getLogger().warning("hotbar-hud.scale=" + scale
+                + " 不是当前资源包已生成的档位（可用："
+                + java.util.Arrays.toString(PackAssets.HOTBAR_SCALE_TIERS)
+                + "），已拒绝切换并继续使用 " + this.scale
+                + "；如需该档位，请重新生成资源包。" );
+            return;
+        }
+        this.scale = scale;
+        if (overlayReadyScale != scale) {
+            // 旧 scale 的 overlay 不能跨档复用；bundle 固定码位仍可安全显示。
+            this.useDebugOverlayGlyph = false;
+        }
     }
 
     /**
      * 设置运行期覆盖层就绪状态。只有资源协调器完成真实 CE Future 与 ZIP 校验后才能传 true。
-     * 状态变化时同步刷新 Debug Web 接管选择，避免未验证的 EF01/EF03 被推送给客户端。
+     * 兼容旧调用点：未显式提供 scale 时按当前档记录，但新资源流程应使用带 scale 的重载。
      */
     public void setOverlayReady(boolean ready) {
-        this.overlayReady = ready;
+        setOverlayReady(ready, ready ? scale : -1);
+    }
+
+    /**
+     * 设置指定 hotbar scale 的运行期覆盖层就绪状态。
+     *
+     * <p>ready=true 只允许记录已通过校验的合法 scale；其它值一律拒绝并保持 bundle 码位，
+     * 防止发送当前资源包没有声明的 EF01/EF03 变体。
+     */
+    public void setOverlayReady(boolean ready, int readyScale) {
         if (!ready) {
+            this.overlayReady = false;
+            this.overlayReadyScale = -1;
+            this.useDebugOverlayGlyph = false;
+            return;
+        }
+        if (PackAssets.hotbarScaleTierOf(readyScale) < 0) {
+            plugin.getLogger().warning("hotbar 调试覆盖层 scale=" + readyScale
+                + " 未在资源包中生成，已拒绝标记为就绪；请重新生成资源包。" );
+            this.overlayReady = false;
+            this.overlayReadyScale = -1;
+            this.useDebugOverlayGlyph = false;
+            return;
+        }
+        this.overlayReady = true;
+        this.overlayReadyScale = readyScale;
+        if (readyScale != scale) {
             this.useDebugOverlayGlyph = false;
         }
     }
@@ -227,7 +277,7 @@ public final class HotbarHudService {
         long expireAt = System.currentTimeMillis() + (long) durationTicks * 50L;
         for (UUID id : players) {
             Player player = Bukkit.getPlayer(id);
-            if (player == null) {
+            if (player == null || !player.isOnline()) {
                 overlays.remove(id);
                 renderedPlayers.remove(id);
                 continue;
@@ -293,7 +343,7 @@ public final class HotbarHudService {
                         continue;
                     }
                     Player player = Bukkit.getPlayer(id);
-                    if (player == null) {
+                    if (player == null || !player.isOnline()) {
                         continue;
                     }
                     currentPlayers.add(id);
@@ -328,7 +378,7 @@ public final class HotbarHudService {
 
     /** 判断玩家是否属于正式出牌阶段的真人座位。 */
     private boolean isPlayingPlayer(Player player) {
-        if (player == null || plugin.getTableManager() == null) {
+        if (player == null || !player.isOnline() || plugin.getTableManager() == null) {
             return false;
         }
         GameTable table = plugin.getTableManager().getTableOf(player);
@@ -401,7 +451,8 @@ public final class HotbarHudService {
         // 字形 MiniMessage 片段：bundle 固定 ascent 或已验证的调试覆盖层 ascent。
         // 覆盖层同时声明与底图同 scale、同 Y 的 EF03 选中框，因此两层在 Debug Web 接管时
         // 也能保持真实对位；overlayReady=false 时退回 bundle 的 EF00/EF02 组合，绝不发未声明码位。
-        String glyphMm = useDebugOverlayGlyph
+        boolean useOverlay = useDebugOverlayGlyph && overlayReady && overlayReadyScale == scale;
+        String glyphMm = useOverlay
             ? PackAssets.hotbarHudDebugGlyphText(scale)
             : PackAssets.hotbarHudGlyphText(scale);
         Component glyph = MINI.deserialize(glyphMm).decoration(TextDecoration.ITALIC, false);

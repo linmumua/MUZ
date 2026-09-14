@@ -332,6 +332,10 @@ public final class PlayerHeadRenderer {
     /** 正在下载的 key，避免同一张皮肤被并发拉多次。 */
     private final Map<String, Boolean> pending = new ConcurrentHashMap<>();
 
+    /** 下载或解析失败后的短暂退避，避免每次 HUD 刷新都重复请求坏皮肤地址。 */
+    private static final long FAILURE_BACKOFF_MILLIS = 30_000L;
+    private final Map<String, Long> failedUntil = new ConcurrentHashMap<>();
+
     public PlayerHeadRenderer(DoudizhuPlugin plugin, CraftEngineOffsetService offsetService) {
         this.plugin = plugin;
         this.offsetService = offsetService;
@@ -382,6 +386,9 @@ public final class PlayerHeadRenderer {
      * 同一张皮肤在同一组配置下只渲染一次。
      */
     private String miniMessageFor(URL skinUrl, int scale, int downOffsetTier, boolean crowned) {
+        if (PackAssets.avatarPixelScaleTierOf(scale) < 0) {
+            return null;
+        }
         if (!offsetService.isAvailable()) {
             // 没有负空格就没法换行，画出来会是横向拉长的一条，不如不画。
             return null;
@@ -399,21 +406,32 @@ public final class PlayerHeadRenderer {
         if (cached != null) {
             return cached;
         }
+        long now = System.currentTimeMillis();
+        Long retryAt = failedUntil.get(key);
+        if (retryAt != null) {
+            if (retryAt > now) {
+                return null;
+            }
+            failedUntil.remove(key, retryAt);
+        }
         if (pending.putIfAbsent(key, Boolean.TRUE) == null) {
             plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
                 try {
                     BufferedImage skin = downloadSkin(skinUrl);
-                    if (skin != null) {
-                        int[][] head = extractHead(skin);
-                        // 【描边只作用于脸】：王冠现在是独立字形家族，画在脸上方，
-                        // 不参与这个矩阵。两者互不干扰，不再有先后顺序的讲究。
-                        if (outlineArgb != 0) {
-                            head = withOutline(head, outlineArgb);
-                        }
-                        cache.put(key, renderMiniMessage(
-                            head, scale, offsetService::offset, downOffsetTier, crowned));
+                    if (skin == null) {
+                        throw new IllegalArgumentException("皮肤图片无法解析");
                     }
+                    int[][] head = extractHead(skin);
+                    // 【描边只作用于脸】：王冠现在是独立字形家族，画在脸上方，
+                    // 不参与这个矩阵。两者互不干扰，不再有先后顺序的讲究。
+                    if (outlineArgb != 0) {
+                        head = withOutline(head, outlineArgb);
+                    }
+                    cache.put(key, renderMiniMessage(
+                        head, scale, offsetService::offset, downOffsetTier, crowned));
+                    failedUntil.remove(key);
                 } catch (Exception exception) {
+                    failedUntil.put(key, System.currentTimeMillis() + FAILURE_BACKOFF_MILLIS);
                     plugin.getLogger().warning("Failed to render player head: " + exception.getMessage());
                 } finally {
                     pending.remove(key);
@@ -431,6 +449,7 @@ public final class PlayerHeadRenderer {
         }
         String suffix = "|" + skinUrl;
         cache.keySet().removeIf(key -> key.endsWith(suffix));
+        failedUntil.keySet().removeIf(key -> key.endsWith(suffix));
     }
 
     /**
@@ -524,7 +543,16 @@ public final class PlayerHeadRenderer {
     public static int[][] extractHead(BufferedImage skin) {
         int size = PackAssets.AVATAR_HEAD_PIXELS;
         int[][] head = new int[size][size];
-        boolean hasHatLayer = skin.getWidth() >= HEAD_HAT_X + size && skin.getHeight() >= HEAD_HAT_Y + size;
+        if (skin == null) {
+            return head;
+        }
+        boolean hasBaseLayer = skin.getWidth() >= HEAD_BASE_X + size
+            && skin.getHeight() >= HEAD_BASE_Y + size;
+        if (!hasBaseLayer) {
+            return head;
+        }
+        boolean hasHatLayer = skin.getWidth() >= HEAD_HAT_X + size
+            && skin.getHeight() >= HEAD_HAT_Y + size;
         for (int row = 0; row < size; row++) {
             for (int col = 0; col < size; col++) {
                 int argb = skin.getRGB(HEAD_BASE_X + col, HEAD_BASE_Y + row);

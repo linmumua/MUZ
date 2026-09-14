@@ -72,7 +72,25 @@ public class DebugHudConfigControllerTest {
             () -> DebugHudConfigController.parsePatch("{\"trick-hud.avatar-scale\":999}")
         );
 
-        assertTrue(exception.getMessage().contains("超出范围"));
+        assertTrue(exception.getMessage().contains("合法档位"));
+    }
+
+    @Test
+    void snapshotRejectsAvatarScaleMissingFromSparseProfileInsteadOfSnapping() {
+        MuzYamlConfig config = MuzYamlConfig.empty(tempDir.resolve("invalid-avatar-scale.yml"));
+        int invalidScale = PackAssets.AVATAR_PIXEL_SCALE_TIERS[0] + 1;
+        while (PackAssets.avatarPixelScaleTierOf(invalidScale) >= 0) {
+            invalidScale++;
+        }
+        config.set("trick-hud.avatar-scale", invalidScale);
+
+        DebugHudConfigController.FieldSpec field = DebugHudConfigController.fields().get("trick-hud.avatar-scale");
+        DebugHudConfigController.ValidationException exception = assertThrows(
+            DebugHudConfigController.ValidationException.class,
+            () -> field.read(config));
+
+        assertTrue(exception.getMessage().contains("avatar-scale=" + invalidScale));
+        assertTrue(exception.getMessage().contains("当前资源包已生成的档位"));
     }
 
     @Test
@@ -83,6 +101,43 @@ public class DebugHudConfigControllerTest {
         );
 
         assertTrue(exception.getMessage().contains("合法档位"));
+    }
+
+    @Test
+    void rejectsHotbarScaleOutsideGeneratedTiers() {
+        int invalidScale = PackAssets.HOTBAR_SCALE_TIERS[0] + 1;
+        DebugHudConfigController.ValidationException exception = assertThrows(
+            DebugHudConfigController.ValidationException.class,
+            () -> DebugHudConfigController.parsePatch("{\"hotbar-hud.scale\":" + invalidScale + "}"));
+
+        assertTrue(exception.getMessage().contains("合法档位")
+            || exception.getMessage().contains("已生成的档位"));
+        assertTrue(exception.getMessage().contains("重新生成资源包"));
+    }
+
+    @Test
+    void rejectsOffsetOutsideSelectedHotbarScaleBounds() {
+        final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
+        final int invalidOffset = linmumua.doudizhu.debug.HotbarDebugOverlayWriter.minOffsetY(scale) - 1;
+        final DebugHudConfigController.Patch invalidPatch = new DebugHudConfigController.Patch(
+            java.util.Map.of("hotbar-hud.offset-y", invalidOffset));
+
+        DebugHudConfigController.ValidationException exception = assertThrows(
+            DebugHudConfigController.ValidationException.class,
+            () -> DebugHudConfigController.validateHotbarPatch(scale, 0, invalidPatch));
+
+        assertTrue(exception.getMessage().contains("scale=" + scale + "%"));
+        assertTrue(exception.getMessage().contains("重新生成该档位资源包"));
+    }
+
+    @Test
+    void acceptsOffsetWithinSelectedHotbarScaleBounds() {
+        final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
+        final int offset = Math.max(linmumua.doudizhu.debug.HotbarDebugOverlayWriter.minOffsetY(scale), -113);
+        final DebugHudConfigController.Patch patch = DebugHudConfigController.parsePatch(
+            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + offset + "}");
+
+        DebugHudConfigController.validateHotbarPatch(scale, 0, patch);
     }
 
     @Test
@@ -137,9 +192,9 @@ public class DebugHudConfigControllerTest {
     void avatarLayoutGeometryCoversEveryScaleAndOutlineCombination() {
         DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
 
-        assertEquals((PackAssets.AVATAR_PIXEL_MAX_SCALE - PackAssets.AVATAR_PIXEL_MIN_SCALE + 1) * 2,
+        assertEquals(PackAssets.AVATAR_PIXEL_SCALE_TIERS.length * 2,
             geometry.avatarLayouts().size());
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             final int selectedScale = scale;
             for (boolean outlined : new boolean[]{false, true}) {
                 final boolean selectedOutlined = outlined;
@@ -222,7 +277,7 @@ public class DebugHudConfigControllerTest {
         DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
         List<DebugHudConfigController.PreviewGeometry.AvatarLayoutGeometry> layouts = geometry.avatarLayouts();
 
-        int expectedScales = PackAssets.AVATAR_PIXEL_MAX_SCALE - PackAssets.AVATAR_PIXEL_MIN_SCALE + 1;
+        int expectedScales = PackAssets.AVATAR_PIXEL_SCALE_TIERS.length;
         // 每个 scale 都有 outlined=true 和 outlined=false 两种组合
         assertEquals(expectedScales * 2, layouts.size(),
             "avatarLayouts 必须覆盖所有合法 scale × outline 组合");

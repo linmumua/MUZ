@@ -5,9 +5,13 @@ import linmumua.doudizhu.assets.PackSounds;
 import linmumua.doudizhu.model.CardPattern;
 import linmumua.doudizhu.model.CardRank;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
+import org.bukkit.Bukkit;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.bukkit.entity.Player;
@@ -17,6 +21,9 @@ final class TableEffectCoordinator {
     private final Random random;
     private final Supplier<List<UUID>> seatsSupplier;
     private final Function<UUID, Player> playerResolver;
+    private static final int EFFECT_DEDUPLICATION_TICKS = 2;
+    private static final int COUNTDOWN_DEDUPLICATION_TICKS = 16;
+    private final Map<String, Integer> lastPlayedTicks = new HashMap<>();
     private String lastRandomEffectKey;
     private int lastRandomEffectStreak;
 
@@ -33,8 +40,12 @@ final class TableEffectCoordinator {
     }
 
     void playSoundAll(String soundKey, float volume, float pitch) {
+        playSoundAll(soundKey, volume, pitch, EFFECT_DEDUPLICATION_TICKS);
+    }
+
+    private void playSoundAll(String soundKey, float volume, float pitch, int cooldownTicks) {
         for (UUID seat : seatsSupplier.get()) {
-            playSound(seat, soundKey, volume, pitch);
+            playSound(seat, soundKey, volume, pitch, cooldownTicks);
         }
     }
 
@@ -43,7 +54,7 @@ final class TableEffectCoordinator {
     }
 
     void playEffect(UUID playerId, String soundKey) {
-        playSound(playerId, soundKey, plugin.getEffectVolume(), 1.0f);
+        playSound(playerId, soundKey, plugin.getEffectVolume(), 1.0f, EFFECT_DEDUPLICATION_TICKS);
     }
 
     void playRandomEffectAll(List<String> soundKeys) {
@@ -104,7 +115,7 @@ final class TableEffectCoordinator {
         }
         DoudizhuPlugin.ConfiguredSound sound = plugin.countdownSound();
         if (sound.volume() > 0.0f) {
-            playSoundAll(sound.key(), sound.volume(), sound.pitch());
+            playSoundAll(sound.key(), sound.volume(), sound.pitch(), COUNTDOWN_DEDUPLICATION_TICKS);
         }
     }
 
@@ -112,13 +123,32 @@ final class TableEffectCoordinator {
         if (sound == null || sound.volume() <= 0.0f) {
             return;
         }
-        playSound(playerId, sound.key(), sound.volume(), sound.pitch());
+        playSound(playerId, sound.key(), sound.volume(), sound.pitch(), EFFECT_DEDUPLICATION_TICKS);
     }
 
-    private void playSound(UUID playerId, String soundKey, float volume, float pitch) {
-        Player player = playerResolver.apply(playerId);
-        if (player != null) {
-            player.playSound(player.getLocation(), soundKey, volume, pitch);
+    private void playSound(UUID playerId, String soundKey, float volume, float pitch, int cooldownTicks) {
+        if (playerId == null || soundKey == null || soundKey.isBlank()) {
+            return;
         }
+        Player player = playerResolver.apply(playerId);
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        int currentTick = Bukkit.getCurrentTick();
+        String deduplicationKey = playerId + "\u0000" + soundKey;
+        Integer lastTick = lastPlayedTicks.get(deduplicationKey);
+        if (lastTick != null && currentTick - lastTick < cooldownTicks) {
+            return;
+        }
+        lastPlayedTicks.put(deduplicationKey, currentTick);
+        if (lastPlayedTicks.size() > 256) {
+            Iterator<Map.Entry<String, Integer>> iterator = lastPlayedTicks.entrySet().iterator();
+            while (iterator.hasNext()) {
+                if (currentTick - iterator.next().getValue() >= COUNTDOWN_DEDUPLICATION_TICKS) {
+                    iterator.remove();
+                }
+            }
+        }
+        player.playSound(player.getLocation(), soundKey, volume, pitch);
     }
 }

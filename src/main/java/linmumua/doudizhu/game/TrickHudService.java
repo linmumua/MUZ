@@ -62,10 +62,22 @@ final class TrickHudService {
      * 【可见的 8x8 脸】的高度，两行布局的垂直间距必须按 60 算，按 48 算会让头像顶边
      * 压进牌里 12 像素。
      */
-    private static final int DEFAULT_AVATAR_SCALE = 6;
+    private static final int DEFAULT_AVATAR_SCALE = defaultAvatarScale();
 
-    /** 左右两个小头像的放大倍数。比中间小一档，一眼就能看出「中间那个才是该出牌的人」。 */
-    private static final int SIDE_AVATAR_SCALE = 4;
+    /** 左右两个小头像的放大倍数。优先使用构建期约定的 4 倍，缺档时退到实际生成集合的最小档。 */
+    private static final int SIDE_AVATAR_SCALE = sideAvatarScale();
+
+    private static int defaultAvatarScale() {
+        return PackAssets.avatarPixelScaleTierOf(6) >= 0
+            ? 6
+            : PackAssets.avatarPixelScaleAt(0);
+    }
+
+    private static int sideAvatarScale() {
+        return PackAssets.avatarPixelScaleTierOf(4) >= 0
+            ? 4
+            : PackAssets.avatarPixelScaleAt(0);
+    }
 
     /** 相邻两个头像槽的间距。6 是沿用原先「头像到牌」的实测调优值，观感上三头像不粘连。 */
     private static final int DEFAULT_AVATAR_GAP = 6;
@@ -107,7 +119,7 @@ final class TrickHudService {
      */
     private static final int DEFAULT_COUNTER_GAP = 2;
 
-    /** counter 资源的默认缩放百分比；构建期 100 档保留旧码位与旧几何。 */
+    /** counter 资源的默认缩放百分比；运行期几何由当前生成 profile 的 CounterTier 提供。 */
     private static final int DEFAULT_COUNTER_SCALE = 100;
 
     /** counter 独立 Y 的源码默认值；旧配置缺键时先继承 avatar-offset-down。 */
@@ -133,7 +145,7 @@ final class TrickHudService {
      * @param counterEnabled 记牌器行（第三行）的开关。【与 {@link #enabled} 分开】：
      *                       有人只想要「谁出了什么」而嫌记牌器占地方或觉得降低难度，
      *                       关它不该连整条 HUD 一起关掉
-     * @param counterScale   记牌器资源缩放百分比，只允许构建期提供的 75/100/125 档
+     * @param counterScale   记牌器资源缩放百分比，只允许当前 profile/PackTiers 已生成的档位
      * @param counterDownOffsetTier 记牌器独立的向下偏移档，不再复用头像行位置
      * @param counterGap     记牌器相邻两格的间距。各格自身宽度由对应 scale 的资源几何决定，
      *                       不随累计已出数量变化；固定宽度才能让 15 格位置始终稳定
@@ -170,10 +182,10 @@ final class TrickHudService {
         boolean enabled = config.getBoolean("trick-hud.enabled", true);
 
         int avatarScale = config.getInt("trick-hud.avatar-scale", DEFAULT_AVATAR_SCALE);
-        if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
+        if (PackAssets.avatarPixelScaleTierOf(avatarScale) < 0) {
             // 必须留日志：否则玩家只会看到头像莫名变方块，没人能联想到是这一行配置写错了。
-            warn.accept("trick-hud.avatar-scale=" + avatarScale + " 超出资源包预生成范围（"
-                + PackAssets.AVATAR_PIXEL_MIN_SCALE + ".." + PackAssets.AVATAR_PIXEL_MAX_SCALE
+            warn.accept("trick-hud.avatar-scale=" + avatarScale + " 不是资源包已生成档位（"
+                + java.util.Arrays.toString(PackAssets.AVATAR_PIXEL_SCALE_TIERS)
                 + "），已回退为 " + DEFAULT_AVATAR_SCALE);
             avatarScale = DEFAULT_AVATAR_SCALE;
         }
@@ -229,7 +241,7 @@ final class TrickHudService {
         int counterScale = config.getInt("trick-hud.counter.scale", DEFAULT_COUNTER_SCALE);
         if (PackAssets.counterScaleTierOf(counterScale) < 0) {
             warn.accept("trick-hud.counter.scale=" + counterScale
-                + " 不是当前资源包支持的缩放档（75/100/125），已回退为 " + DEFAULT_COUNTER_SCALE);
+                + " 不是当前资源包已生成的缩放档，已回退为 " + DEFAULT_COUNTER_SCALE);
             counterScale = DEFAULT_COUNTER_SCALE;
         }
 
@@ -626,9 +638,9 @@ final class TrickHudService {
     /**
      * 把累计已出数量摊成固定 15 格分层字形。
      *
-     * <p>每格按「点数标签、框、已出数字」三层生成；View 在层与层之间用
-     * {@code offset(-34)} 叠回同一格，最后一层保留严格 34 像素净前进量。
-     * 剩余数量只负责判断耗尽与是否隐藏，正式 HUD 不再把剩余数当作显示数字。
+     * <p>每格按「点数标签、框、已出数字」三层生成；View 使用当前生成 geometry 携带的
+     * advance 把后两层叠回同一格，最后一层保留该格的净前进量。剩余数量只负责判断耗尽
+     * 与是否隐藏，正式 HUD 不再把剩余数当作显示数字。
      *
      * @param playedCounts       每个点数累计已出数量
      * @param remainingCounts    每个点数剩余数量，仅用于耗尽/隐藏判断
@@ -650,7 +662,7 @@ final class TrickHudService {
         Map<CardRank, Integer> played = playedCounts == null ? Map.of() : playedCounts;
         Map<CardRank, Integer> remaining = remainingCounts == null ? Map.of() : remainingCounts;
         String font = PackAssets.counterGlyphFont(scale, downOffsetTier);
-        PackAssets.CounterTier geometry = PackAssets.counterTier(scale, downOffsetTier);
+        PackAssets.CounterTier geometry = PackAssets.counterGeometry(scale, downOffsetTier);
         List<TrickHudView.CounterCell> cells = new ArrayList<>(CardRank.values().length);
         for (CardRank rank : CardRank.values()) {
             int initial = initialCount(rank);
@@ -661,16 +673,34 @@ final class TrickHudService {
                 cells.add(new TrickHudView.CounterCell(List.of(), geometry.advance()));
                 continue;
             }
-            String frameColor = exhausted ? "dark_gray" : "white";
+            // 框 PNG 已按 normal/exhausted 生成两种颜色；用白色保留贴图颜色，避免再次乘色变脏。
+            String frameColor = "white";
             String labelColor = exhausted ? "dark_gray" : "white";
             String digitColor = exhausted ? "dark_gray" : "gray";
             String frame = layer(font, PackAssets.counterFrameChar(exhausted, scale, downOffsetTier), frameColor);
             String label = layer(font, PackAssets.counterRankChar(rank, scale, downOffsetTier), labelColor);
             String digit = layer(font, PackAssets.counterDigitChar(shown, scale, downOffsetTier), digitColor);
-            // 层顺序固定为 label → frame → digit；View 会把后两层分别按该 scale 的 advance 拉回同一格。
+            // 层顺序固定为 label → frame → digit；View 按当前生成 geometry 的 advance 拉回后层。
             cells.add(new TrickHudView.CounterCell(List.of(label, frame, digit), geometry.advance()));
         }
         return cells;
+    }
+
+    /**
+     * 兼容旧测试与旧内部调用：默认使用 100% 记牌器资源和基准向下偏移档。
+     *
+     * <p>分层记牌器新增 scale 与独立 downTier 后，完整入口携带五个参数；保留这个四参数委托，
+     * 避免旧调用方在资源档升级时失去原有的默认行为。
+     */
+    private List<TrickHudView.CounterCell> counterCells(
+        Map<CardRank, Integer> playedCounts,
+        Map<CardRank, Integer> remainingCounts,
+        boolean hideWhenExhausted,
+        int downOffsetTier
+    ) {
+        return counterCells(
+            playedCounts, remainingCounts, hideWhenExhausted,
+            PackAssets.DEFAULT_HUD_SCALE, downOffsetTier);
     }
 
     static Map<CardRank, Integer> playedCountsFromRemaining(Map<CardRank, Integer> remainingCounts) {

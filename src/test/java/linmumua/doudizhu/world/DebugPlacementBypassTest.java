@@ -110,9 +110,11 @@ class DebugPlacementBypassTest {
     void debugAdd命令调用placeDebugTableAt() throws IOException {
         String source = Files.readString(COMMAND);
         // 定位到 debug add 分支
-        int addBlock = source.indexOf("args[1].equalsIgnoreCase(\"add\")");
-        assertTrue(addBlock > 0, "命令源码中必须有 debug add 分支");
-        // 取 add 分支到下一个 else 的范围
+        int debugBlock = source.indexOf("case \"debug\" ->");
+        assertTrue(debugBlock > 0, "命令源码中必须有 debug 分支");
+        int addBlock = source.indexOf("args[1].equalsIgnoreCase(\"add\")", debugBlock);
+        assertTrue(addBlock > debugBlock, "命令源码中必须有 debug add 分支");
+        // 只取 debug add 分支到同级的下一个 else，避免命中 /muz bot add 分支。
         String addBody = source.substring(addBlock, source.indexOf("} else if", addBlock));
         assertTrue(addBody.contains("placeDebugTableAt("),
             "/muz debug add 必须调用 placeDebugTableAt，不能走 placeNewTableAt");

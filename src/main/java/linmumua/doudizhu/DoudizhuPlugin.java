@@ -486,6 +486,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
+    /** 由 HUD 资源协调器记录已校验的具体 hotbar scale，禁止跨档复用 overlay。 */
+    public void setHotbarOverlayReady(boolean ready, int hotbarScale) {
+        if (hotbarHudService != null) {
+            hotbarHudService.setOverlayReady(ready, hotbarScale);
+        }
+    }
+
     /** Debug Web 调试面板实例；debug.web-ui.enabled=false 时返回 null。 */
     public DebugWebServer getDebugWebServer() {
         return debugWebServer;

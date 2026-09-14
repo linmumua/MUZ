@@ -175,9 +175,15 @@ class PlayerHeadCrownTest {
     @Test
     void 偏移档变了王冠码位跟着变() {
         int scale = 6;
-        String tier0 = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, scale, 0, OFFSETS);
-        String tier5 = PlayerHeadRenderer.crownMiniMessage(PackAssets.AVATAR_HEAD_PIXELS, scale, 5, OFFSETS);
-        assertNotEquals(tier0, tier5,
+        int tier0 = 0;
+        int alternateTier = PackAssets.avatarDownOffsetTierCount() - 1;
+        assertTrue(alternateTier > tier0,
+            "当前 profile 至少要生成一个非基准头像偏移档，才能验证王冠码位随档位变化");
+        String tier0Message = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_HEAD_PIXELS, scale, tier0, OFFSETS);
+        String alternateMessage = PlayerHeadRenderer.crownMiniMessage(
+            PackAssets.AVATAR_HEAD_PIXELS, scale, alternateTier, OFFSETS);
+        assertNotEquals(tier0Message, alternateMessage,
             "不同偏移档必须用不同码位的王冠字形，否则王冠不会跟着 HUD 一起下沉");
     }
 

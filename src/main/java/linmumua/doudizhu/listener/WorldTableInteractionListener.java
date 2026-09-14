@@ -77,6 +77,17 @@ public final class WorldTableInteractionListener implements Listener {
         plugin.scheduler().runTimer(1L, 4L, this::tickToolPreviews);
     }
 
+    /**
+     * 判断 PlayerInteractEvent 是否来自主手。
+     * 手牌点击不能依赖这个条件；这里只给必须由主手持有的调试棒使用。
+     *
+     * @param event 玩家交互事件
+     * @return 主手事件返回 true
+     */
+    private boolean isPrimaryHandInteraction(PlayerInteractEvent event) {
+        return event.getHand() == EquipmentSlot.HAND;
+    }
+
     @EventHandler
     public void onUseTablePlacer(PlayerInteractEvent event) {
         if (event.getHand() != EquipmentSlot.HAND) {
@@ -215,7 +226,7 @@ public final class WorldTableInteractionListener implements Listener {
             || event.getAction() == Action.LEFT_CLICK_BLOCK;
 
         // 调试棒必须先于手牌与保护逻辑消费；只认玩家主手里的调试棒。
-        if (rightClick && event.getHand() == EquipmentSlot.HAND
+        if (rightClick && isPrimaryHandInteraction(event)
             && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
             handleHudDebugStickOnce(event.getPlayer());

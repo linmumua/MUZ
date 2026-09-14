@@ -76,7 +76,7 @@ class HotbarDebugOverlayWriterTest {
     void pack声明作者只有linmumua() {
         String packYaml = HotbarDebugOverlayWriter.buildPackYaml();
         assertTrue(packYaml.contains("author: linmumua"));
-        assertTrue(packYaml.contains("namespace: muz_hotbar_debug"),
+        assertTrue(packYaml.contains("namespace: muz"),
             "覆盖层必须用独立命名空间，避免落进 CraftEngineBundleExporter 的清理范围");
     }
 

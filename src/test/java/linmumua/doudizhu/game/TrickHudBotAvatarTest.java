@@ -130,8 +130,7 @@ class TrickHudBotAvatarTest {
     @Test
     void 取到皮肤时槽宽是像素头像宽度而不是图标宽度() {
         String rendered = "<font:" + PackAssets.AVATAR_PIXEL_FONT + ">fake</font>";
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             for (boolean outlined : new boolean[]{true, false}) {
                 TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
                     bot(PlayerRole.LANDLORD), scale, outlined, rendered, DOWN_TIER, false);

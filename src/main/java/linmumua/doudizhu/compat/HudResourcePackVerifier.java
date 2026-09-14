@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -99,26 +100,47 @@ public final class HudResourcePackVerifier {
     /**
      * 在异步线程验证一个已生成的 CraftEngine resource_pack.zip。
      *
+     * <p>旧调用只验证 bundle 以及包内已有的全部 overlay，保留给离线兼容测试；真正的
+     * Web 资源同步必须使用带 scale 的入口，让 verifier 强制确认本次唯一 overlay 与当前
+     * hotbar 档位一致，避免旧档位 YAML 被误当成成功结果。
+     *
      * @param packPath 资源包路径；验证器不会修改或解包它
      * @param offsetY  本次 hotbar 调试覆盖层采用的垂直偏移
      * @throws IOException 资源缺失、映射错配、ZIP 受损、保护形式不支持或超出限制
      */
     public void verify(Path packPath, int offsetY) throws IOException {
+        verifyInternal(packPath, offsetY, null, false);
+    }
+
+    /**
+     * 验证当前 hotbar scale 的真实 overlay。该入口用于保存/重载同步链路，overlay 缺失、
+     * 档位不一致或旧声明残留都会失败。
+     */
+    public void verify(Path packPath, int offsetY, int hotbarScale) throws IOException {
+        if (PackAssets.hotbarScaleTierOf(hotbarScale) < 0) {
+            throw new IOException("hotbar scale=" + hotbarScale + " 不是当前资源包已生成的档位");
+        }
+        verifyInternal(packPath, offsetY, hotbarScale, true);
+    }
+
+    private void verifyInternal(Path packPath, int offsetY, Integer overlayScale,
+                                boolean requireOverlay) throws IOException {
         Objects.requireNonNull(packPath, "packPath");
         if (!Files.isRegularFile(packPath)) {
             throw new IOException("资源包不存在或不是普通文件：" + packPath);
         }
 
-        ExpectedDeclarations expected = loadExpectedDeclarations(offsetY);
-        ZipIndex zip = readZipIndex(packPath, expected);
-        verifyFontJson(zip, expected.bundle);
+        ExpectedDeclarations expected = loadExpectedDeclarations(offsetY, overlayScale);
+        ZipIndex zip = readZipIndex(packPath, expected, requireOverlay);
+        verifyFontJson(zip, expected.bundle, expected.overlay);
         verifyCounterPngs(zip);
         verifyHotbarPng(zip);
         verifySelectPng(zip);
         verifyPackMetadata(zip);
     }
 
-    private ZipIndex readZipIndex(Path packPath, ExpectedDeclarations expected) throws IOException {
+    private ZipIndex readZipIndex(Path packPath, ExpectedDeclarations expected,
+                                  boolean requireOverlay) throws IOException {
         Map<String, EntryMetadata> entries = new LinkedHashMap<>();
         Set<String> names = new LinkedHashSet<>();
         try (ZipFile zip = new ZipFile(packPath.toFile())) {
@@ -166,7 +188,7 @@ public final class HudResourcePackVerifier {
                     index.selected.put(name, readEntry(zip, index, name, MAX_ENTRY_UNCOMPRESSED_BYTES, budget));
                 }
             }
-            verifyOverlayEntries(index, expected.overlay);
+            verifyOverlayEntries(index, expected.overlay, requireOverlay);
             return index;
         } catch (ZipException exception) {
             throw new IOException("资源包 ZIP 受损或使用了不支持的保护形式，无法验证："
@@ -296,8 +318,12 @@ public final class HudResourcePackVerifier {
         }
     }
 
-    private void verifyOverlayEntries(ZipIndex zip, Map<String, ImageDeclaration> expected) throws IOException {
+    private void verifyOverlayEntries(ZipIndex zip, Map<String, ImageDeclaration> expected,
+                                      boolean requireOverlay) throws IOException {
         if (zip.overlayPrefixes.isEmpty()) {
+            if (requireOverlay) {
+                throw new IOException("资源包缺少当前 hotbar scale 的 overlay 声明");
+            }
             return;
         }
         Map<String, ImageDeclaration> expectedByKey = new HashMap<>();
@@ -345,6 +371,9 @@ public final class HudResourcePackVerifier {
                     }
                 }
             }
+        }
+        if (requireOverlay && !sawRelevantEntry) {
+            throw new IOException("资源包缺少当前 hotbar scale 的 overlay 资源");
         }
         if (sawRelevantEntry && !actualKeys.equals(expectedByKey.keySet())) {
             Set<String> missing = new HashSet<>(expectedByKey.keySet());
@@ -525,7 +554,9 @@ public final class HudResourcePackVerifier {
         return "assets/" + namespace + "/textures/" + path;
     }
 
-    private ExpectedDeclarations loadExpectedDeclarations(int offsetY) throws IOException {
+    private ExpectedDeclarations loadExpectedDeclarations(int offsetY, Integer overlayScale) throws IOException {
+        validateGeneratedScaleSet(PackAssets.COUNTER_SCALE_TIERS, "counter");
+        validateGeneratedScaleSet(PackAssets.HOTBAR_SCALE_TIERS, "hotbar");
         Map<String, ImageDeclaration> bundle = new LinkedHashMap<>();
         for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
             String resourcePath = scale == PackAssets.COUNTER_DEFAULT_SCALE
@@ -539,15 +570,34 @@ public final class HudResourcePackVerifier {
         }
 
         Map<String, ImageDeclaration> overlay = new LinkedHashMap<>();
-        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            String source = "hotbar 调试覆盖层 scale=" + scale;
-            String overlayText = HotbarDebugOverlayWriter.buildImagesYaml(offsetY, scale);
+        if (overlayScale == null) {
+            for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+                String source = "hotbar 调试覆盖层 scale=" + scale;
+                String overlayText = HotbarDebugOverlayWriter.buildImagesYaml(offsetY, scale);
+                collectImageDeclarations(parseYaml(overlayText, source), overlay, source);
+            }
+        } else {
+            String source = "hotbar 调试覆盖层 scale=" + overlayScale;
+            String overlayText = HotbarDebugOverlayWriter.buildImagesYaml(offsetY, overlayScale);
             collectImageDeclarations(parseYaml(overlayText, source), overlay, source);
         }
         if (bundle.isEmpty() || overlay.isEmpty()) {
             throw new IOException("内置 HUD YAML 没有字形声明");
         }
         return new ExpectedDeclarations(Map.copyOf(bundle), Map.copyOf(overlay));
+    }
+
+    /** 资源校验必须以当前 profile 生成的集合为边界，不能把旧版全量档位当成合法输入。 */
+    private void validateGeneratedScaleSet(int[] scales, String family) throws IOException {
+        if (scales.length == 0) {
+            throw new IOException(family + " 当前 profile 没有生成任何 scale");
+        }
+        Set<Integer> unique = new HashSet<>();
+        for (int scale : scales) {
+            if (scale <= 0 || !unique.add(scale)) {
+                throw new IOException(family + " 当前 profile 的 scale 集合无效：" + Arrays.toString(scales));
+            }
+        }
     }
 
     private Map<String, Object> loadYaml(String resourcePath) throws IOException {
@@ -705,25 +755,34 @@ public final class HudResourcePackVerifier {
         return codepoint;
     }
 
-    private void verifyFontJson(ZipIndex zip, Map<String, ImageDeclaration> expected) throws IOException {
+    private Map<String, ImageDeclaration> mergeDeclarations(Map<String, ImageDeclaration> bundle,
+                                                              Map<String, ImageDeclaration> overlay) {
+        Map<String, ImageDeclaration> merged = new LinkedHashMap<>(bundle);
+        merged.putAll(overlay);
+        return merged;
+    }
+
+    private void verifyFontJson(ZipIndex zip, Map<String, ImageDeclaration> bundle,
+                                Map<String, ImageDeclaration> overlay) throws IOException {
         Map<String, ImageDeclaration> expectedByKey = new HashMap<>();
-        for (ImageDeclaration declaration : expected.values()) {
+        Map<String, ImageDeclaration> allowed = mergeDeclarations(bundle, overlay);
+        for (ImageDeclaration declaration : allowed.values()) {
             String key = mappingKey(declaration.font, declaration.codepoint);
             if (expectedByKey.putIfAbsent(key, declaration) != null) {
                 throw new IOException("内置 HUD YAML 存在重复 font/char：" + key);
             }
         }
 
-        Map<String, String> fontPaths = rootFontJsonPaths(expected);
+        Map<String, String> fontPaths = rootFontJsonPaths(allowed);
         Set<String> expectedPaths = new HashSet<>(fontPaths.values());
         for (String name : zip.names) {
             if (name.startsWith(FONT_ROOT + "muz_counter") && name.endsWith(".json")
                 && !expectedPaths.contains(name)) {
-                throw new IOException("资源包残留旧版记牌器字体分页，可能覆盖新码位：" + name);
+                throw new IOException("资源包包含当前 profile 未生成的记牌器字体分页，可能覆盖新码位：" + name);
             }
             if (name.startsWith(FONT_ROOT + "muz_hotbar") && name.endsWith(".json")
                 && !expectedPaths.contains(name)) {
-                throw new IOException("资源包残留旧版 hotbar 字体分页：" + name);
+                throw new IOException("资源包包含当前 profile 未生成的 hotbar 字体分页：" + name);
             }
         }
 
@@ -731,16 +790,20 @@ public final class HudResourcePackVerifier {
         for (Map.Entry<String, String> entry : fontPaths.entrySet()) {
             verifyOneFontJson(zip, entry.getValue(), entry.getKey(), expectedByKey, actualKeys);
         }
-        if (!actualKeys.equals(expectedByKey.keySet())) {
-            Set<String> missing = new HashSet<>(expectedByKey.keySet());
-            missing.removeAll(actualKeys);
-            Set<String> extra = new HashSet<>(actualKeys);
-            extra.removeAll(expectedByKey.keySet());
+        Set<String> requiredKeys = new HashSet<>();
+        for (ImageDeclaration declaration : bundle.values()) {
+            requiredKeys.add(mappingKey(declaration.font, declaration.codepoint));
+        }
+        Set<String> missing = new HashSet<>(requiredKeys);
+        missing.removeAll(actualKeys);
+        Set<String> extra = new HashSet<>(actualKeys);
+        extra.removeAll(expectedByKey.keySet());
+        if (!missing.isEmpty() || !extra.isEmpty()) {
             throw new IOException("字体映射集合不一致：缺失=" + missing + "，多余=" + extra);
         }
 
-        verifyCounterGeometry(expected);
-        verifyHotbarBundleGeometry(expected);
+        verifyCounterGeometry(bundle);
+        verifyHotbarBundleGeometry(bundle);
     }
 
     private void verifyOneFontJson(
@@ -1171,22 +1234,35 @@ public final class HudResourcePackVerifier {
                 throw new IOException("pack.mcmeta 缺少有效 pack 对象");
             }
             JsonObject pack = packValue.getAsJsonObject();
-            if (!pack.has("pack_format") || !pack.get("pack_format").isJsonPrimitive()
-                || !pack.getAsJsonPrimitive("pack_format").isNumber()) {
+            JsonElement packFormatValue = pack.get("pack_format");
+            if (packFormatValue == null) {
                 throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
             }
-            double packFormat = pack.getAsJsonPrimitive("pack_format").getAsDouble();
-            // 接受项目全部目标可能产出的 pack_format（75/84/88），来源见 PackAssets 常量。
-            // 硬编码 84/88 会把 paper-1.21.11（格式 75）的合法资源包误判为不受支持。
-            boolean supported = false;
-            for (int allowed : PackAssets.SUPPORTED_RESOURCE_PACK_FORMATS) {
-                if (packFormat == allowed) {
-                    supported = true;
-                    break;
+            List<Double> packFormats = new ArrayList<>();
+            if (packFormatValue.isJsonPrimitive() && packFormatValue.getAsJsonPrimitive().isNumber()) {
+                packFormats.add(packFormatValue.getAsDouble());
+            } else if (packFormatValue.isJsonArray()) {
+                for (JsonElement item : packFormatValue.getAsJsonArray()) {
+                    if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isNumber()) {
+                        throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
+                    }
+                    packFormats.add(item.getAsDouble());
                 }
+            } else {
+                throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
             }
+            // 接受项目全部目标可能产出的 pack_format（75/84/88），来源见 PackAssets 常量。
+            // CraftEngine 合并包可能以数组声明兼容的多个格式，数组中至少一个格式必须属于项目目标。
+            boolean supported = packFormats.stream().anyMatch(format -> {
+                for (int allowed : PackAssets.SUPPORTED_RESOURCE_PACK_FORMATS) {
+                    if (format == allowed) {
+                        return true;
+                    }
+                }
+                return false;
+            });
             if (!supported) {
-                throw new IOException("pack.mcmeta pack_format 不受支持：" + packFormat);
+                throw new IOException("pack.mcmeta pack_format 不受支持：" + packFormats);
             }
             if (!root.has("overlays")) {
                 return;

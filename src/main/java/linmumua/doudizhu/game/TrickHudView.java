@@ -56,8 +56,8 @@ final class TrickHudView {
      * 记牌器行里的一格：点数标签、通用框、数字三层 glyph，顺序固定为 label → frame → digit。
      *
      * <p>调用方把已经套好颜色与字体标签的分层片段交进来，View 只负责按
-     * {@code offset(-advance)} 叠加。默认档每格净前进量为 34 像素；75/125% 资源档
-     * 使用对应缩放后的 advance。隐藏时层列表为空，但仍保留同样的占位宽度，保证 15 个
+     * {@code offset(-advance)} 叠加。默认档与其它资源档都使用生成几何携带的 advance；
+     * 隐藏时层列表为空，但仍保留同样的占位宽度，保证 15 个
      * 点数的位置永远不变。
      *
      * @param text          兼容单层片段的构造入口；空串表示隐藏占位格
@@ -237,16 +237,18 @@ final class TrickHudView {
     }
 
     /**
-     * 记牌器行宽：各格前进量【逐个累加】，再加上格间距。
+     * 记牌器行宽：各格由生成几何携带的前进量【逐个累加】，再加上格间距。
      *
-     * <p>每格当前都固定为 {@link PackAssets#COUNTER_CELL_ADVANCE}，仍逐格累加是为了让
-     * {@link CounterCell} 自己的资源包契约成为唯一来源；隐藏格也会报告同样宽度，行宽不会跳。
+     * <p>不从标签或数字的视觉宽度反推行宽；{@link CounterCell} 自己携带的 advance 才是
+     * 当前资源档的唯一来源。隐藏格也会报告同样宽度，行宽不会跳。
      */
     private static int counterRowAdvance(List<CounterCell> counters, int counterGapPixels) {
         if (counters.isEmpty()) {
             return 0;
         }
-        int total = (counters.size() - 1) * counterGapPixels;
+        // Service 层会拒绝负 gap；View 仍做最后一道防线，避免纯函数调用者把相邻格压到一起。
+        int safeGap = Math.max(0, counterGapPixels);
+        int total = (counters.size() - 1) * safeGap;
         for (CounterCell cell : counters) {
             total += cell.advancePixels();
         }
@@ -322,10 +324,10 @@ final class TrickHudView {
     }
 
     /**
-     * 下排：记牌器，每格按「标签、框、数字」分层叠加，净前进量严格为 34。
+     * 下排：记牌器，每格按「标签、框、数字」分层叠加，净前进量严格等于该格 geometry.advance。
      *
-     * <p>每个 glyph 自带 34 像素前进量；后续层先用 {@code offset(-34)} 拉回同一格，
-     * 因而三层叠完仍只前进最后一层的 34 像素。空格子没有可见层，但仍用 34 像素占位。
+     * <p>每个 glyph 的生成几何使用同一 advance；后续层先用该格 advance 的负值拉回同一格，
+     * 因而三层叠完仍只前进最后一层的 advance。空格子没有可见层，但仍用该 advance 占位。
      */
     private static void appendCounterRow(
         StringBuilder builder,
@@ -341,13 +343,14 @@ final class TrickHudView {
                 List<String> layers = cell.layers();
                 for (int layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
                     if (layerIndex > 0) {
+                        // 生成的三层 PNG 共用同一 advance；负偏移只负责把后层叠回本格。
                         appendOffset(builder, offsetProvider, -cell.advancePixels());
                     }
                     builder.append(layers.get(layerIndex));
                 }
             }
             if (index < counters.size() - 1) {
-                appendOffset(builder, offsetProvider, counterGapPixels);
+                appendOffset(builder, offsetProvider, Math.max(0, counterGapPixels));
             }
         }
     }

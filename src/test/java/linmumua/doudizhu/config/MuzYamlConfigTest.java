@@ -26,7 +26,7 @@ class MuzYamlConfigTest {
             trick-hud:
               # 总开关
               enabled: true
-              # 头像放大倍数，只能取 4..10
+              # 头像放大倍数，只能取当前 profile 声明的离散档位（默认 4、6）
               avatar-scale: 6
               # 水平偏移
               offset-x: 0
@@ -42,7 +42,7 @@ class MuzYamlConfigTest {
         String serialized = Files.readString(file, StandardCharsets.UTF_8);
         assertTrue(serialized.contains("# 顶部说明"), "顶部注释必须留下：\n" + serialized);
         assertTrue(serialized.contains("# 总开关"), "键上方的注释必须留下：\n" + serialized);
-        assertTrue(serialized.contains("# 头像放大倍数，只能取 4..10"),
+        assertTrue(serialized.contains("# 头像放大倍数，只能取当前 profile 声明的离散档位（默认 4、6）"),
             "带取值范围的注释必须留下，这类注释丢了配置就没法看：\n" + serialized);
         // 注释保住的同时，值也必须真的写进去了
         assertEquals(4, new MuzYamlConfig(file).getInt("trick-hud.offset-x", 0));

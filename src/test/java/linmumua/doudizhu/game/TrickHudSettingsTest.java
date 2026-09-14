@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Test;
  * 守护出牌 HUD 的 config 解析。
  *
  * <p>这里真正要钉死的不是「getInt 能读到数」，而是【config 放行的值资源包里一定有对应
- * 字形】：头像倍数同时决定用哪一档 ascent 字形，而那些字形是构建期按 4..10 预生成的。
+ * 字形】：头像倍数同时决定用哪一档 ascent 字形，而那些字形是构建期按当前 profile 的显式档位预生成的。
  * 一旦有人把范围写死成字面量、或改了 PackAssets 的范围而没同步，玩家看到的是整片豆腐块，
  * 编译和覆盖率都发现不了。
  */
@@ -45,9 +45,8 @@ class TrickHudSettingsTest {
         assertTrue(settings.enabled(), "缺省应当是开启的，否则老配置升级后 HUD 会静默消失");
         assertTrue(settings.cardStep() > 0, "牌间距必须为正，否则牌会倒着排");
         assertTrue(
-            settings.avatarScale() >= PackAssets.AVATAR_PIXEL_MIN_SCALE
-                && settings.avatarScale() <= PackAssets.AVATAR_PIXEL_MAX_SCALE,
-            "默认倍数必须落在资源包预生成范围内，否则默认配置就是豆腐块"
+            PackAssets.avatarPixelScaleTierOf(settings.avatarScale()) >= 0,
+            "默认倍数必须落在资源包已生成的离散档位内，否则默认配置就是豆腐块"
         );
         assertTrue(warnings.isEmpty(), "默认值不该触发任何警告：" + warnings);
     }
@@ -65,18 +64,18 @@ class TrickHudSettingsTest {
     void configuredValuesAreActuallyUsed() {
         TrickHudService.Settings settings = TrickHudService.readSettings(
             configWith(Map.of(
-                "trick-hud.avatar-scale", 9,
+                "trick-hud.avatar-scale", 6,
                 "trick-hud.avatar-gap", 13,
                 "trick-hud.card-step", 30,
-                "trick-hud.avatar-offset-down", 158
+                "trick-hud.avatar-offset-down", 122
             )),
             warnings::add
         );
 
-        assertEquals(9, settings.avatarScale());
+        assertEquals(6, settings.avatarScale());
         assertEquals(13, settings.avatarGap());
         assertEquals(30, settings.cardStep());
-        assertEquals(158, PackAssets.avatarDownOffsetAt(settings.avatarDownOffsetTier()));
+        assertEquals(122, PackAssets.avatarDownOffsetAt(settings.avatarDownOffsetTier()));
         assertTrue(warnings.isEmpty(), "全是合法值且两行不重叠，不该有警告：" + warnings);
     }
 
@@ -116,15 +115,17 @@ class TrickHudSettingsTest {
     void pixelValuesAreTranslatedIntoTierIndexes() {
         TrickHudService.Settings settings = TrickHudService.readSettings(
             configWith(Map.of(
-                "trick-hud.card-height", 42,
-                "trick-hud.offset-down", 8,
+                "trick-hud.card-height", PackAssets.cardGlyphHeightAt(0),
+                "trick-hud.offset-down", PackAssets.cardGlyphDownOffsetAt(0),
                 "trick-hud.offset-x", -37
             )),
             warnings::add
         );
 
-        assertEquals(42, PackAssets.cardGlyphHeightAt(settings.heightTier()), "card-height=42 应当选到 42 像素那一档");
-        assertEquals(8, PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier()), "offset-down=8 应当选到下移 8 像素那一档");
+        assertEquals(PackAssets.cardGlyphHeightAt(0), PackAssets.cardGlyphHeightAt(settings.heightTier()),
+            "card-height 应当选到当前资源包实际生成的档位");
+        assertEquals(PackAssets.cardGlyphDownOffsetAt(0), PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier()),
+            "offset-down 应当选到当前资源包实际生成的档位");
         // offset-x 是像素而不是档位：它靠负空格实现，负数（左移）也必须原样透传。
         assertEquals(-37, settings.offsetX(), "offset-x 必须原样透传，左移是合法用法");
         assertTrue(warnings.isEmpty(), "全是合法值，不该有警告：" + warnings);
@@ -143,8 +144,9 @@ class TrickHudSettingsTest {
      */
     @Test
     void 范围内的值就近吸附_越界才警告() {
-        // 都在 32..56 内。步长 1，所以每个整数都正好命中一档，吸附后必须原样。
-        for (int height : new int[] {32, 41, 53, 56}) {
+        // 只使用当前资源包实际生成的牌高档位，避免测试假设未生成的中间档。
+        for (int heightTier = 0; heightTier < PackAssets.cardGlyphHeightTierCount(); heightTier++) {
+            int height = PackAssets.cardGlyphHeightAt(heightTier);
             warnings.clear();
             TrickHudService.Settings settings = TrickHudService.readSettings(
                 configWith(Map.of("trick-hud.card-height", height)),
@@ -170,8 +172,8 @@ class TrickHudSettingsTest {
             TrickHudService.Settings settings = TrickHudService.readSettings(
                 configWith(Map.of("trick-hud.offset-down", odd)), warnings::add);
             int resolved = PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier());
-            assertEquals(odd - 1, resolved,
-                "offset-down=" + odd + " 必须吸附到 " + (odd - 1) + "（并列取较小）");
+            assertEquals(PackAssets.cardGlyphDownOffsetAt(PackAssets.nearestCardGlyphDownOffsetTier(odd)), resolved,
+                "offset-down=" + odd + " 必须吸附到当前资源包最近档位");
             assertTrue(warnings.stream().noneMatch(w -> w.contains("offset-down")),
                 "范围内的奇数值不该警告，误差只有 1 像素：" + warnings);
         }
@@ -280,10 +282,10 @@ class TrickHudSettingsTest {
      */
     @Test
     void everyAcceptedAvatarScaleHasGlyphsInThePack() {
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             // 每个倍数都配上它对应的头像行偏移（默认牌行 50 + 盒高 10*scale），
             // 否则倍数一变就会真的重叠、触发重叠警告，把末尾那条「不该有警告」的断言污染掉。
-            // 顺带验证了一件事：4..10 每个倍数都能在头像档位表里找到精确相接的那一档。
+            // 顺带验证每个 profile 档位都能在头像档位表里找到精确相接的那一档。
             TrickHudService.Settings settings = TrickHudService.readSettings(
                 configWith(Map.of(
                     "trick-hud.avatar-scale", scale,
@@ -303,6 +305,23 @@ class TrickHudSettingsTest {
             }
         }
         assertTrue(warnings.isEmpty(), "区间内的倍数不该触发警告：" + warnings);
+    }
+
+    /** profile 中未声明的倍数必须被拒 + 回退 + 出警告，不能把稀疏档位误当连续区间。 */
+    @Test
+    void avatarScaleMissingFromSparseProfileIsRejectedLoudly() {
+        int missing = PackAssets.AVATAR_PIXEL_SCALE_TIERS[0] + 1;
+        while (PackAssets.avatarPixelScaleTierOf(missing) >= 0) {
+            missing++;
+        }
+        TrickHudService.Settings settings = TrickHudService.readSettings(
+            configWith(Map.of("trick-hud.avatar-scale", missing)),
+            warnings::add
+        );
+        assertEquals(
+            TrickHudService.readSettings(configWith(Map.of()), warnings::add).avatarScale(),
+            settings.avatarScale());
+        assertEquals(1, warnings.size(), "稀疏 profile 的缺档必须恰好发一条警告：" + warnings);
     }
 
     /** 越界倍数必须被拒 + 回退 + 出警告，三者缺一都会让人对着豆腐块猜半天。 */
@@ -417,7 +436,7 @@ class TrickHudSettingsTest {
      */
     @Test
     void 头像行偏移取任意整数时就近吸附且不警告() {
-        // 105 不在步长 2 的网格上（网格是 0,2,4,...），但在 0..400 范围内。
+        // 105 不一定命中当前资源包的头像偏移档位，但仍应按实际集合就近吸附。
         TrickHudService.Settings settings = TrickHudService.readSettings(
             configWith(Map.of("trick-hud.avatar-offset-down", 105)),
             warnings::add
@@ -425,8 +444,8 @@ class TrickHudSettingsTest {
 
         int resolved = PackAssets.avatarDownOffsetAt(settings.avatarDownOffsetTier());
         assertEquals(
-            104, resolved,
-            "105 必须吸附到最近的档；并列时取较小的那个（104 与 106 距离相同）"
+            PackAssets.avatarDownOffsetAt(PackAssets.nearestAvatarDownOffsetTier(105)), resolved,
+            "105 必须吸附到当前资源包最近的头像偏移档位"
         );
         assertTrue(
             warnings.stream().noneMatch(w -> w.contains("avatar-offset-down 超出")),
@@ -581,10 +600,10 @@ class TrickHudSettingsTest {
         // avatar-scale 走的是「越界回退成 6」而不是就近吸附（TrickHudService.readSettings），
         // 所以随包默认值必须自己就落在预生成区间内，否则默认配置一进服就先吃一条回退警告。
         assertTrue(
-            scale >= PackAssets.AVATAR_PIXEL_MIN_SCALE && scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE,
-            "config.yml 的 avatar-scale=" + scale + " 超出资源包预生成区间（"
-                + PackAssets.AVATAR_PIXEL_MIN_SCALE + ".." + PackAssets.AVATAR_PIXEL_MAX_SCALE
-                + "）。它不会被吸附，会直接回退成 6 并留警告"
+            PackAssets.avatarPixelScaleTierOf(scale) >= 0,
+            "config.yml 的 avatar-scale=" + scale + " 不在资源包预生成档位 "
+                + java.util.Arrays.toString(PackAssets.AVATAR_PIXEL_SCALE_TIERS)
+                + " 中。它不会被吸附，会直接回退成 6 并留警告"
         );
     }
 
@@ -618,16 +637,12 @@ class TrickHudSettingsTest {
         record Case(String name, int cardOffset, int avatarOffset, int scale) {
         }
         List<Case> overlapping = List.of(
-            // 头像行比牌行还浅：整个头像都在牌上方，最严重的重叠。
-            new Case("头像行比牌行浅", 50, 40, 6),
-            // 差 10 像素，远不够 6 倍头像的 60 像素盒高。
-            new Case("差值远不足盒高", 40, 50, 6),
-            // 按错误的 8*scale 算出来的「相接」值：40 + 8*6 = 88，实际需要 40 + 12*6 = 112。
-            new Case("按 8*scale 算的相接值仍重叠", 40, 88, 6),
-            // 按旧的 10*scale 算出来的值：40 + 10*6 = 100，漏掉王冠那 2 行仍重叠 12 像素。
-            new Case("按 10*scale 算漏掉王冠仍重叠", 40, 100, 6),
-            // 10 倍头像行整体高 120，默认 122 只让开 72。
-            new Case("大倍数头像挤不进默认档", 50, 122, 10)
+            new Case("小头像档位重叠", PackAssets.cardGlyphDownOffsetAt(0), 0,
+                PackAssets.AVATAR_PIXEL_SCALE_TIERS[0]),
+            new Case("大头像档位重叠", PackAssets.cardGlyphDownOffsetAt(0), 0,
+                PackAssets.AVATAR_PIXEL_SCALE_TIERS[1]),
+            new Case("牌行下移后仍重叠", PackAssets.cardGlyphDownOffsetMax(), 0,
+                PackAssets.AVATAR_PIXEL_SCALE_TIERS[0])
         );
 
         for (Case testCase : overlapping) {
@@ -677,7 +692,7 @@ class TrickHudSettingsTest {
      */
     @Test
     void 两行不重叠时不许有警告() {
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             for (int cardOffset : new int[] {0, 20, 40, 50}) {
                 int required = PackAssets.avatarRowDownOffset(cardOffset, scale);
                 if (PackAssets.avatarDownOffsetTierOf(required) < 0) {

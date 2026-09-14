@@ -1,0 +1,25 @@
+# MUZ 构建期资源档位快照；只生成这里列出的离散档位。
+# version 用于拒绝未兼容的 profile 格式，当前唯一支持值为 1。
+version: 1
+
+card:
+  # 与 config.yml 当前默认 trick-hud.card-height / offset-down 对齐。
+  heights: [53]
+  # 0 是无档位旧调用方的基准，50 是当前 trick-hud.offset-down。
+  offsets: [0, 50]
+
+avatar:
+  # 与 config.yml 当前默认 trick-hud.avatar-scale 对齐，并覆盖 TrickHudService 两侧固定 4 倍小头像与 6 倍中间头像。
+  # 这是显式稀疏档位列表；未列出的 scale 不会生成头像字形或 provider。
+  scales: [4, 6]
+  # 0 是桌边无偏移头像的基准，122 是当前 HUD 头像行偏移。
+  offsets: [0, 122]
+
+counter:
+  # 记牌器 scale/offset 只生成当前配置档位；0 保留默认字形调用基准。
+  scales: [100]
+  offsets: [0, 122]
+
+hotbar:
+  # Hotbar 按用户确认只生成一个当前 scale，切换档位需重新生成并下发资源包。
+  scale: 100

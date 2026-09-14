@@ -165,6 +165,26 @@ public final class HandCardPickGeometry {
     }
 
     /**
+     * 按比例缩放命中包络的横向与纵向触发范围，中心位置保持不变。
+     *
+     * <p>这是命中区域的几何缩放，不会改变牌面实体的显示尺寸；生产侧用于让 Hover/点击
+     * 的触发范围略小于完整动画包络，减少准星擦边时误触相邻牌的情况。
+     *
+     * @param envelope 原命中包络
+     * @param factor 横向与纵向缩放比例，必须为正数
+     * @return 中心不变、半宽和半高按比例缩放的新包络
+     */
+    public static Envelope scaleEnvelope(Envelope envelope, double factor) {
+        if (envelope == null || !Double.isFinite(factor) || factor <= 0.0) {
+            throw new IllegalArgumentException("命中包络缩放比例必须为正数");
+        }
+        return new Envelope(
+            envelope.halfWidth() * factor,
+            envelope.centerVOffset(),
+            envelope.halfHeight() * factor);
+    }
+
+    /**
      * 调试线框上的一段，局部坐标。
      *
      * <p>{@code u} 沿手牌铺开方向，{@code v} 是世界 Y（两者定义见类注释的局部坐标系）。

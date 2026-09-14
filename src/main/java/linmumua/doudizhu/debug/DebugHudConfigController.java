@@ -58,9 +58,47 @@ public final class DebugHudConfigController {
     /** 解析 JSON patch，校验后同步写盘；Debug Web 使用 coordinator 异步调用。 */
     public SaveResult savePatch(String jsonPatch) {
         try {
-            return savePatch(parsePatch(jsonPatch));
+            Patch patch = parsePatch(jsonPatch);
+            validatePatchAgainstCurrentHotbar(patch);
+            return savePatch(patch);
         } catch (ValidationException exception) {
             return SaveResult.failed(snapshot(), List.of(exception.getMessage()));
+        }
+    }
+
+    /**
+     * 校验 patch 合并后的 hotbar scale 与 offset-y 是否都有对应资源。
+     *
+     * <p>scale 虽然是构建期档位，但 offset-y 的 ascent overlay 只为本次应用的当前 scale
+     * 生成。不能让 writer 静默钳位，也不能让旧 scale 的 ready 状态跨档复用，否则会发送
+     * 客户端没有声明的调试码位或保存后看似成功却显示错误位置。
+     */
+    void validatePatchAgainstCurrentHotbar(Patch patch) {
+        Objects.requireNonNull(patch, "patch");
+        synchronized (plugin.hudWebConfigLock()) {
+            MuzYamlConfig config = plugin.yamlConfig();
+            int configuredScale = config.getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE);
+            int configuredOffsetY = config.getInt("hotbar-hud.offset-y", 0);
+            validateHotbarPatch(configuredScale, configuredOffsetY, patch);
+        }
+    }
+
+    /** 纯函数校验 patch 合并后的 hotbar 资源边界，供 Web 入口与契约测试共用。 */
+    static void validateHotbarPatch(int configuredScale, int configuredOffsetY, Patch patch) {
+        Object patchScale = patch.values().get("hotbar-hud.scale");
+        int scale = patchScale == null ? configuredScale : intValue(patchScale);
+        if (PackAssets.hotbarScaleTierOf(scale) < 0) {
+            throw new ValidationException("hotbar-hud.scale=" + scale
+                + " 不是当前资源包已生成的档位，需要重新生成资源包后才能使用。");
+        }
+        Object patchOffsetY = patch.values().get("hotbar-hud.offset-y");
+        int offsetY = patchOffsetY == null ? configuredOffsetY : intValue(patchOffsetY);
+        int min = HotbarDebugOverlayWriter.minOffsetY(scale);
+        int max = HotbarDebugOverlayWriter.maxOffsetY(scale);
+        if (offsetY < min || offsetY > max) {
+            throw new ValidationException("hotbar-hud.offset-y=" + offsetY
+                + " 不适用于当前 hotbar scale=" + scale + "%（允许 " + min + ".." + max
+                + "），请重新生成该档位资源包后再应用。");
         }
     }
 
@@ -112,13 +150,22 @@ public final class DebugHudConfigController {
     /** 读取刚完成磁盘重载后的 hotbar scale；调用方必须与 reloadFromDiskForWeb 同线程串行调用。 */
     int hotbarScaleForWeb() {
         synchronized (plugin.hudWebConfigLock()) {
-            return validHotbarScale(plugin.yamlConfig().getInt(
-                "hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
+            int scale = plugin.yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE);
+            if (PackAssets.hotbarScaleTierOf(scale) < 0) {
+                throw new ValidationException("hotbar-hud.scale=" + scale
+                    + " 不是当前资源包已生成的档位，需要重新生成资源包后才能重载。");
+            }
+            return scale;
         }
     }
 
     /** 保留旧调用点兼容；运行态应用由 Debug Web coordinator 在主线程完成。 */
     SaveResult savePatch(Patch patch) {
+        try {
+            validatePatchAgainstCurrentHotbar(patch);
+        } catch (ValidationException exception) {
+            return SaveResult.failed(snapshot(), List.of(exception.getMessage()));
+        }
         DiskSaveResult disk = savePatchToDisk(patch);
         Snapshot next = snapshot();
         return disk.ok()
@@ -172,7 +219,7 @@ public final class DebugHudConfigController {
      * 校准值，不是配置键。
      */
     static PreviewGeometry currentGeometry() {
-        return currentGeometry(6, true);
+        return currentGeometry(defaultAvatarScale(), true);
     }
 
     /**
@@ -180,10 +227,7 @@ public final class DebugHudConfigController {
      * 中间头像倍数和描边开关变化；否则页面只改了表单，预览仍会拿旧的三槽宽度。
      */
     static PreviewGeometry currentGeometry(MuzYamlConfig config) {
-        int avatarScale = config.getInt("trick-hud.avatar-scale", 6);
-        if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
-            avatarScale = 6;
-        }
+        int avatarScale = validAvatarScale(config.getInt("trick-hud.avatar-scale", defaultAvatarScale()));
         int counterScale = validCounterScale(config.getInt("trick-hud.counter.scale", PackAssets.COUNTER_DEFAULT_SCALE));
         int counterDownOffset = config.contains("trick-hud.counter.offset-down")
             ? config.getInt("trick-hud.counter.offset-down", 122)
@@ -199,10 +243,8 @@ public final class DebugHudConfigController {
     }
 
     private static PreviewGeometry currentGeometry(Map<String, Object> values) {
-        int avatarScale = intValue(values.getOrDefault("trick-hud.avatar-scale", 6));
-        if (avatarScale < PackAssets.AVATAR_PIXEL_MIN_SCALE || avatarScale > PackAssets.AVATAR_PIXEL_MAX_SCALE) {
-            avatarScale = 6;
-        }
+        int avatarScale = validAvatarScale(intValue(values.getOrDefault(
+            "trick-hud.avatar-scale", defaultAvatarScale())));
         int counterScale = validCounterScale(intValue(values.getOrDefault(
             "trick-hud.counter.scale", PackAssets.COUNTER_DEFAULT_SCALE)));
         int counterDownOffset = intValue(values.getOrDefault("trick-hud.counter.offset-down", 122));
@@ -253,6 +295,22 @@ public final class DebugHudConfigController {
             compatibilityHotbar.baseAscent(),
             compatibilityHotbar.minOffsetY(),
             compatibilityHotbar.maxOffsetY());
+    }
+
+    private static int defaultAvatarScale() {
+        return PackAssets.avatarPixelScaleTierOf(6) >= 0
+            ? 6
+            : PackAssets.avatarPixelScaleAt(0);
+    }
+
+    private static int sideAvatarScale() {
+        return PackAssets.avatarPixelScaleTierOf(4) >= 0
+            ? 4
+            : PackAssets.avatarPixelScaleAt(0);
+    }
+
+    private static int validAvatarScale(int scale) {
+        return PackAssets.avatarPixelScaleTierOf(scale) < 0 ? defaultAvatarScale() : scale;
     }
 
     private static int validCounterScale(int scale) {
@@ -334,7 +392,7 @@ public final class DebugHudConfigController {
 
     private static List<PreviewGeometry.AvatarGeometry> avatarGeometries() {
         List<PreviewGeometry.AvatarGeometry> geometries = new ArrayList<>();
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE; scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             geometries.add(new PreviewGeometry.AvatarGeometry(
                 scale,
                 PlayerHeadRenderer.advanceWidth(scale, false),
@@ -400,7 +458,7 @@ public final class DebugHudConfigController {
     }
 
     private static List<PreviewGeometry.AvatarSlotGeometry> avatarSlotGeometries(int middleScale, boolean outlined) {
-        int sideScale = 4;
+        int sideScale = sideAvatarScale();
         int sideContent = PlayerHeadRenderer.advanceWidth(sideScale, outlined);
         int middleContent = PlayerHeadRenderer.advanceWidth(middleScale, outlined);
         int slotWidth = Math.max(sideContent, middleContent);
@@ -416,8 +474,7 @@ public final class DebugHudConfigController {
      */
     private static List<PreviewGeometry.AvatarLayoutGeometry> avatarLayoutGeometries() {
         List<PreviewGeometry.AvatarLayoutGeometry> layouts = new ArrayList<>();
-        for (int scale = PackAssets.AVATAR_PIXEL_MIN_SCALE;
-             scale <= PackAssets.AVATAR_PIXEL_MAX_SCALE; scale++) {
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             for (boolean outlined : new boolean[]{false, true}) {
                 List<PreviewGeometry.AvatarSlotGeometry> slots = avatarSlotGeometries(scale, outlined);
                 int slotWidth = slots.get(0).slotWidth();
@@ -505,6 +562,14 @@ public final class DebugHudConfigController {
         return Math.max(1, step);
     }
 
+    private static List<Integer> avatarScaleOptions() {
+        List<Integer> values = new ArrayList<>();
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
+            values.add(scale);
+        }
+        return values;
+    }
+
     private static List<Integer> cardHeightOptions() {
         List<Integer> values = new ArrayList<>();
         for (int tier = 0; tier < PackAssets.cardGlyphHeightTierCount(); tier++) {
@@ -562,8 +627,8 @@ public final class DebugHudConfigController {
     private static Map<String, FieldSpec> buildFields() {
         LinkedHashMap<String, FieldSpec> specs = new LinkedHashMap<>();
         add(specs, bool("trick-hud.enabled", true, "出牌 HUD 总开关", "Trick HUD"));
-        add(specs, integer("trick-hud.avatar-scale", 6,
-            PackAssets.AVATAR_PIXEL_MIN_SCALE, PackAssets.AVATAR_PIXEL_MAX_SCALE, 1, "大头像倍数", "Trick HUD"));
+        add(specs, tierInteger("trick-hud.avatar-scale", defaultAvatarScale(),
+            avatarScaleOptions(), "大头像倍数", "Trick HUD"));
         add(specs, integer("trick-hud.avatar-gap", 6, null, null, 1, "头像到牌行间距", "Trick HUD"));
         add(specs, integer("trick-hud.card-step", 22, 1, null, 1, "相邻牌水平步进", "Trick HUD"));
         add(specs, tierInteger("trick-hud.card-height", PackAssets.DEFAULT_CARD_HEIGHT,
@@ -802,8 +867,18 @@ public final class DebugHudConfigController {
             };
         }
 
+        private boolean isScaleField() {
+            return "trick-hud.avatar-scale".equals(key)
+                || "trick-hud.counter.scale".equals(key)
+                || "hotbar-hud.scale".equals(key);
+        }
+
         private int normalizeInteger(int raw) {
             if (!options.isEmpty()) {
+                if (isScaleField() && !options.contains(raw)) {
+                    throw new ValidationException(key + "=" + raw
+                        + " 不是当前资源包已生成的档位，需要重新生成资源包后才能使用。");
+                }
                 int nearest = options.get(0);
                 int distance = Math.abs(raw - nearest);
                 for (int option : options) {
@@ -855,7 +930,8 @@ public final class DebugHudConfigController {
                 throw new ValidationException(key + " 必须是整数。");
             }
             if (!options.isEmpty() && !options.contains(value)) {
-                throw new ValidationException(key + " 不是当前资源包的合法档位：" + value);
+                throw new ValidationException(key + " 不是当前资源包的合法档位：" + value
+                    + "，需要重新生成资源包后才能使用。");
             }
             if (min != null && value < min || max != null && value > max) {
                 String lower = min == null ? "无下限" : String.valueOf(min);

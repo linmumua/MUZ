@@ -114,8 +114,18 @@ class TrickHudViewTest {
                 }
             }
         }
-        assertTrue(deepHeightTier >= 0,
-            "找不到任何落在非基名字体上的档 —— 牌族没被切分？那这条测试验不到东西");
+        if (deepHeightTier < 0) {
+            // 当前 profile 只有一档牌高、两档下移，全部 110 个牌字形仍落在第一张字体容量内。
+            // 这不是实现缺陷：没有生成第二张字体时，基名字体就是唯一正确结果。
+            for (int height = 0; height < PackAssets.cardGlyphHeightTierCount(); height++) {
+                for (int down = 0; down < downTierCount; down++) {
+                    assertEquals(PackAssets.CARD_GLYPH_FONT,
+                        PackAssets.cardGlyphFont(height, down),
+                        "当前 profile 未切出第二张字体时，所有已生成牌档应使用基名字体");
+                }
+            }
+            return;
+        }
 
         String line = TrickHudView.buildMiniMessage(
             TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY,
@@ -501,10 +511,10 @@ class TrickHudViewTest {
     }
 
     /**
-     * 记牌器行宽由固定 34px 格子和格间距组成，不能随标签或数字位数变化。
+     * 记牌器行宽由当前 CounterCell advance 和格间距组成，不能随标签或数字位数变化。
      */
     @Test
-    void 记牌器行宽按固定34像素格子累加() {
+    void 记牌器行宽按CounterCell前进量累加() {
         List<TrickHudView.CounterCell> counters = List.of(
             counterCell(),
             counterCell(),
@@ -514,8 +524,9 @@ class TrickHudViewTest {
 
         int advance = TrickHudView.containerAdvance(0, 0, 0, 0, 0, counters, gap);
 
-        assertEquals(3 * TrickHudView.CounterCell.ADVANCE_PIXELS + 2 * gap, advance,
-            "行宽必须是 3 个固定 34 像素格子加格间距");
+        int cellAdvance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
+        assertEquals(3 * cellAdvance + 2 * gap, advance,
+            "行宽必须是 3 个当前 CounterTier 格子加格间距");
     }
 
     /**
@@ -549,10 +560,11 @@ class TrickHudViewTest {
         // 记牌器行的第一格左沿 = (W - 行宽) / 2，即这一行自己也是居中的。
         List<Integer> counterLefts = new ArrayList<>();
         walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
-        int rowWidth = 2 * TrickHudView.CounterCell.ADVANCE_PIXELS + gap;
+        int cellAdvance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
+        int rowWidth = 2 * cellAdvance + gap;
         assertEquals(2, counterLefts.size(), "两格都要画出来");
         assertEquals((expected - rowWidth) / 2, counterLefts.get(0), "记牌器行必须自己居中");
-        assertEquals(counterLefts.get(0) + TrickHudView.CounterCell.ADVANCE_PIXELS + gap,
+        assertEquals(counterLefts.get(0) + cellAdvance + gap,
             counterLefts.get(1), "第二格紧随第一格加间距");
     }
 
@@ -566,8 +578,9 @@ class TrickHudViewTest {
     @Test
     void 空格子照样前进自报宽度以免后续格子左移() {
         int gap = 2;
+        int cellAdvance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
         List<TrickHudView.CounterCell> counters = List.of(
-            new TrickHudView.CounterCell("", TrickHudView.CounterCell.ADVANCE_PIXELS),
+            new TrickHudView.CounterCell("", cellAdvance),
             counterCell()
         );
 
@@ -578,31 +591,49 @@ class TrickHudViewTest {
         List<Integer> counterLefts = new ArrayList<>();
         walk(line, new ArrayList<>(), null, 0, 0, new ArrayList<>(), counterLefts);
         assertEquals(1, counterLefts.size(), "空格子不产出可见片段");
-        // 第二格左沿必须是 34 + gap；若空格子被跳过则会变成 0。
-        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS + gap, counterLefts.get(0),
+        // 第二格左沿必须是当前 cell advance + gap；若空格子被跳过则会变成 0。
+        assertEquals(cellAdvance + gap, counterLefts.get(0),
             "空格子必须占位，后续格子不得左移");
-        assertEquals(TrickHudView.CounterCell.ADVANCE_PIXELS + gap
-                + TrickHudView.CounterCell.ADVANCE_PIXELS,
+        assertEquals(cellAdvance + gap + cellAdvance,
             netAdvance(line), "行宽必须包含空格子占的宽度");
     }
 
     private static TrickHudView.CounterCell counterCell() {
+        int advance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
         return new TrickHudView.CounterCell(
-            List.of("<counter:34>"), TrickHudView.CounterCell.ADVANCE_PIXELS);
+            List.of("<counter:" + advance + ">"), advance);
     }
 
-    /** 三层 glyph 叠加后仍只净前进一个固定格宽。 */
+    /** 三层 glyph 叠加后仍只净前进一个当前资源档的格宽。 */
     @Test
-    void 分层片段用负34偏移叠加且净前进仍为34() {
+    void 分层片段用当前advance偏移叠加且净前进不变() {
+        int advance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance();
         TrickHudView.CounterCell layered = new TrickHudView.CounterCell(
-            List.of("<counter:34>", "<counter:34>", "<counter:34>"),
-            TrickHudView.CounterCell.ADVANCE_PIXELS);
+            List.of("<counter:" + advance + ">", "<counter:" + advance + ">", "<counter:" + advance + ">"),
+            advance);
         String line = TrickHudView.buildMiniMessage(
             null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
             TrickHudView.RowXOffsets.NONE, List.of(layered), 0);
 
-        assertEquals(34, netAdvance(line), "三层叠加必须保持一个 34px 格子的净前进量");
-        assertTrue(line.contains("<off:-34>"), "每个后续层必须用 offset(-34) 拉回同一格");
+        assertEquals(advance, netAdvance(line), "三层叠加必须保持当前 CounterTier 的净前进量");
+        assertTrue(line.contains("<off:-" + advance + ">"), "每个后续层必须按当前 advance 拉回同一格");
+    }
+
+    @Test
+    void 非默认counter档使用CounterCell自身advance() {
+        int syntheticScaleAdvance = PackAssets.counterTier(PackAssets.DEFAULT_HUD_SCALE, 0).advance() + 7;
+        TrickHudView.CounterCell first = new TrickHudView.CounterCell(
+            List.of("<counter:" + syntheticScaleAdvance + ">"), syntheticScaleAdvance);
+        TrickHudView.CounterCell second = new TrickHudView.CounterCell(
+            List.of("<counter:" + syntheticScaleAdvance + ">"), syntheticScaleAdvance);
+        int gap = 3;
+
+        String line = TrickHudView.buildMiniMessage(
+            null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(first, second), gap);
+
+        assertEquals(2 * syntheticScaleAdvance + gap, netAdvance(line),
+            "非默认 scale 即使当前 profile 未生成，也必须由 CounterCell 携带实际 advance");
     }
 
     /**

@@ -54,6 +54,8 @@ import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
 
 public final class PhysicalTableManager {
+    /** Hover/点击仅缩小命中触发范围，不改变牌面显示尺寸。 */
+    private static final double HAND_CARD_HIT_AREA_SCALE = 0.90;
     // 桌椅与按钮属于世界里的公共实体；手牌和个人按钮则是按玩家隐藏/显示的私有实体
     private static final String PROTECTED_ENTITY_TAG = "muz_table_protected";
     private static final MiniMessage MINI = MiniMessage.miniMessage();
@@ -321,7 +323,7 @@ public final class PhysicalTableManager {
         if (plugin.getTableManager().getTableOf(owner) != null) {
             throw new IllegalArgumentException("你已经坐在别的桌了。");
         }
-        // 调试放桌仅跳过 placementObstruction 方块占用检测：
+        // 调试放桌仅跳过桌面/椅子方块占用检测：
         // 批量放桌时相邻桌位的桌面/椅子区域可能重叠，跳过这一项才能连续生成；
         // 玩家已在其他桌的保护仍然保留，避免调试命令把同一玩家同时挂到多张桌。
         GameTable table = plugin.getTableManager().getTable(name);
@@ -5308,7 +5310,12 @@ public final class PhysicalTableManager {
         HandCardPickGeometry.Envelope selectedRaw = HandCardPickGeometry.envelopeForSelected(
             unselectedRaw, restScale.y,
             animatedCardLift(1.0f, 0.0f) * animationOvershootBound());
-        return HandCardPickGeometry.unifiedEnvelopes(unselectedRaw, selectedRaw);
+        HandCardPickGeometry.Envelope[] unified = HandCardPickGeometry.unifiedEnvelopes(unselectedRaw, selectedRaw);
+        // 只收紧实际命中触发区，牌面仍按原配置渲染；两个状态保持同一比例，避免悬停/选中切换时漂移。
+        return new HandCardPickGeometry.Envelope[] {
+            HandCardPickGeometry.scaleEnvelope(unified[0], HAND_CARD_HIT_AREA_SCALE),
+            HandCardPickGeometry.scaleEnvelope(unified[1], HAND_CARD_HIT_AREA_SCALE)
+        };
     }
 
     private HandCardPickGeometry.Hit pickHandCard(GameTable table, PlacedTable placed, Player viewer) {

@@ -59,6 +59,69 @@ class HudResourcePackVerifierTest {
     }
 
     @Test
+    void profile未生成的档位被拒绝() throws IOException {
+        int generatedCounterScale = PackAssets.COUNTER_SCALE_TIERS[0];
+        int ungeneratedCounterScale = generatedCounterScale + 1;
+        while (contains(PackAssets.COUNTER_SCALE_TIERS, ungeneratedCounterScale)) {
+            ungeneratedCounterScale++;
+        }
+        String staleCounterPath = "assets/minecraft/font/muz_counter_s" + ungeneratedCounterScale + ".json";
+        Path counterPack = writePack(temporaryDirectory.resolve("stale-counter-scale.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            Map.of(staleCounterPath, counterFontJson(OFFSET_Y, Mutation.NONE)
+                .getBytes(StandardCharsets.UTF_8)));
+        IOException counterFailure = assertThrows(IOException.class,
+            () -> verifier().verify(counterPack, OFFSET_Y));
+        assertTrue(counterFailure.getMessage().contains("未生成")
+            || counterFailure.getMessage().contains("不受支持")
+            || counterFailure.getMessage().contains("字体映射")
+            || counterFailure.getMessage().contains("残留旧版"), counterFailure.getMessage());
+
+        int generatedHotbarScale = PackAssets.HOTBAR_SCALE_TIERS[0];
+        int ungeneratedHotbarScale = generatedHotbarScale + 1;
+        while (contains(PackAssets.HOTBAR_SCALE_TIERS, ungeneratedHotbarScale)) {
+            ungeneratedHotbarScale++;
+        }
+        String staleHotbarPath = "assets/minecraft/font/muz_hotbar_s" + ungeneratedHotbarScale + ".json";
+        Path hotbarPack = writePack(temporaryDirectory.resolve("stale-hotbar-scale.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            Map.of(staleHotbarPath, hotbarFontJson().getBytes(StandardCharsets.UTF_8)));
+        IOException hotbarFailure = assertThrows(IOException.class,
+            () -> verifier().verify(hotbarPack, OFFSET_Y));
+        assertTrue(hotbarFailure.getMessage().contains("未生成")
+            || hotbarFailure.getMessage().contains("不受支持")
+            || hotbarFailure.getMessage().contains("字体映射")
+            || hotbarFailure.getMessage().contains("残留旧版"), hotbarFailure.getMessage());
+    }
+
+    @Test
+    void 带scale入口强制要求当前hotbarOverlay() throws IOException {
+        Path bundleOnly = writePack(temporaryDirectory.resolve("bundle-only-scale.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of());
+        IOException missing = assertThrows(IOException.class,
+            () -> verifier().verify(bundleOnly, OFFSET_Y, PackAssets.HOTBAR_DEFAULT_SCALE));
+        assertTrue(missing.getMessage().contains("overlay"), missing.getMessage());
+
+        Path withOverlay = writePack(temporaryDirectory.resolve("current-scale-overlay.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
+            overlayFontOverrides("muz", OFFSET_Y, OverlayMutation.NONE),
+            overlayMetadata("muz"));
+        assertDoesNotThrow(() -> verifier().verify(withOverlay, OFFSET_Y, PackAssets.HOTBAR_DEFAULT_SCALE));
+    }
+
+    @Test
+    void 选错hotbarScale的overlay被拒绝() throws IOException {
+        int unsupported = PackAssets.HOTBAR_DEFAULT_SCALE + 1;
+        while (contains(PackAssets.HOTBAR_SCALE_TIERS, unsupported)) {
+            unsupported++;
+        }
+        int invalidScale = unsupported;
+        IOException failure = assertThrows(IOException.class,
+            () -> verifier().verify(temporaryDirectory.resolve("missing.zip"), OFFSET_Y, invalidScale));
+        assertTrue(failure.getMessage().contains("不是当前资源包已生成的档位"), failure.getMessage());
+    }
+
+    @Test
     void packFormat75_84_88都通过() throws IOException {
         // 三个目标格式（paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88）都必须被接受。
         // 曾经硬编码只认 84/88，会把 1.21.11 的合法资源包误判为不受支持。
@@ -139,8 +202,8 @@ class HudResourcePackVerifierTest {
     void 旧overlay的ascent被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("old-overlay.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            overlayFontOverrides("muz_hotbar_debug", 0, OverlayMutation.NONE),
-            overlayMetadata("muz_hotbar_debug"));
+            overlayFontOverrides("muz", 0, OverlayMutation.NONE),
+            overlayMetadata("muz"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("字体映射与 YAML 不一致"), failure.getMessage());
@@ -204,8 +267,8 @@ class HudResourcePackVerifierTest {
     @Test
     void 相关超量overlay条目被拒绝() throws IOException {
         Path pack = temporaryDirectory.resolve("relevant-huge-overlay.zip");
-        writeRawValidPack(pack, overlayMetadata("muz_hotbar_debug"), List.of(
-            new RawEntry("muz_hotbar_debug/assets/minecraft/font/muz_hotbar.json",
+        writeRawValidPack(pack, overlayMetadata("muz"), List.of(
+            new RawEntry("muz/assets/minecraft/font/muz_hotbar.json",
                 new byte[0], 16L * 1024L * 1024L + 1L)));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
@@ -225,8 +288,8 @@ class HudResourcePackVerifierTest {
     void 正确overlay覆盖可通过() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("valid-overlay.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.NONE),
-            overlayMetadata("muz_hotbar_debug"));
+            overlayFontOverrides("muz", OFFSET_Y, OverlayMutation.NONE),
+            overlayMetadata("muz"));
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
     }
@@ -235,8 +298,8 @@ class HudResourcePackVerifierTest {
     void 仅无关overlay可通过() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("irrelevant-overlay.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            Map.of("muz_hotbar_debug/unrelated.txt", "not HUD".getBytes(StandardCharsets.UTF_8)),
-            overlayMetadata("muz_hotbar_debug"));
+            Map.of("muz/unrelated.txt", "not HUD".getBytes(StandardCharsets.UTF_8)),
+            overlayMetadata("muz"));
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
     }
@@ -257,8 +320,8 @@ class HudResourcePackVerifierTest {
     void overlay错ascent被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("wrong-overlay-ascent.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.WRONG_ASCENT),
-            overlayMetadata("muz_hotbar_debug"));
+            overlayFontOverrides("muz", OFFSET_Y, OverlayMutation.WRONG_ASCENT),
+            overlayMetadata("muz"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("字体映射"), failure.getMessage());
@@ -268,8 +331,8 @@ class HudResourcePackVerifierTest {
     void overlay重复char被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("duplicate-overlay-char.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.DUPLICATE_CHAR),
-            overlayMetadata("muz_hotbar_debug"));
+            overlayFontOverrides("muz", OFFSET_Y, OverlayMutation.DUPLICATE_CHAR),
+            overlayMetadata("muz"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("重复"), failure.getMessage());
@@ -279,8 +342,8 @@ class HudResourcePackVerifierTest {
     void overlay缺失char被拒绝() throws IOException {
         Path pack = writePack(temporaryDirectory.resolve("missing-overlay-char.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(),
-            overlayFontOverrides("muz_hotbar_debug", OFFSET_Y, OverlayMutation.MISSING_CHAR),
-            overlayMetadata("muz_hotbar_debug"));
+            overlayFontOverrides("muz", OFFSET_Y, OverlayMutation.MISSING_CHAR),
+            overlayMetadata("muz"));
 
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
         assertTrue(failure.getMessage().contains("集合不一致"), failure.getMessage());
@@ -471,6 +534,15 @@ class HudResourcePackVerifierTest {
         zip.closeEntry();
     }
 
+    private static boolean contains(int[] values, int target) {
+        for (int value : values) {
+            if (value == target) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String counterFontJson(int offsetY, Mutation mutation) {
         return counterFontJson(PackAssets.COUNTER_DEFAULT_SCALE, offsetY, mutation);
     }
@@ -478,6 +550,8 @@ class HudResourcePackVerifierTest {
     private String counterFontJson(int scale, int offsetY, Mutation mutation) {
         StringBuilder json = new StringBuilder("{\"providers\":[");
         boolean first = true;
+        int mutationOffset = PackAssets.counterDownOffsetTierOf(offsetY) >= 0
+            ? offsetY : PackAssets.counterDownOffsetAt(0);
         for (int tier = 0; tier < PackAssets.counterDownOffsetTierCount(); tier++) {
             int offset = PackAssets.counterDownOffsetAt(tier);
             PackAssets.CounterTier geometry = PackAssets.counterGeometry(scale, tier);
@@ -504,15 +578,15 @@ class HudResourcePackVerifierTest {
                 String resourceFile = "muz:font/" + (scale == PackAssets.COUNTER_DEFAULT_SCALE
                     ? "counter/" + file : "counter/scale_" + scale + "/" + file);
                 if (mutation == Mutation.OLD_48_PIXEL_MAPPING && scale == PackAssets.COUNTER_DEFAULT_SCALE
-                    && offset == offsetY && index == 15) {
+                    && offset == mutationOffset && index == 15) {
                     resourceFile = "muz:font/counter/rank_3_dim.png";
                     height = 48;
                     ascent = 26;
                 } else if (mutation == Mutation.WRONG_ASCENT && scale == PackAssets.COUNTER_DEFAULT_SCALE
-                    && offset == offsetY && index == 15) {
+                    && offset == mutationOffset && index == 15) {
                     ascent++;
                 } else if (mutation == Mutation.WRONG_CODEPOINT && scale == PackAssets.COUNTER_DEFAULT_SCALE
-                    && offset == offsetY && index == 15) {
+                    && offset == mutationOffset && index == 15) {
                     codepoint += 0x100;
                 }
                 appendBitmapProvider(json, height, ascent, resourceFile, codepoint);

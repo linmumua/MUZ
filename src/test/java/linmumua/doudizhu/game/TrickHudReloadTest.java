@@ -3,6 +3,7 @@ package linmumua.doudizhu.game;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
 import java.nio.file.Path;
@@ -79,20 +80,22 @@ class TrickHudReloadTest {
      */
     @Test
     void rereadingConfigYieldsUpdatedAvatarOffset() {
+        int firstTier = 0;
+        int secondTier = linmumua.doudizhu.assets.PackAssets.avatarDownOffsetTierCount() - 1;
+        assertTrue(secondTier > firstTier, "当前 profile 至少要生成两个头像偏移档，才能验证 reload 会读取新值");
+        int firstOffset = linmumua.doudizhu.assets.PackAssets.avatarDownOffsetAt(firstTier);
+        int secondOffset = linmumua.doudizhu.assets.PackAssets.avatarDownOffsetAt(secondTier);
+
         TrickHudService.Settings before = TrickHudService.readSettings(
-            configWith(Map.of("trick-hud.avatar-offset-down", 110)), message -> { });
+            configWith(Map.of("trick-hud.avatar-offset-down", firstOffset)), message -> { });
         TrickHudService.Settings after = TrickHudService.readSettings(
-            configWith(Map.of("trick-hud.avatar-offset-down", 150)), message -> { });
+            configWith(Map.of("trick-hud.avatar-offset-down", secondOffset)), message -> { });
 
         assertNotSame(before, after, "两次解析应当各自产生独立结果，不能返回同一个缓存实例");
-        assertEquals(
-            linmumua.doudizhu.assets.PackAssets.avatarDownOffsetTierOf(110),
-            before.avatarDownOffsetTier(),
-            "110 应当解析成对应档位");
-        assertEquals(
-            linmumua.doudizhu.assets.PackAssets.avatarDownOffsetTierOf(150),
-            after.avatarDownOffsetTier(),
-            "改成 150 后必须解析成另一档，否则 reload 读到的还是旧值");
+        assertEquals(firstTier, before.avatarDownOffsetTier(),
+            "第一个 profile 档位应当解析为对应索引");
+        assertEquals(secondTier, after.avatarDownOffsetTier(),
+            "改成另一个 profile 档位后必须读取新值，否则 reload 读到的还是旧值");
     }
 
     /**
