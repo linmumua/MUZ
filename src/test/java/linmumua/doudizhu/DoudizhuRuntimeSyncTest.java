@@ -84,8 +84,9 @@ class DoudizhuRuntimeSyncTest {
             "suspended 应当只在覆盖层已验证就绪时切换字形来源，不再用于停推送");
         assertTrue(body.contains("overlayReadyScale != scale"),
             "Debug Web 覆盖层必须绑定当前 hotbar scale，不能跨档发送未声明码位");
-        assertTrue(hotbar.contains("hotbarHudDebugGlyphText(scale)"),
-            "接管状态下必须改用当前缩放档的覆盖层字形，否则拖动 offset-y 在游戏内没有任何效果");
+        // 1.10.22 从九槽整幅字形迁移为三独立图标：守护真实发送路径，而非旧方法名。
+        assertTrue(hotbar.contains("PackAssets.hotbarIconChar(i, scale, useOverlay)"),
+            "三个图标必须按当前 scale 和 overlay 闸门选择码位，否则 offset-y 不会生效");
         assertTrue(hotbar.contains("private int overlayReadyScale = -1"),
             "overlay 就绪状态必须记录具体 scale，不能用全局布尔值跨档复用");
         assertTrue(hotbar.contains("overlayReadyScale == scale"),

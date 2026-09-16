@@ -1,6 +1,7 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.TableGadgetService;
 import net.momirealms.craftengine.bukkit.api.event.CustomBlockBreakEvent;
 import net.momirealms.craftengine.bukkit.api.event.FurnitureBreakEvent;
 import net.momirealms.craftengine.bukkit.api.event.FurnitureHitEvent;
@@ -80,6 +81,12 @@ public final class CraftEngineProtectionListener implements Listener {
                 + " blocking=" + (blocking == null ? "null" : blocking.getType().name()));
         if (handleHandCardClickOnFurniture(player, true, blocking)) {
             event.setCancelled(true);
+            return;
+        }
+        // CE 桌面是发包家具，右键不会进入 WorldTableInteractionListener 的实体路由；
+        // 手牌未接手时再交给同一套道具资格/同桌/墙体射线判定，避免家具吞掉有效右键。
+        if (tryUseTableGadget(player)) {
+            event.setCancelled(true);
         }
     }
 
@@ -129,6 +136,20 @@ public final class CraftEngineProtectionListener implements Listener {
         }
         return plugin.getPhysicalTableManager()
             .handleHandCardClickBlockedBy(player, rightClick, base);
+    }
+
+    /** CE 发包家具没有 Bukkit 实体事件，右键道具必须在 FurnitureInteractEvent 路由。 */
+    private boolean tryUseTableGadget(Player player) {
+        if (player == null) {
+            return false;
+        }
+        if (plugin.isHudDebugStick(player.getInventory().getItemInMainHand())
+            || plugin.isTablePlacer(player.getInventory().getItemInMainHand())
+            || plugin.isDoudizhuTableRemover(player.getInventory().getItemInMainHand())) {
+            return false;
+        }
+        TableGadgetService service = plugin.tableGadgets();
+        return service != null && service.tryUse(player);
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)

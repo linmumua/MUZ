@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -320,9 +321,9 @@ public class DebugWebServerTest {
         assertEquals(0, fixture.played(CardRank.SMALL_JOKER), "fixture 必须覆盖小王未出");
         assertEquals(1, fixture.played(CardRank.BIG_JOKER), "fixture 必须覆盖大王已出");
 
-        assertEquals(182, geometry.get("hotbarWidth").getAsInt());
-        assertEquals(183, geometry.get("hotbarAdvance").getAsInt());
-        assertEquals(22, geometry.get("hotbarHeight").getAsInt());
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_WIDTH, geometry.get("hotbarWidth").getAsInt());
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_ADVANCE, geometry.get("hotbarAdvance").getAsInt());
+        assertEquals(PackAssets.HOTBAR_HUD_GLYPH_HEIGHT, geometry.get("hotbarHeight").getAsInt());
         assertEquals(PackAssets.HOTBAR_HUD_GLYPH_WIDTH, geometry.get("hotbarWidth").getAsInt());
         assertEquals(PackAssets.HOTBAR_HUD_GLYPH_ADVANCE, geometry.get("hotbarAdvance").getAsInt());
         assertEquals(HotbarDebugOverlayWriter.GLYPH_HEIGHT, geometry.get("hotbarHeight").getAsInt());
@@ -378,15 +379,15 @@ public class DebugWebServerTest {
             "记牌行 baseline 必须按 counter label ascent 与 avatar-offset-down 对齐实际 provider，不能跟牌行高度相加");
         assertTrue(previewScript.contains("hbBaseAscent"),
             "Hotbar 预览必须消费服务端下发的 baseAscent 几何");
-        assertTrue(previewScript.contains("r.hbTexture") && previewScript.contains("r.hbSelectTexture"),
-            "Hotbar 资源必须消费服务端下发的真实纹理名");
-        // 旧断言编码了硬编码常量 `const slotW=18,slotH=20,slotStep=20,slotsStart=2`——
-        // 实现改为从 hotbars[] 按 scale 查表读取 r.hbSlotW/r.hbSlotStep 等，不再有此硬编码行。
-        // 新断言验证从 rowGeom 查表消费的字段名。
-        assertTrue(previewScript.contains("r.hbSlotW"));
+        assertTrue(previewScript.contains("icon.texture") && previewScript.contains("r.hbSelectTexture"),
+            "Hotbar 三图标与选中框资源必须消费服务端下发的真实纹理名");
+        // Hotbar 三图标位置、尺寸和选中框均必须消费服务端 geometry，不在兼容模板中复算旧九槽底板。
+        assertTrue(previewScript.contains("r.hbIcons"));
+        assertTrue(previewScript.contains("icon.index*icon.step"));
         assertTrue(previewScript.contains("r.hbSlotStep"));
-        assertTrue(previewScript.contains("r.hbSlotsStartX"));
-        assertTrue(previewScript.contains("for(let i=0;i<r.hbSlotCount;i++)"));
+        assertTrue(previewScript.contains("r.hbSelectTexture"));
+        assertFalse(previewScript.contains("hbSlotsStartX"));
+        assertFalse(previewScript.contains("hotbar_slots"));
     }
 
     @Test
@@ -437,7 +438,9 @@ public class DebugWebServerTest {
         for (Path page : List.of(Path.of("debug-hud-preview.html"),
             Path.of("src/main/resources/debug-hud-preview.html"))) {
             String standalone = Files.readString(page);
-            assertFalse(standalone.contains("||33") || standalone.contains("||34") || standalone.contains("||36"),
+            assertFalse(standalone.contains("counterCellWidth||")
+                    || standalone.contains("counterCellHeight||")
+                    || standalone.contains("counterAdvance||"),
                 page + " 不得保留旧 counter 几何 fallback");
             assertTrue(standalone.contains("未在 counterTiers 中声明"),
                 page + " 缺少 counterTiers 缺档提示");
@@ -502,8 +505,8 @@ public class DebugWebServerTest {
         assertTrue(preview.contains("querySelector") || preview.contains("getElementById")
                 || html.contains("function ensurePreview"),
             "稳定预览必须通过已存在节点查询/更新");
-        assertTrue(html.contains("hb-img") && html.contains("hb-select"),
-            "稳定更新路径仍必须保留底图与选中框图片节点");
+        assertTrue(html.contains("hb-icon-img") && html.contains("hb-select"),
+            "稳定更新路径仍必须保留三张图标与选中框图片节点");
         assertTrue(html.contains(".src=") || html.contains("setAttribute('src'"),
             "图片资源切换必须更新已有 img 节点的 src，而非依赖整棵 innerHTML");
     }
@@ -609,7 +612,7 @@ public class DebugWebServerTest {
     }
 
     @Test
-    void hotbar两张图片都必须在加载失败时显示可见错误() {
+    void hotbar三张独立图片和选中框都必须通过同源路由处理失败() {
         String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
             Map.of(), List.of(), List.of()
         ), "token");
@@ -618,18 +621,13 @@ public class DebugWebServerTest {
         assertTrue(hotbarStart >= 0 && hotbarEnd > hotbarStart, "必须存在稳定 Hotbar 预览渲染段");
         String hotbar = html.substring(hotbarStart, hotbarEnd);
         assertTrue(countOccurrences(hotbar, "/api/resource/") >= 2,
-            "底图和选中框都必须通过同源资源路由加载");
-        assertTrue(countOccurrences(hotbar, "node.onerror") >= 1 && hotbar.contains("setImage(img,err") && hotbar.contains("setImage(selected,selectErr"),
-            "两张 Hotbar 图片都必须处理加载失败");
-        int selected = hotbar.indexOf("hb-select");
-        assertTrue(selected >= 0, "必须存在选中框图片");
-        String selectedPart = hotbar.substring(selected);
-        assertTrue(hotbar.contains("setImage(selected,selectErr"), "选中框图片必须处理加载失败");
-        assertTrue(hotbar.contains("hb-select-error") && hotbar.contains("selectErr"),
-            "选中框加载失败也必须显示可见错误，不能静默隐藏");
-        assertTrue(hotbar.contains("hb-img-error") && hotbar.contains("hb-select-error")
-                && hotbar.contains("error.style.display='flex'"),
-            "底图与选中框必须各有可见的资源错误反馈");
+            "三个图标循环和选中框都必须通过同源资源路由加载");
+        assertTrue(countOccurrences(hotbar, "hb-icon-img") >= 1 && hotbar.contains("hbIcons"),
+            "三个独立 Hotbar 图标必须从 geometry icons 生成");
+        assertTrue(hotbar.contains("hb-select") && hotbar.contains("selected.onerror")
+                && hotbar.contains("hb-select-error"),
+            "选中框图片必须处理加载失败并显示可见提示");
+        assertFalse(hotbar.contains("hotbar_slots"), "兼容模板不得再引用旧九槽底板");
     }
 
     @Test
@@ -939,14 +937,14 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        // 底图 PNG：URL 从 geometry 的 hbTexture 字段动态拼接，不硬编码文件名
-        assertTrue(html.contains("/api/resource/'+esc(r.hbTexture)"),
-            "Hotbar 底图 URL 必须从 rowGeom 的 hbTexture 字段拼接");
-        assertTrue(html.contains("img.className='hb-img'"),
-            "底图 img 必须使用 hb-img 样式类");
+        // 三个独立图标 PNG：URL 从 geometry icons 的 texture 字段动态拼接，不硬编码文件名。
+        assertTrue(html.contains("/api/resource/'+esc(icon.texture)"),
+            "Hotbar 图标 URL 必须从 geometry icons 的 texture 字段拼接");
+        assertTrue(html.contains("hb-icon-img") && html.contains("hb-icon-hit"),
+            "三个图标必须使用独立图片与命中区域样式类");
 
         // 选中框 PNG：同理从 hbSelectTexture 字段拼接
-        assertTrue(html.contains("/api/resource/'+esc(r.hbSelectTexture)"),
+        assertTrue(html.contains("/api/resource/'+esc(selectTexture)"),
             "Hotbar 选中框 URL 必须从 rowGeom 的 hbSelectTexture 字段拼接");
         assertTrue(html.contains("selected.className='hb-select'"),
             "选中框 img 必须使用 hb-select 样式类");
@@ -957,20 +955,22 @@ public class DebugWebServerTest {
     }
 
     @Test
-    void 滚轮切换选中槽仅在hotbar层上方拦截() {
+    void 滚轮切换虚拟道具仅在图标区域拦截() {
         String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
             Map.of(), List.of(), List.of()
         ), "token");
 
-        // 滚轮监听器绑定在 screen 上，仅在 hotbar 层上方拦截
+        // 滚轮监听器绑定在 screen 上，仅在三个图标 hit 区域拦截
         assertTrue(html.contains("addEventListener('wheel'"),
             "必须注册 wheel 事件监听");
-        assertTrue(html.contains("closest('.layer[data-drag=\"hotbar\"]')"),
-            "滚轮必须检测目标是否在 hotbar 层内");
+        assertTrue(html.contains("closest('.hb-icon-hit')"),
+            "滚轮必须检测目标是否在独立图标区域内");
         assertTrue(html.contains("hotbarSelectedSlot"),
-            "滚轮必须修改 hotbarSelectedSlot");
-        assertTrue(html.contains("Math.max(0,Math.min(8,"),
-            "持槽必须限制在 0..8 范围内");
+            "滚轮必须修改虚拟道具索引");
+        assertTrue(html.contains("%count") && html.contains("||3"),
+            "虚拟道具索引必须按图标数量循环");
+        assertFalse(html.contains("Math.min(8,hotbarSelectedSlot"),
+            "滚轮不得再按原版九槽限制");
         // 滚轮不写入保存 patch：验证 currentPatch 函数体内不含 hotbarSelectedSlot
         int cpStart = html.indexOf("function currentPatch()");
         assertTrue(cpStart >= 0, "必须存在 currentPatch 函数");
@@ -982,21 +982,24 @@ public class DebugWebServerTest {
     }
 
     @Test
-    void 同源资源路由白名单包含当前profile的hotbarPNG() {
-        java.util.Set<String> names = DebugWebServer.resourceWhitelistNames();
+    void 同源资源路由白名单包含当前profile的三图标和选中框() {
+        Set<String> names = DebugWebServer.resourceWhitelistNames();
         long hotbarCount = names.stream()
-            .filter(name -> name.endsWith("hotbar_slots.png") || name.endsWith("hotbar_select.png"))
+            .filter(name -> name.contains("hotbar_egg.png") || name.contains("hotbar_water.png")
+                || name.contains("hotbar_tomato.png") || name.contains("hotbar_select.png"))
             .count();
-        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length * 2, hotbarCount,
-            "资源白名单必须包含当前 profile 每档 × 2 个 hotbar 文件");
-        // 100% 默认档
-        assertTrue(names.contains("muz:font/hotbar_slots.png"), "缺少 100% 底图");
-        assertTrue(names.contains("muz:font/hotbar_select.png"), "缺少 100% 选中框");
+        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length * 4, hotbarCount,
+            "资源白名单必须包含当前 profile 每档 × 3 个图标和选中框");
         for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            String prefix = scale == PackAssets.DEFAULT_HUD_SCALE ? "muz:font/" : "muz:font/scale_" + scale + "/";
-            assertTrue(names.contains(prefix + "hotbar_slots.png"), "缺少 " + scale + "% 底图");
-            assertTrue(names.contains(prefix + "hotbar_select.png"), "缺少 " + scale + "% 选中框");
+            for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+                assertTrue(names.contains(PackAssets.hotbarIconTexture(index, scale)),
+                    "缺少 " + scale + "% 图标 " + index);
+            }
+            assertTrue(names.contains(PackAssets.hotbarSelectTexturePath(scale)),
+                "缺少 " + scale + "% 选中框");
         }
+        assertFalse(names.stream().anyMatch(name -> name.contains("hotbar_slots.png")),
+            "新资源白名单不得保留旧九槽底板");
     }
 
     @Test
@@ -1014,10 +1017,10 @@ public class DebugWebServerTest {
             "CSS 必须包含 .layer-coords 规则");
         assertNotNull(extractRule(css, ".layer.selected"),
             "CSS 必须包含 .layer.selected 规则");
-        assertNotNull(extractRule(css, ".hb-img"),
-            "CSS 必须包含 .hb-img 规则");
         assertNotNull(extractRule(css, ".hb-select"),
             "CSS 必须包含 .hb-select 规则");
+        assertTrue(css.contains("hb-icon-hit") || css.contains("hb-icon-img"),
+            "CSS 必须包含独立图标命中区域规则");
     }
 
     @Test
@@ -1045,11 +1048,11 @@ public class DebugWebServerTest {
 
         // 选中框定位使用 hotbarSelectedSlot 与 rowGeom 查表的 hbSlotStep
         assertTrue(html.contains("hotbarSelectedSlot*r.hbSlotStep"),
-            "选中框 left 必须基于 hotbarSelectedSlot 和 rowGeom 查表的 hbSlotStep 计算");
+            "选中框 left 必须基于虚拟道具索引和 rowGeom 查表的 hbSlotStep 计算");
         // PNG 加载失败显示可见资源缺失提示，不静默隐藏
-        assertTrue(html.contains("hb-img-error"),
-            "加载失败必须显示可见的资源缺失提示");
-        assertTrue(html.contains("底图缺失"),
+        assertTrue(html.contains("hb-select-error"),
+            "选中框加载失败必须显示可见的资源缺失提示");
+        assertTrue(html.contains("选中框缺失"),
             "加载失败提示必须包含明确的缺失说明文本");
     }
 
@@ -1155,8 +1158,8 @@ public class DebugWebServerTest {
 
         // hotbars 查表
         assertTrue(html.contains("g.hotbars"), "必须从 geometry 读取 hotbars 数组");
-        assertTrue(html.contains("hb.slotWidth"), "hotbar 几何必须从 hb 查表对象读取");
-        assertTrue(html.contains("hb.texture"), "hotbar 纹理名必须从查表对象读取");
+        assertTrue(html.contains("hb.icons"), "hotbar 三图标几何必须从 hb 查表对象读取");
+        assertTrue(html.contains("icon.texture"), "hotbar 图标纹理名必须从 geometry icons 读取");
         assertTrue(html.contains("hb.selectTexture"), "选中框纹理名必须从查表对象读取");
 
         // 不再有硬编码魔数
@@ -1170,10 +1173,10 @@ public class DebugWebServerTest {
             Map.of(), List.of(), List.of()
         ), "token");
 
-        assertTrue(html.contains("hb-img-error"), "必须包含资源缺失提示样式类");
-        assertTrue(html.contains("底图缺失"), "必须包含可读的缺失说明文本");
-        // 底图 onerror 切换可见错误提示，不是简单 display:none
-        assertTrue(html.contains("node.onerror") && html.contains("error.style.display='flex'"),
+        assertTrue(html.contains("hb-select-error"), "必须包含选中框资源缺失提示样式类");
+        assertTrue(html.contains("选中框缺失"), "必须包含可读的缺失说明文本");
+        // 选中框 onerror 切换可见错误提示，不是静默失败
+        assertTrue(html.contains("selected.onerror") && html.contains("selectErr.style.display='flex'"),
             "onerror 必须显示稳定节点对应的错误提示元素");
     }
 
@@ -1196,17 +1199,16 @@ public class DebugWebServerTest {
         // 资源键使用完整 muz:font/... 路径，并严格受当前 profile 白名单约束
         java.util.Set<String> names = DebugWebServer.resourceWhitelistNames();
         // 合法路径能命中
-        assertTrue(names.contains("muz:font/hotbar_slots.png"));
         int firstScale = PackAssets.HOTBAR_SCALE_TIERS[0];
-        String firstPrefix = firstScale == PackAssets.DEFAULT_HUD_SCALE ? "muz:font/" : "muz:font/scale_" + firstScale + "/";
-        assertTrue(names.contains(firstPrefix + "hotbar_select.png"));
+        assertTrue(names.contains(PackAssets.hotbarIconTexture(0, firstScale)));
+        assertTrue(names.contains(PackAssets.hotbarSelectTexturePath(firstScale)));
         // 纯文件名不再是白名单键
-        assertFalse(names.contains("hotbar_slots.png"), "纯文件名不能命中白名单");
+        assertFalse(names.contains("hotbar_egg.png"), "纯文件名不能命中白名单");
         // 非法路径不在白名单
         assertFalse(names.contains("config.yml"), "config.yml 不能在资源白名单内");
         assertFalse(names.contains("../etc/passwd"), "路径遍历不能在资源白名单内");
         assertFalse(names.contains(""), "空路径不能在资源白名单内");
-        assertFalse(names.contains("muz:font/scale_200/hotbar_slots.png"), "非法档位不在白名单内");
+        assertFalse(names.contains("muz:font/scale_200/hotbar_egg.png"), "非法档位不在白名单内");
     }
 
     @Test
@@ -1246,7 +1248,7 @@ public class DebugWebServerTest {
         ), "token");
         String css = extractStyleBlock(html);
 
-        assertNotNull(extractRule(css, ".hb-img-error"), "CSS 必须包含 .hb-img-error 规则");
+        assertNotNull(extractRule(css, ".hb-icon-error"), "CSS 必须包含 .hb-icon-error 规则");
         assertNotNull(extractRule(css, ".resize-handle"), "CSS 必须包含 .resize-handle 规则");
     }
 
@@ -1295,18 +1297,19 @@ public class DebugWebServerTest {
             "textures/font/cards/",
             "textures/font/avatar/pixel_",
             "textures/font/avatar/crown_",
-            "textures/font/counter",
-            "hotbar_slots.png",
-            "hotbar_select.png"
+            "textures/font/counter"
         }) {
             assertTrue(build.contains(path), "构建期必须生成真实资源：" + path);
             assertTrue(server.contains(path) || server.contains(path.replace("textures/", "")),
                 "preview manifest/白名单必须引用真实资源：" + path);
         }
-        assertTrue(server.contains("PackAssets.hotbarTexturePath")
+        assertTrue(build.contains("hotbarIconNames") && build.contains("writeHotbarIconGlyph"),
+            "构建期必须按图标名称生成三个独立 Hotbar PNG");
+        assertTrue(build.contains("hotbar_select.png"), "构建期必须生成 Hotbar 选中框 PNG");
+        assertTrue(server.contains("PackAssets.hotbarIconTexture")
                 || server.contains("PackAssets.hotbarSelectTexturePath")
-                || server.contains("hotbarTexturePath"),
-            "hotbar manifest 必须从 PackAssets 真实路径生成");
+                || server.contains("hotbarIconTexture"),
+            "hotbar manifest 必须从 PackAssets 三图标真实路径生成");
         assertTrue(server.contains("counterRankTexturePath")
                 || server.contains("counterDigitTexturePath")
                 || server.contains("counterFrameTexturePath")

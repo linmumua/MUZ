@@ -564,43 +564,56 @@ player-options:
       spec: "type: play_sound; sound: minecraft:entity.player.levelup; volume: 0.35; pitch: 1.05; source: master"
 
 # ============================================================================
-# 底部物品栏 HUD（实验性功能）
+# 三道具 HUD 与桌内互动（实验性功能）
 # ============================================================================
-# 用 ActionBar 通道 + 字形负 ascent 渲染 182×22 完整 9 槽纯色块背景。
-# 仅当牌桌处于 GamePhase.PLAYING 正式出牌阶段，且座位为在线真人时周期推送；
-# LOBBY、BIDDING、DOUBLING、结算、离桌、停服及不在牌桌的普通玩家保持或恢复原版 9 槽。
-# 资源包不得覆盖 minecraft 原版 hotbar.png / hotbar_selection.png，避免全局影响普通物品栏。
+# 用 ActionBar 通道 + 独立透明字形渲染鸡蛋、水桶、番茄三个道具图标与选中高亮。
+# 每个图标盒为 20×22 像素，图标间隔 4 像素，总宽 68 像素，advance 为 69；
+# 默认基础 ascent 为 -100，相对历史九槽字形的 -128 上移 28 像素。
+# 仅当 hotbar-hud.enabled=true、牌桌处于 GamePhase.PLAYING 正式出牌阶段、且座位为在线真人时显示；
+# 互动目标限同桌其他在线真人。机器人、旁观者、跨桌玩家和无效目标不参与。
+# 三道具叠加在原版 9 槽物品栏上方，不接 BetterHud，也不覆盖 minecraft 原版 hotbar sprite。
 # 所有非 PLAYING 阶段的对局提示直接走普通 ActionBar，游戏流程不受影响。
 hotbar-hud:
   # 是否启用。false 时降级为普通 ActionBar（对局功能不受影响）。
-  # 【注意】启用后需要玩家重新下载包含自定义字形的资源包才能看到效果；资源包不会全局隐藏原版 hotbar。
+  # 【注意】启用后需要玩家重新下载包含三道具字形的资源包才能看到效果；资源包不会全局隐藏原版 hotbar。
   enabled: false
-  # 底图与选中框资源缩放档，只允许当前 muz-resource-profile.yml 已生成的档位；默认 profile 仅生成 100。
+  # 三道具与选中高亮资源缩放档，只允许当前 muz-resource-profile.yml 已生成的档位；默认 profile 仅生成 100。
   scale: 100
-  # 槽位底图水平偏移（像素，正数右移、负数左移）。
+  # 道具 HUD 水平偏移（像素，正数右移、负数左移）。
   # 走 CraftEngine 负空格实现，【运行期即时生效】：/muz reload 或 Debug Web 保存后
   # 下一次推送就能看到，不需要重新构建、不需要玩家重下资源包。
   # 任意整数都合法，不依赖预生成字形。
   offset-x: 0
-  # 槽位底图垂直偏移（像素，正数向下、负数向上）。
+  # 道具 HUD 垂直偏移（像素，正数向下、负数向上）。
   # 【与 offset-x 不同，这个不是即时的】：垂直位置由位图字形的 ascent 决定，
   # 而 ascent 烘焙在资源包里。Debug Web 会把这个值写成一份「调试覆盖层」资源
-  # （plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml，ascent = -128 - offset-y），
-  # 然后异步生成并校验资源包；“保存并应用”不触发 CE 重载，重载交给“重新读取配置”或管理员手动执行 /ce reload all。
-  # 所以每改一次都要：写文件 → 生成/校验资源包 → 客户端重新下载资源包，才能看到效果。
-  # 覆盖层不存在时此值不生效，底图仍按 bundle 内烘焙的 ascent(-128) 显示。
-  # 取值受 Minecraft 的「ascent 不得大于 height」限制，向上偏移会被钳位（见 Debug Web 面板提示）。
+  # （plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml），
+  # 然后异步写入、触发 CraftEngine 重载、重建并校验 ZIP；客户端必须重新下载资源包。
+  # 所以每改一次都要：写文件 → 重载 CE → 生成/校验资源包 → 客户端重新下载，才能看到效果。
+  # 覆盖层不存在时此值不生效，图标仍按 bundle 内烘焙的基础 ascent(-100) 显示。
   offset-y: 0
-  # 槽位字形的垂直偏移（ascent 值），构建期烘焙进 CraftEngine bundle。
-  # 【当前运行期并不读取这个键】，它只记录构建期约定：build.gradle.kts 生成
-  # hotbar_hud.yml 时把 ascent 写成字面量 -128（负值向下推，字形出现在屏幕底部物品栏区域）。
+  # 图标字形的垂直偏移（ascent 值），构建期烘焙进 CraftEngine bundle。
+  # 【当前运行期并不读取这个键】，它只记录构建期约定：build.gradle.kts 生成三道具字形时
+  # 把基础 ascent 写成字面量 -100（相对历史 -128 上移 28 像素）。
   # 要在运行期调垂直位置请改上面的 offset-y（走调试覆盖层），不要改这里 ——
   # 改这里不会有任何效果，真要动构建期烘焙值必须同步 build.gradle.kts 生成侧、
-  # PackAssets 的 hotbar 宽度/advance/码位约定，并重新构建、重启服务器、让玩家重下资源包。
-  glyph-ascent: -128
-  # 槽位数量（当前固定 9 个）。
-  # 【当前运行期同样不读取这个键】，槽数由构建期 182×22 遮罩贴图与
-  # PackAssets.HOTBAR_HUD_GLYPH_WIDTH=182 / HOTBAR_HUD_GLYPH_ADVANCE=183 共同决定：
-  # 9 个槽均为 18×20px，x=2,22,...,162，间隙与左右外边距均为 2px。
+  # PackAssets 的图标宽度/advance/码位约定，并重新构建、重启服务器、让玩家重下资源包。
+  glyph-ascent: -100
+  # 图标数量（当前固定 3 个：鸡蛋、水桶、番茄）。
+  # 【当前运行期同样不读取这个键】，数量与图标盒几何由构建期资源和 PackAssets 共同决定：
+  # 每个图标盒 20×22px，图标间隔 4px，总宽 68px，advance=69；选中高亮复用 20×22 几何。
   # 改这里不生效，不要作为普通配置项调整。
-  slot-count: 9
+  slot-count: 3
+  interaction:
+    # 是否启用桌内道具互动。关闭后不拦截换槽/右键，普通玩家操作保持原样。
+    enabled: true
+    # 目标最大距离（方块），仅解析视线内同桌在线真人；必须为正数。
+    range: 6.0
+    # 两次投掷/使用之间的冷却 tick，40 tick 约为 2 秒；必须为非负整数。
+    cooldown-ticks: 40
+    # 鸡蛋/番茄短暂无伤害投掷的飞行时长 tick；必须为正整数。
+    flight-ticks: 10
+    # 水桶贴身透明水幕的持续时长 tick；必须为正整数。
+    water-ticks: 16
+    # 同时活动的投掷/水幕效果上限；超过后拒绝新效果；必须为正整数。
+    max-active: 32

@@ -3,6 +3,7 @@ package linmumua.doudizhu.listener;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.ui.MuzTheme;
 import linmumua.doudizhu.room.TableLevel;
 import java.util.Iterator;
@@ -75,6 +76,17 @@ public final class WorldTableInteractionListener implements Listener {
     public WorldTableInteractionListener(DoudizhuPlugin plugin) {
         this.plugin = plugin;
         plugin.scheduler().runTimer(1L, 4L, this::tickToolPreviews);
+    }
+
+    /** 只有确定性路由的所有更高优先级处理都未消费时，才尝试桌内虚拟道具。 */
+    private boolean tryUseTableGadget(Player player, ItemStack item) {
+        if (plugin.isHudDebugStick(item)
+            || plugin.isTablePlacer(item)
+            || plugin.isDoudizhuTableRemover(item)) {
+            return false;
+        }
+        TableGadgetService service = plugin.tableGadgets();
+        return service != null && service.tryUse(player);
     }
 
     /**
@@ -170,6 +182,10 @@ public final class WorldTableInteractionListener implements Listener {
     /** 调试棒换出主手后，清掉仍挂在客户端上的假预览；临时行覆盖留到离桌/退出再清。 */
     @EventHandler
     public void onHudDebugStickHeldChange(PlayerItemHeldEvent event) {
+        TableGadgetService service = plugin.tableGadgets();
+        if (service != null) {
+            service.onHeldChange(event);
+        }
         Player player = event.getPlayer();
         plugin.scheduler().runLater(1L, () -> {
             if (!player.isOnline() || plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
@@ -250,6 +266,11 @@ public final class WorldTableInteractionListener implements Listener {
                     event.setCancelled(true);
                     return; // 命中手牌，不再做方块保护（牌悬浮在桌子上方，准星必然同时落在桌面方块上）
                 }
+            }
+            // 调试棒、放拆桌工具、手牌均已在上面优先处理；只有有效同桌目标才消费右键。
+            if (rightClick && tryUseTableGadget(event.getPlayer(), event.getItem())) {
+                event.setCancelled(true);
+                return;
             }
         }
 
@@ -350,6 +371,10 @@ public final class WorldTableInteractionListener implements Listener {
             event.setCancelled(true);
             return;
         }
+        if (tryUseTableGadget(event.getPlayer(), event.getPlayer().getInventory().getItemInMainHand())) {
+            event.setCancelled(true);
+            return;
+        }
         if (shouldCancelProtectedInteract(event.getRightClicked().getUniqueId())) {
             event.setCancelled(true);
         }
@@ -423,6 +448,10 @@ public final class WorldTableInteractionListener implements Listener {
         // 只挂在 onInteract 的 handleInteraction 永远等不到。
         // 靠 consumedButtonClicks 去重，两个包真的都到达时也只执行一次。
         if (handleActionButtonOnce(event.getPlayer(), event.getRightClicked())) {
+            event.setCancelled(true);
+            return;
+        }
+        if (tryUseTableGadget(event.getPlayer(), event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
             return;
         }

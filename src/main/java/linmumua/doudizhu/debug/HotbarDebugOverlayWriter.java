@@ -40,9 +40,8 @@ import java.util.Objects;
      * 不会把它当成清单残留删除，也不会覆盖正式 {@code pack.yml}。
 
  *
- * <p>覆盖层【只生成 YAML，不生成 PNG】：贴图直接引用 bundle 提供的
- * {@code muz:font/hotbar_slots.png}，所以绘图逻辑仍然只有构建期一份，不存在两处画图
- * 代码要同步。
+ * <p>覆盖层【只生成 YAML，不生成 PNG】：三张图标与选中框都直接引用 bundle 提供的
+ * 同源 PNG，所以绘图逻辑仍然只有构建期一份，不存在两处画图代码要同步。
  */
 public final class HotbarDebugOverlayWriter {
     private static final String CRAFT_ENGINE_PLUGIN = "CraftEngine";
@@ -52,15 +51,15 @@ public final class HotbarDebugOverlayWriter {
 
     /**
      * bundle 内烘焙的基准 ascent，与 build.gradle.kts 生成 {@code hotbar_hud.yml} 时
-     * 写的字面量 {@code -128} 必须一致。
+     * 写的字面量 {@code -100} 必须一致。
      *
      * <p>覆盖层的 ascent = 这个基准 - {@code offset-y}，所以 {@code offset-y = 0} 时
      * 覆盖层与 bundle 位置完全重合，拖动才有一个可预期的原点。
      */
-    public static final int BASE_ASCENT = -128;
+    public static final int BASE_ASCENT = -100;
 
     /**
-     * 贴图原生高度（像素），必须等于 {@code hotbar_slots.png} 的真实高度。
+     * 贴图原生高度（像素），必须等于三张 Hotbar 图标与选中框 PNG 的真实高度。
      *
      * <p>{@code height} 恒等于原生高 = 1:1 渲染，不缩放。这是本方案「纯位移」的前提：
      * 只要 {@code height} 不动，改 {@code ascent} 就只改位置、不改大小。
@@ -128,36 +127,36 @@ public final class HotbarDebugOverlayWriter {
         return buildImagesYaml(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /** 生成指定 hotbar scale 的底图与选中框 overlay 声明。 */
+    /** 生成指定 hotbar scale 的三图标与选中框 overlay 声明。 */
     public static String buildImagesYaml(int offsetY, int scale) {
         PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
         int clamped = clampOffsetY(offsetY, scale);
         int ascent = ascentFor(clamped, scale);
-        // char 用 \\uXXXX 转义写进 YAML：CraftEngine 按转义序列解析，
-        // 直接写真实字符会因为它落在 PUA 区而在各种编辑器里显示成豆腐块，不可读也易被误改。
+        // char 用 \\uXXXX 转义写进 YAML：CraftEngine 按转义序列解析，避免 PUA 字符被编辑器误改。
         String suffix = scale == PackAssets.HOTBAR_DEFAULT_SCALE ? "" : "_s" + scale;
-        String baseCharEscape = String.format("\\u%04x", tier.debugCodepoint());
-        String selectCharEscape = String.format("\\u%04x", tier.selectDebugCodepoint());
-        String baseName = OVERLAY_NAMESPACE + ":hotbar_slots_debug" + suffix;
-        String selectName = OVERLAY_NAMESPACE + ":hotbar_select_debug" + suffix;
-        return "# 【运行期生成，不要手改】由 MUZ 的 HotbarDebugOverlayWriter 按\n"
-            + "# hotbar-hud.offset-y 写出，每次在 Debug Web 保存垂直偏移都会覆盖这个文件。\n"
-            + "# scale = " + scale + "%，ascent = " + tier.baseAscent() + " - offset-y(" + clamped + ") = " + ascent + "\n"
-            + "# height 与选中框 height 恒等于各自贴图原生高，保证 1:1 渲染、只位移不缩放。\n"
-            + "# file 指向 bundle 提供的贴图，本覆盖层不自带 PNG。\n"
-            + "images:\n"
-            + "  " + baseName + ":\n"
-            + "    height: " + tier.height() + "\n"
-            + "    ascent: " + ascent + "\n"
-            + "    font: " + tier.font() + "\n"
-            + "    file: " + tier.texture() + "\n"
-            + "    char: " + baseCharEscape + "\n"
-            + "  " + selectName + ":\n"
-            + "    height: " + tier.selectHeight() + "\n"
-            + "    ascent: " + ascent + "\n"
-            + "    font: " + tier.font() + "\n"
-            + "    file: " + tier.selectTexture() + "\n"
-            + "    char: " + selectCharEscape + "\n";
+        StringBuilder yaml = new StringBuilder()
+            .append("# 【运行期生成，不要手改】由 MUZ 的 HotbarDebugOverlayWriter 按\n")
+            .append("# hotbar-hud.offset-y 写出，每次在 Debug Web 保存垂直偏移都会覆盖这个文件。\n")
+            .append("# scale = ").append(scale).append("%，ascent = ").append(tier.baseAscent())
+            .append(" - offset-y(").append(clamped).append(") = ").append(ascent).append("\n")
+            .append("# 三张独立图标共用 bundle PNG；高度恒等于原生贴图高，保证只位移不缩放。\n")
+            .append("images:\n");
+        for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+            yaml.append("  ").append(OVERLAY_NAMESPACE).append(":hotbar_")
+                .append(new String[] {"egg", "water", "tomato"}[index]).append("_debug").append(suffix).append(":\n")
+                .append("    height: ").append(PackAssets.hotbarIconHeight(scale)).append("\n")
+                .append("    ascent: ").append(ascent).append("\n")
+                .append("    font: ").append(tier.font()).append("\n")
+                .append("    file: ").append(PackAssets.hotbarIconTexture(index, scale)).append("\n")
+                .append("    char: ").append(String.format("\\u%04x", tier.debugCodepoint() + index)).append("\n");
+        }
+        yaml.append("  ").append(OVERLAY_NAMESPACE).append(":hotbar_select_debug").append(suffix).append(":\n")
+            .append("    height: ").append(tier.selectHeight()).append("\n")
+            .append("    ascent: ").append(ascent).append("\n")
+            .append("    font: ").append(tier.font()).append("\n")
+            .append("    file: ").append(tier.selectTexture()).append("\n")
+            .append("    char: ").append(String.format("\\u%04x", tier.selectDebugCodepoint())).append("\n");
+        return yaml.toString();
     }
 
     /** 生成覆盖层的 {@code pack.yml} 正文。 */

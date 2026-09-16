@@ -435,17 +435,28 @@ public final class DebugHudConfigController {
         return List.copyOf(geometries);
     }
 
-    /** 下发完整 hotbar 三档几何，前端只消费这些字段，不复算槽位/advance。 */
+    /** 下发完整 hotbar 三图标几何，前端只消费这些字段，不复算槽位/advance。 */
     private static List<PreviewGeometry.HotbarGeometry> hotbarGeometries() {
         List<PreviewGeometry.HotbarGeometry> geometries = new ArrayList<>();
         for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
             PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
+            List<PreviewGeometry.HotbarIconGeometry> icons = new ArrayList<>();
+            for (int index = 0; index < 3; index++) {
+                icons.add(new PreviewGeometry.HotbarIconGeometry(
+                    index,
+                    PackAssets.hotbarIconTexture(index, scale),
+                    PackAssets.hotbarIconWidth(scale),
+                    PackAssets.hotbarIconHeight(scale),
+                    PackAssets.hotbarIconStep(scale),
+                    PackAssets.hotbarIconAdvance(scale),
+                    PackAssets.hotbarIconChar(index, scale, false).codePointAt(0),
+                    PackAssets.hotbarIconChar(index, scale, true).codePointAt(0)));
+            }
             geometries.add(new PreviewGeometry.HotbarGeometry(
                 tier.scale(), tier.width(), tier.height(), tier.advance(), tier.baseAscent(),
-                tier.minOffsetY(), tier.maxOffsetY(), tier.font(), tier.texture(), tier.selectTexture(),
-                tier.selectWidth(), tier.selectHeight(), tier.selectAdvance(), tier.slotCount(),
-                tier.slotWidth(), tier.slotHeight(), tier.slotStep(), tier.slotsStartX(), tier.slotsStartY(),
-                tier.selectStartX(), tier.selectStartY(), tier.baseCodepoint(), tier.debugCodepoint(),
+                tier.minOffsetY(), tier.maxOffsetY(), tier.font(), icons,
+                tier.selectTexture(), tier.selectWidth(), tier.selectHeight(), tier.selectAdvance(),
+                3, PackAssets.hotbarIconStep(scale), tier.selectStartX(), tier.selectStartY(),
                 tier.selectCodepoint(), tier.selectDebugCodepoint()));
         }
         return List.copyOf(geometries);
@@ -779,14 +790,22 @@ public final class DebugHudConfigController {
             int labelHeight, int frameHeight, int digitHeight,
             int labelAscent, int frameTopDelta, int digitInset) {}
 
-        /** hotbar 的完整缩放、底图、九槽、选中框与 overlay 码位几何。 */
+        /** hotbar 的完整缩放、三图标、选中框与 overlay 码位几何。 */
         public record HotbarGeometry(
             int scale, int width, int height, int advance, int baseAscent,
-            int minOffsetY, int maxOffsetY, String font, String texture, String selectTexture,
-            int selectWidth, int selectHeight, int selectAdvance, int slotCount,
-            int slotWidth, int slotHeight, int slotStep, int slotsStartX, int slotsStartY,
-            int selectStartX, int selectStartY, int baseCodepoint, int debugCodepoint,
-            int selectCodepoint, int selectDebugCodepoint) {}
+            int minOffsetY, int maxOffsetY, String font, List<HotbarIconGeometry> icons,
+            String selectTexture, int selectWidth, int selectHeight, int selectAdvance,
+            int slotCount, int slotStep, int selectStartX, int selectStartY,
+            int baseCodepoint, int debugCodepoint) {
+            public HotbarGeometry {
+                icons = List.copyOf(icons);
+            }
+        }
+
+        /** 单个独立道具图标；texture、尺寸、advance 与构建期 PNG 同源。 */
+        public record HotbarIconGeometry(
+            int index, String texture, int width, int height, int step, int advance,
+            int codepoint, int debugCodepoint) {}
 
         /**
          * 记牌器 cell 的动态数据；宽度、高度与前进量由 PreviewGeometry 固定下发。

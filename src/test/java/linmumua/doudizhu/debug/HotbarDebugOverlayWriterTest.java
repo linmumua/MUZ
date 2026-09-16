@@ -1,6 +1,7 @@
 package linmumua.doudizhu.debug;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import linmumua.doudizhu.assets.PackAssets;
@@ -17,7 +18,7 @@ class HotbarDebugOverlayWriterTest {
 
     @Test
     void 偏移零时与构建期烘焙的基准ascent重合() {
-        // offset-y = 0 必须等于 bundle 里烘焙的 -128，否则拖动没有可预期的原点：
+        // offset-y = 0 必须等于 bundle 里烘焙的 -100，否则拖动没有可预期的原点：
         // 一开面板底图就会自己跳一下。
         assertEquals(HotbarDebugOverlayWriter.BASE_ASCENT, HotbarDebugOverlayWriter.ascentFor(0));
     }
@@ -48,11 +49,16 @@ class HotbarDebugOverlayWriterTest {
     @Test
     void 生成的YAML与PackAssets的码位和字体严格对齐() {
         String yaml = HotbarDebugOverlayWriter.buildImagesYaml(24);
+        assertTrue(yaml.contains("\nimages:\n"), "overlay YAML 必须使用真实换行分隔根节点");
+        assertFalse(yaml.contains("\\n"), "overlay YAML 不得把换行写成字面量 \\n");
 
-        // 码位：必须是 PackAssets 复算侧用的那个，不是随手写的字面量
-        String expectedChar = String.format("\\u%04x", PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT);
-        assertTrue(yaml.contains("char: " + expectedChar),
-            "覆盖层码位必须与 PackAssets.HOTBAR_HUD_DEBUG_CODEPOINT 一致，否则游戏内是豆腐块");
+        // 三张 overlay 图标的码位必须来自 PackAssets 复算侧，不能随手写字面量。
+        for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+            String expectedChar = String.format("\\u%04x", PackAssets.hotbarIconChar(index,
+                PackAssets.HOTBAR_DEFAULT_SCALE, true).codePointAt(0));
+            assertTrue(yaml.contains("char: " + expectedChar),
+                "覆盖层图标码位必须与 PackAssets 对齐，否则游戏内是豆腐块：index=" + index);
+        }
 
         // 字体：与 bundle 同族，运行期才能在两个码位间切换
         assertTrue(yaml.contains("font: " + PackAssets.HOTBAR_HUD_FONT),
@@ -67,9 +73,10 @@ class HotbarDebugOverlayWriterTest {
         assertTrue(yaml.contains("ascent: " + HotbarDebugOverlayWriter.ascentFor(24)),
             "ascent 必须由 offset-y 换算而来");
 
-        // 贴图引用 bundle 那张，覆盖层不自带 PNG（绘图逻辑只保留构建期一份）
-        assertTrue(yaml.contains("file: muz:font/hotbar_slots.png"),
-            "覆盖层应复用 bundle 的贴图，不自带 PNG");
+        // 三张 overlay 图标都复用 bundle PNG，覆盖层只新增 YAML/provider，不自带 PNG。
+        assertTrue(yaml.contains("file: muz:font/hotbar_egg.png"), "overlay 应复用鸡蛋 PNG");
+        assertTrue(yaml.contains("file: muz:font/hotbar_water.png"), "overlay 应复用水桶 PNG");
+        assertTrue(yaml.contains("file: muz:font/hotbar_tomato.png"), "overlay 应复用番茄 PNG");
     }
 
     @Test

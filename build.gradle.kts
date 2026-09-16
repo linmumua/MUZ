@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.18"
+version = "1.10.22"
 
 data class MuzTarget(
     val id: String,
@@ -64,6 +64,8 @@ val soundSourceDir = resourcePackSourceDir.resolve("assets/$sourceResourceNamesp
 
 val tableFurnitureId = "table_large"
 val chairFurnitureId = "chair_large"
+val tableGadgetTomatoId = "table_gadget_tomato"
+val tableGadgetWaterSheetId = "table_gadget_water_sheet"
 
 
 
@@ -688,7 +690,7 @@ fun renderRankGlyph(id: String, color: Color = Color.WHITE): BufferedImage {
 // 【每档固定 22 个 glyph】：标签下标 0..14、数字 15..19、普通/耗尽框 20..21。
 // 码位排列不等于绘制顺序；TrickHudView 按 label → frame → digit 输出，后层按紧凑 advance=22 回退。
 // 标签/框/数字是三层独立贴图，同一档只改变 ascent，不为「每个点数 × 每个已出数」
-// 生成组合 PNG，因此不会再出现 30,150 张组合资源。所有图形都由确定性矢量笔画绘制，
+// 生成组合 PNG，因此不会再出现 30,150 张组合资源。所有图形都由确定性整数像素字模绘制，
 // 不依赖构建机上的系统字体。
 // ============================================================================
 val counterGlyphFont = "minecraft:${resourceNamespace}_counter"
@@ -708,23 +710,24 @@ val counterGlyphFrameAscent = -3
 val counterGlyphLabelAscent = 12
 val counterGlyphAdvance = 22
 
-// 0xEF00：hotbar HUD 底部物品栏字形（单字形，无档位切分）。
-// 【必须与 PackAssets.HOTBAR_HUD_FONT / HOTBAR_HUD_CODEPOINT 保持一致】
+// Hotbar HUD 三张独立物品图标：鸡蛋、水桶、番茄。每张图标独立占用 20×22，
+// 图标之间留 4px，水平 step=24；三张图标视觉宽度 68px，整体 advance=69。
+// 【必须与 PackAssets.hotbarIcon* / HOTBAR_* 几何保持一致】
 val hotbarHudFont = "minecraft:${resourceNamespace}_hotbar"
-val hotbarHudCodepoint = 0xEF00
-val hotbarHudCharEscape = "\\uef00"
-// 原版 9 槽物品栏背景是 182×22；PLAYING 阶段用同尺寸的不透明字形完整盖住它，
-// 再在 9 个槽位位置绘制九色纯色块。宽、高、槽数与前进量必须同步 PackAssets 的同名字义常量。
-val hotbarHudGlyphWidth = 182
-val hotbarHudGlyphHeight = 22
-val hotbarHudSlotCount = 9
+val hotbarIconNames = listOf("egg", "water", "tomato")
+val hotbarIconCount = hotbarIconNames.size
+val hotbarIconGlyphWidth = 20
+val hotbarIconGlyphHeight = 22
+val hotbarIconStep = 24
+val hotbarIconAdvance = hotbarIconGlyphWidth + 1
+val hotbarHudGlyphWidth = hotbarIconGlyphWidth * hotbarIconCount + (hotbarIconCount - 1) * (hotbarIconStep - hotbarIconGlyphWidth)
+val hotbarHudGlyphHeight = hotbarIconGlyphHeight
+val hotbarHudSlotCount = hotbarIconCount
 val hotbarHudGlyphAdvance = hotbarHudGlyphWidth + 1
 
 // 0xEF02：hotbar HUD「选中槽」高亮框字形（muz:font/hotbar_select.png）。
 // 【必须与 PackAssets.HOTBAR_SELECT_CODEPOINT / WIDTH / HEIGHT / ADVANCE 保持一致】
-// 与 0xEF00 同字体族 minecraft:muz_hotbar，运行期由 HotbarHudService 用零净前进量的
-// 负空格夹心定位到玩家当前持槽（heldSlot）的像素位置，因此不改变底图字形的净前进量。
-// 尺寸比 18×20 的槽块每边多 1px：20×22 的 2px 亮色空心描边框，中间透明，advance=宽+1。
+// 选框继续独立于三张图标，运行期由 HotbarHudService 用零净前进量夹心定位到 0..2 图标。
 val hotbarSelectFont = hotbarHudFont
 val hotbarSelectCodepoint = 0xEF02
 val hotbarSelectCharEscape = "\\uef02"
@@ -732,18 +735,31 @@ val hotbarSelectGlyphWidth = 20
 val hotbarSelectGlyphHeight = 22
 val hotbarSelectGlyphAdvance = hotbarSelectGlyphWidth + 1
 
-// counter/hotbar 的构建期缩放档。profile 只保留当前需要的档位；100 仍保留旧字体、码位
-// 和 PNG 路径，75/125 继续使用独立字体与独立码位窗口。
-// 这些数组会写入 PackTiers.java，PackAssets 运行期直接读取同一份生成结果。
+// counter/hotbar 的构建期缩放档。每个 hotbar scale 保持原有窗口起点：75% 从 EF10、
+// 100% 从 EF04、125% 从 EF20；每个窗口依次放置三基础图标、三 overlay 图标、两选框。
+// EF00/EF01 旧九槽底板不再生成或发布。数组会写入 PackTiers.java，PackAssets 读取同源结果。
 val supportedHudScales = listOf(75, 100, 125)
 val allCounterScaleTiers = supportedHudScales
 val allHotbarScaleTiers = supportedHudScales
 val allCounterScaleCodepointStarts = listOf(0xED00, counterGlyphCodepointStart, 0xEE00)
-val allHotbarScaleBaseCodepoints = listOf(0xEF10, hotbarHudCodepoint, 0xEF20)
-val allHotbarScaleDebugCodepoints = listOf(0xEF11, 0xEF01, 0xEF21)
-val allHotbarScaleSelectCodepoints = listOf(0xEF12, hotbarSelectCodepoint, 0xEF22)
-// EF03 是默认 100 档覆盖层选框；其它缩放档使用同一相对布局的独立码位。
-val allHotbarScaleSelectDebugCodepoints = listOf(0xEF13, 0xEF03, 0xEF23)
+val allHotbarScaleBaseCodepoints = listOf(0xEF10, 0xEF04, 0xEF20)
+val allHotbarScaleDebugCodepoints = listOf(0xEF13, 0xEF07, 0xEF23)
+val allHotbarScaleSelectCodepoints = listOf(0xEF16, hotbarSelectCodepoint, 0xEF26)
+// 选框 overlay 码位紧跟在各 scale 窗口末尾；默认 100% 继续为 EF03。
+val allHotbarScaleSelectDebugCodepoints = listOf(0xEF17, 0xEF03, 0xEF27)
+val allHotbarCodepoints = buildList {
+    allHotbarScaleBaseCodepoints.forEach { start -> addAll(start until start + hotbarIconCount) }
+    allHotbarScaleDebugCodepoints.forEach { start -> addAll(start until start + hotbarIconCount) }
+    addAll(allHotbarScaleSelectCodepoints)
+    addAll(allHotbarScaleSelectDebugCodepoints)
+}
+check(allHotbarCodepoints.size == allHotbarCodepoints.toSet().size) {
+    "hotbar 基础/overlay/选框码位发生冲突：${allHotbarCodepoints}"
+}
+check(allHotbarCodepoints.none { it == 0xEF00 || it == 0xEF01 }) {
+    "旧九槽 hotbar 码位 EF00/EF01 不得重新发布"
+}
+allHotbarCodepoints.forEach { checkGlyphCodepoint(it, "hotbar", 0) }
 val defaultHudScale = 100
 val counterScaleTiers = resourceProfile.counterScales.sorted()
 val hotbarScaleTiers = listOf(resourceProfile.hotbarScale)
@@ -766,8 +782,9 @@ fun scaledPixels(value: Int, scale: Int): Int = maxOf(1, Math.round(value * scal
 /** 缩放带符号的 ascent，负值也按最近整数而不是截断。 */
 fun scaledSigned(value: Int, scale: Int): Int = Math.round(value * scale / 100f)
 
-// 点数字形文件名，顺序【就是 CardRank 枚举序】（3..2、小、大）。中文王牌使用专用
-// 「小」「大」矢量短标签，避免依赖系统中文字体，同时保留 CardRank.ordinal() 映射契约。
+// 点数字形文件名，顺序【就是 CardRank 枚举序】（3..2、小、大）。王牌使用专用
+// 9x9 方正像素标签，使用单字“小”“大”表达大小王，避免依赖系统中文字体，
+// 同时保留 CardRank.ordinal() 映射契约。
 val counterRankGlyphFiles = listOf(
     "label_3", "label_4", "label_5", "label_6", "label_7", "label_8", "label_9", "label_10",
     "label_j", "label_q", "label_k", "label_a", "label_2", "label_small", "label_big"
@@ -787,69 +804,64 @@ check(counterGlyphFiles.size == counterRankGlyphFiles.size + counterGlyphFrameCo
     "记牌器每档必须严格占用 22 个字形"
 }
 
-/** 在传入的紧凑视觉盒内描一枚确定性矢量符号；所有坐标随宽高按比例计算。 */
-fun appendCounterSymbol(path: GeneralPath, symbol: String, ox: Float, oy: Float, width: Float, height: Float) {
-    // 紧凑 21×12/21×8 字形仍保留稳定留白；数字层高度更小时自动收紧边距。
-    val m = maxOf(0.75f, minOf(width, height) * 0.12f)
-    val x0 = ox + m
-    val x1 = ox + width - m
-    val y0 = oy + m
-    val y1 = oy + height - m
-    val xm = (x0 + x1) / 2f
-    val ym = (y0 + y1) / 2f
-    val w = x1 - x0
-    val h = y1 - y0
-    when (symbol) {
-        "0" -> path.append(Ellipse2D.Float(x0, y0, w, h), false)
-        "1" -> { path.moveTo(xm - w * .25f, ym - h * .25f); path.lineTo(xm, y0); path.lineTo(xm, y1) }
-        "2" -> { path.moveTo(x0, y0 + h * .25f); path.curveTo(x0, y0, x1, y0, x1, y0 + h * .25f); path.lineTo(x0, y1); path.lineTo(x1, y1) }
-        "3" -> { path.moveTo(x0, y0); path.lineTo(x1, y0); path.lineTo(xm, ym); path.lineTo(x1, y1); path.lineTo(x0, y1) }
-        "4" -> { path.moveTo(x1 - w * .2f, y1); path.lineTo(x1 - w * .2f, y0); path.lineTo(x0, ym + h * .12f); path.lineTo(x1, ym + h * .12f) }
-        "5" -> { path.moveTo(x1, y0); path.lineTo(x0, y0); path.lineTo(x0, ym); path.curveTo(x1, ym, x1, y1, x0, y1) }
-        "6" -> { path.moveTo(x1, y0); path.curveTo(x0, y0, x0, y1, x1, y1); path.curveTo(x1, ym, x0, ym, x0, ym) }
-        "7" -> { path.moveTo(x0, y0); path.lineTo(x1, y0); path.lineTo(x0 + w * .35f, y1) }
-        "8" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .52f), false); path.append(Ellipse2D.Float(x0, ym - h * .02f, w, h * .52f), false) }
-        "9" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .55f), false); path.moveTo(x1, ym); path.curveTo(x1, y1, x0, y1, x0, y1) }
-        "J" -> { path.moveTo(x1, y0); path.lineTo(x1, y1); path.curveTo(x1, y1, x0, y1, x0, ym) }
-        "Q" -> { path.append(Ellipse2D.Float(x0, y0, w, h * .8f), false); path.moveTo(xm, ym); path.lineTo(x1, y1) }
-        "K" -> { path.moveTo(x0, y0); path.lineTo(x0, y1); path.moveTo(x1, y0); path.lineTo(x0, ym); path.lineTo(x1, y1) }
-        "A" -> { path.moveTo(x0, y1); path.lineTo(xm, y0); path.lineTo(x1, y1); path.moveTo(x0 + w * .2f, ym + h * .08f); path.lineTo(x1 - w * .2f, ym + h * .08f) }
-        // 中文王牌不用系统字体：小、大均使用固定盒内的专用短标签图形。
-        "small" -> { path.moveTo(xm, y0); path.lineTo(xm, y1); path.lineTo(xm - w * .18f, y1 - h * .1f); path.moveTo(x0 + w * .2f, y0 + h * .35f); path.lineTo(x0, y0 + h * .7f); path.moveTo(x1 - w * .2f, y0 + h * .35f); path.lineTo(x1, y0 + h * .7f) }
-        "big" -> { path.moveTo(x0, y0 + h * .3f); path.lineTo(x1, y0 + h * .3f); path.moveTo(xm, y0); path.lineTo(xm, ym); path.lineTo(x0, y1); path.moveTo(xm, ym); path.lineTo(x1, y1) }
-        else -> error("没有这个记牌器矢量符号：$symbol")
-    }
-}
+/**
+ * 记牌器全部 label/digit 使用固定整数像素字模；禁止依赖构建机字体、抗锯齿或浮点描边。
+ *
+ * label 盒为 21x12，采用 7x9（10 为 11x9、小/大为 9x9）；digit 盒为 21x8，采用 5x7。
+ * 所有可见像素都是纯白不透明，右下角 alpha=1 只用于锁定 BitmapProvider 的实际宽度。
+ */
+val counterBitmapLabels: Map<String, Array<String>> = mapOf(
+    "2" to arrayOf("0111110", "1100011", "0000011", "0000110", "0001100", "0011000", "0110000", "1100000", "1111111"),
+    "3" to arrayOf("1111110", "0000011", "0000011", "0011110", "0000011", "0000011", "0000011", "0000011", "1111110"),
+    "4" to arrayOf("0001110", "0011110", "0110110", "1100110", "1111111", "0000110", "0000110", "0000110", "0000110"),
+    "5" to arrayOf("1111111", "1100000", "1100000", "1111110", "0000011", "0000011", "0000011", "0000011", "1111110"),
+    "6" to arrayOf("0011110", "0110000", "1100000", "1100000", "1111110", "1100011", "1100011", "1100011", "0111110"),
+    "7" to arrayOf("1111111", "0000011", "0000110", "0001100", "0011000", "0110000", "0110000", "0110000", "0110000"),
+    "8" to arrayOf("0111110", "1100011", "1100011", "0111110", "1100011", "1100011", "1100011", "1100011", "0111110"),
+    "9" to arrayOf("0111110", "1100011", "1100011", "1100011", "0111111", "0000011", "0000011", "0000110", "1111100"),
+    "10" to arrayOf("00100011110", "01100011011", "00100011011", "00100011011", "00100011011", "00100011011", "00100011011", "00100011011", "01111001110"),
+    "J" to arrayOf("0000110", "0000110", "0000110", "0000110", "0000110", "0000110", "1100110", "1100110", "0111100"),
+    "Q" to arrayOf("0111110", "1100011", "1100011", "1100011", "1100011", "1101011", "0111110", "0000110", "0000011"),
+    "K" to arrayOf("1100110", "1101100", "1111000", "1110000", "1110000", "1111000", "1101100", "1100110", "1100011"),
+    "A" to arrayOf("0011100", "0111110", "1100110", "1100110", "1111110", "1100110", "1100110", "1100110", "1100110"),
+    // 小 / 大：9×9 固定像素字模，仅用于牌类标签上行；下行数字仍由 digit bitmap 提供。
+    "small" to arrayOf("000100000", "000100000", "100100001", "010111010", "001100100", "000100000", "001000100", "010000010", "100000001"),
+    "big" to arrayOf("000100000", "000100000", "111111111", "000100000", "001010000", "010001000", "100000100", "000000010", "000000001")
+)
 
-/** 生成指定宽高的紧凑标签/数字矢量字形；10 按字形宽度比例并排绘制。 */
-fun renderCounterSymbol(symbol: String, width: Int, height: Int): BufferedImage {
-    val out = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-    val g = out.createGraphics()
-    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-    g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
-    g.color = Color.WHITE
-    g.stroke = BasicStroke(maxOf(1.0f, minOf(width, height) * 0.14f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
-    val path = GeneralPath()
-    if (symbol == "10") {
-        // 21px 紧凑双字符格按比例拆分：左右留白 8%、间距 8%，1/0 分别占 30%/46%。
-        val left = width * 0.08f
-        val oneWidth = width * 0.30f
-        val gap = width * 0.08f
-        val zeroWidth = width * 0.46f
-        appendCounterSymbol(path, "1", left, 0f, oneWidth, height.toFloat())
-        appendCounterSymbol(path, "0", left + oneWidth + gap, 0f, zeroWidth, height.toFloat())
-    } else {
-        // 格子宽度用于固定排版，不是笔画宽度；按高度限定字身，避免数字被拉成扁平椭圆。
-        val symbolWidth = minOf(width.toFloat(), height * 0.8f)
-        appendCounterSymbol(path, symbol, (width - symbolWidth) / 2f, 0f, symbolWidth, height.toFloat())
+val counterBitmapDigits: Map<Char, Array<String>> = mapOf(
+    '0' to arrayOf("01110", "11011", "11011", "11011", "11011", "11011", "01110"),
+    '1' to arrayOf("00110", "01110", "00110", "00110", "00110", "00110", "01111"),
+    '2' to arrayOf("01110", "11011", "00011", "00110", "01100", "11000", "11111"),
+    '3' to arrayOf("11110", "00011", "00011", "01110", "00011", "00011", "11110"),
+    '4' to arrayOf("00110", "01110", "11010", "11010", "11111", "00010", "00010")
+)
+
+fun renderCounterBitmap(bitmap: Array<String>, width: Int, height: Int, name: String): BufferedImage {
+    val bitmapWidth = bitmap.maxOf { it.length }
+    check(bitmap.all { it.length == bitmapWidth }) { "记牌器 bitmap 字形行宽必须一致：$name" }
+    check(width >= bitmapWidth && height >= bitmap.size) {
+        "记牌器 bitmap 盒 ${width}x${height} 装不下 $name 的 ${bitmapWidth}x${bitmap.size} 字身"
     }
-    g.draw(path)
-    g.dispose()
-    // Minecraft BitmapProvider 按 alpha 是否为 0 扫描实际 glyph 宽度，而不是读取 PNG 声明宽度。
-    // 矢量笔画可能没有触及最右列；alpha=1 锚点锁住紧凑字形声明宽度（advance=22px），文字 shader 会丢弃它。
+    val out = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    val left = (width - bitmapWidth) / 2
+    val top = (height - bitmap.size) / 2
+    bitmap.forEachIndexed { row, pixels ->
+        pixels.forEachIndexed { column, pixel ->
+            if (pixel == '1') out.setRGB(left + column, top + row, 0xFFFFFFFF.toInt())
+        }
+    }
     out.setRGB(width - 1, height - 1, 0x01FFFFFF)
     return out
 }
+
+/** 生成记牌器 label；label 与 digit 不能按字符串共用入口，因为 2/3/4 同时存在于两套字模。 */
+fun renderCounterLabel(symbol: String, width: Int, height: Int): BufferedImage =
+    renderCounterBitmap(counterBitmapLabels[symbol] ?: error("没有这个记牌器 label bitmap：$symbol"), width, height, "label_$symbol")
+
+/** 生成记牌器 digit；只写整数像素，不经过 Java2D 抗锯齿。 */
+fun renderCounterDigit(digit: Int, width: Int, height: Int): BufferedImage =
+    renderCounterBitmap(counterBitmapDigits[digit.toString().single()] ?: error("没有这个记牌器 digit bitmap：$digit"), width, height, "digit_$digit")
 
 /** 生成普通框或耗尽框；框独立于标签/数字，运行期按状态选择叠加。 */
 fun renderCounterFrame(exhausted: Boolean): BufferedImage {
@@ -900,58 +912,28 @@ fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
 }
 
 /**
- * 生成 PLAYING 阶段底部物品栏 HUD 遮罩：完整盖住原版 9 槽背景，绘制九个纯色槽块。
+ * 生成三张独立 Hotbar 物品图标：鸡蛋、水桶、番茄。
  *
- * <p>总尺寸固定为 182×22，等宽覆盖原版 hotbar；不生成或覆盖
- * {@code minecraft:textures/gui/sprites/hud/hotbar.png} / {@code hotbar_selection.png}。
- * 底色为 #121216；9 个槽均为 18×20px，位于 x=2,22,...,162、y=1..20，
- * 槽间 2px、左右各 2px，不保留白色边框。
- *
- * <p>贴图宽高来自 {@code hotbarHudGlyphWidth}/{@code hotbarHudGlyphHeight}；位图字形
- * 前进量是宽度加 1，即 {@code hotbarHudGlyphAdvance}。这些值必须与 PackAssets 同步。
- *
- * @param target 输出路径（muz:font/hotbar_slots.png）
+ * <p>每张贴图固定为 20×22，运行期通过负空格按 step=24 横向组合；不再生成旧的
+ * 九槽底板或其固定示例数字。图标 PNG 同时供 HUD 字形与物品模型复用。
  */
-fun writeHotbarSlotsGlyph(target: File) {
-    // 原版 hotbar 是 182×22；这里完整绘制不透明底，并在 x=2,22,...,162 处放置
-    // 9 个 18×20 纯色槽块（间隙 2px、左右各 2px），不保留任何白色边框。
-    val slotWidth = 18
-    val slotHeight = 20
-    val gapWidth = 2
-    val slotsStartX = 2
-    val slotsStartY = 1
-    check(slotsStartX + hotbarHudSlotCount * slotWidth + (hotbarHudSlotCount - 1) * gapWidth + 2 == hotbarHudGlyphWidth) {
-        "hotbar HUD 九槽布局必须正好填满 ${hotbarHudGlyphWidth}px 宽度"
-    }
-    val out = BufferedImage(hotbarHudGlyphWidth, hotbarHudGlyphHeight, BufferedImage.TYPE_INT_ARGB)
-    check(out.width + 1 == hotbarHudGlyphAdvance) {
-        "hotbar HUD 字形前进量必须等于贴图宽度加 1"
-    }
-    val maskColor = 0xFF_12_12_16.toInt()
-    for (y in 0 until hotbarHudGlyphHeight) for (x in 0 until hotbarHudGlyphWidth) out.setRGB(x, y, maskColor)
-    // 【九色调试配色】批准值按槽位顺序固定，全部不透明；颜色只用于调试定位，不覆盖原版 sprite。
-    val slotColors = intArrayOf(
-        0xFF_E0_3A_3A.toInt(), 0xFF_E0_6A_2A.toInt(), 0xFF_E0_8A_2A.toInt(),
-        0xFF_D8_D0_30.toInt(), 0xFF_3C_C0_50.toInt(), 0xFF_30_C0_A8.toInt(),
-        0xFF_38_88_E0.toInt(), 0xFF_70_50_D8.toInt(), 0xFF_C0_4A_A0.toInt()
-    )
-    check(slotColors.size == hotbarHudSlotCount) { "hotbar HUD 调试配色数量必须等于槽数 $hotbarHudSlotCount" }
-    // 槽 6/7/8 是「物品图标 + 烘焙示例数字」槽：先铺同款纯色底，再叠画确定性像素图标与数字。
-    // 图标是构建期一次性烘焙进贴图的，运行期不改；数字同样是固定示例（水桶17/鸡蛋3/番茄5），
-    // 只用于演示物品槽视觉，不代表任何实时对局数据。绘图逻辑只保留这一份（构建期）。
-    val iconSlots = intArrayOf(6, 7, 8)
-    val iconNumbers = mapOf(6 to "17", 7 to "3", 8 to "5")
-    for (slotIndex in 0 until hotbarHudSlotCount) {
-        val slotX = slotsStartX + slotIndex * (slotWidth + gapWidth)
-        for (y in slotsStartY until slotsStartY + slotHeight)
-            for (x in slotX until slotX + slotWidth) out.setRGB(x, y, slotColors[slotIndex])
-        if (slotIndex in iconSlots) {
-            drawHotbarSlotIcon(out, slotIndex, slotX, slotsStartY, slotWidth, slotHeight)
-            drawHotbarSlotNumber(out, iconNumbers.getValue(slotIndex), slotX, slotsStartY, slotWidth, slotHeight)
-        }
-    }
+fun writeHotbarIconGlyph(target: File, iconIndex: Int) {
+    check(iconIndex in 0 until hotbarIconCount) { "Hotbar 图标下标越界：$iconIndex" }
+    val out = BufferedImage(hotbarIconGlyphWidth, hotbarIconGlyphHeight, BufferedImage.TYPE_INT_ARGB)
+    drawHotbarIcon(out, iconIndex, 0, 0, hotbarIconGlyphWidth, hotbarIconGlyphHeight)
+    // 右下角 alpha=1 锚点锁定 BitmapProvider 的 20px 实际扫描宽度，不改变可见图形。
+    out.setRGB(hotbarIconGlyphWidth - 1, hotbarIconGlyphHeight - 1, 0x01FFFFFF)
     target.parentFile.mkdirs()
     ImageIO.write(out, "png", target)
+}
+
+fun drawHotbarIcon(out: BufferedImage, iconIndex: Int, x: Int, y: Int, width: Int, height: Int) {
+    when (iconIndex) {
+        0 -> drawEggIcon(out, x, y, width, height)
+        1 -> drawBucketIcon(out, x, y, width, height)
+        2 -> drawTomatoIcon(out, x, y, width, height)
+        else -> error("Hotbar 图标只支持 egg/water/tomato，收到 $iconIndex")
+    }
 }
 
 /** 白字带 1px 深色描边的 3×5 像素小字体，供 hotbar 图标槽烘焙示例数字。key 为字符。 */
@@ -1002,7 +984,7 @@ fun drawHotbarSlotNumber(out: BufferedImage, text: String, slotX: Int, slotY: In
 
 /**
  * 在槽块内烘焙一枚可辨识的确定性像素物品图标：6=水桶、7=鸡蛋、8=番茄。
- * 只用 setRGB 直接点像素（与记牌器矢量绘制同为构建期一份逻辑，风格更朴素）；
+ * 只用 setRGB 直接点像素（与记牌器 bitmap 字模同为构建期一份确定性逻辑，风格更朴素）；
  * 图标画在槽左上区域，右下角留给示例数字。
  */
 fun drawHotbarSlotIcon(out: BufferedImage, slotIndex: Int, slotX: Int, slotY: Int, slotW: Int, slotH: Int) {
@@ -1168,6 +1150,67 @@ fun writeFlatItemModel(target: File, texturePath: String) {
         }
         """.trimIndent() + "\n"
     )
+}
+
+/** 番茄桌面道具的自绘薄片模型；纹理复用 Hotbar 的番茄图标，避免两套视觉资产漂移。 */
+fun writeTomatoGadgetModel(target: File, texturePath: String) {
+    writeText(
+        target,
+        """
+        {
+          "textures": {"0": ${jsonString(texturePath)}, "particle": ${jsonString(texturePath)}},
+          "elements": [
+            {
+              "from": [2, 2, 7.5], "to": [14, 14, 8.5],
+              "faces": {
+                "north": {"uv": [0, 0, 16, 16], "texture": "#0"},
+                "south": {"uv": [16, 0, 0, 16], "texture": "#0"},
+                "east": {"texture": "#0"}, "west": {"texture": "#0"},
+                "up": {"texture": "#0"}, "down": {"texture": "#0"}
+              }
+            }
+          ],
+          "gui_light": "front"
+        }
+        """.trimIndent() + "\n"
+    )
+}
+
+/** 透明水幕桌面道具：独立半透明纹理 + 0.5 格厚立体薄片，避免透明面被当作不透明方块。 */
+fun writeWaterSheetModel(target: File, texturePath: String) {
+    writeText(
+        target,
+        """
+        {
+          "render_type": "minecraft:translucent",
+          "textures": {"0": ${jsonString(texturePath)}, "particle": ${jsonString(texturePath)}},
+          "elements": [
+            {
+              "from": [1, 0, 7.75], "to": [15, 16, 8.25],
+              "faces": {
+                "north": {"uv": [0, 0, 16, 16], "texture": "#0"},
+                "south": {"uv": [16, 0, 0, 16], "texture": "#0"},
+                "east": {"texture": "#0"}, "west": {"texture": "#0"},
+                "up": {"texture": "#0"}, "down": {"texture": "#0"}
+              }
+            }
+          ],
+          "gui_light": "front"
+        }
+        """.trimIndent() + "\n"
+    )
+}
+
+fun writeWaterSheetTexture(target: File) {
+    val out = BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB)
+    for (y in 0 until 16) for (x in 0 until 16) {
+        val edge = x == 0 || x == 15 || y == 0 || y == 15
+        val alpha = if (edge) 92 else 132
+        val blue = if ((x + y) % 5 == 0) 255 else 220
+        out.setRGB(x, y, (alpha shl 24) or (70 shl 16) or (170 shl 8) or blue)
+    }
+    target.parentFile.mkdirs()
+    ImageIO.write(out, "png", target)
 }
 
 fun writeCardModel(target: File, texturePath: String) {
@@ -1388,12 +1431,12 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                     ${javaArray(counterScaleCodepointStarts)}
                 };
 
-                /** hotbar 各缩放档的底图码位。 */
+                /** hotbar 各缩放档三张基础图标的起始码位，顺序为 egg、water、tomato。 */
                 public static final int[] HOTBAR_SCALE_BASE_CODEPOINTS = {
                     ${javaArray(hotbarScaleBaseCodepoints)}
                 };
 
-                /** hotbar 各缩放档的 Debug Web 覆盖层底图码位。 */
+                /** hotbar 各缩放档三张 Debug Web 覆盖层图标的起始码位。 */
                 public static final int[] HOTBAR_SCALE_DEBUG_CODEPOINTS = {
                     ${javaArray(hotbarScaleDebugCodepoints)}
                 };
@@ -1435,7 +1478,12 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int COUNTER_FRAME_WIDTH = $counterGlyphFrameWidth;
                 public static final int COUNTER_FRAME_HEIGHT = $counterGlyphFrameHeight;
 
-                /** hotbar 默认 100 档的位图几何；其它档由 PackAssets 与构建期按最近整数缩放。 */
+                /** hotbar 三图标默认 100 档的位图几何；其它档由 PackAssets 按最近整数缩放。 */
+                public static final int HOTBAR_ICON_COUNT = $hotbarIconCount;
+                public static final int HOTBAR_ICON_WIDTH = $hotbarIconGlyphWidth;
+                public static final int HOTBAR_ICON_HEIGHT = $hotbarIconGlyphHeight;
+                public static final int HOTBAR_ICON_STEP = $hotbarIconStep;
+                public static final int HOTBAR_ICON_ADVANCE = $hotbarIconAdvance;
                 public static final int HOTBAR_GLYPH_WIDTH = $hotbarHudGlyphWidth;
                 public static final int HOTBAR_GLYPH_HEIGHT = $hotbarHudGlyphHeight;
                 public static final int HOTBAR_GLYPH_ADVANCE = $hotbarHudGlyphAdvance;
@@ -1443,7 +1491,7 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int HOTBAR_SELECT_HEIGHT = $hotbarSelectGlyphHeight;
                 public static final int HOTBAR_SELECT_ADVANCE = $hotbarSelectGlyphAdvance;
                 public static final int HOTBAR_SLOT_COUNT = $hotbarHudSlotCount;
-                public static final int HOTBAR_BASE_ASCENT = -128;
+                public static final int HOTBAR_BASE_ASCENT = -100;
 
                 /** 头像放大倍数档位（按资源 profile 精确生成，可能不是连续范围）。 */
                 public static final int[] AVATAR_SCALE_TIERS = {
@@ -1521,9 +1569,11 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         val itemCardsDir = outputAssetsRoot.resolve("items/cards")
         val itemUiDir = outputAssetsRoot.resolve("items/ui")
         val itemFurnitureDir = outputAssetsRoot.resolve("items/furniture")
+        val itemGadgetDir = outputAssetsRoot.resolve("items")
         val modelCardsDir = outputAssetsRoot.resolve("models/item/cards")
         val modelUiDir = outputAssetsRoot.resolve("models/item/ui")
         val modelFurnitureDir = outputAssetsRoot.resolve("models/item/furniture")
+        val modelGadgetDir = outputAssetsRoot.resolve("models/item")
 
         cardTextureDir.listFiles()
             ?.filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
@@ -1543,9 +1593,9 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         val counterFontDir = outputAssetsRoot.resolve("textures/font/counter")
         val counterBaseImages = linkedMapOf<String, BufferedImage>()
         counterRankGlyphFiles.forEachIndexed { index, file ->
-            counterBaseImages[file] = renderCounterSymbol(counterRankGlyphSymbols[index], counterGlyphLabelWidth, counterGlyphLabelHeight)
+            counterBaseImages[file] = renderCounterLabel(counterRankGlyphSymbols[index], counterGlyphLabelWidth, counterGlyphLabelHeight)
         }
-        for (digit in 0..4) counterBaseImages["digit_$digit"] = renderCounterSymbol(digit.toString(), counterGlyphDigitWidth, counterGlyphDigitHeight)
+        for (digit in 0..4) counterBaseImages["digit_$digit"] = renderCounterDigit(digit, counterGlyphDigitWidth, counterGlyphDigitHeight)
         counterBaseImages["frame_normal"] = renderCounterFrame(false)
         counterBaseImages["frame_exhausted"] = renderCounterFrame(true)
         counterBaseImages.forEach { (file, image) ->
@@ -1584,18 +1634,15 @@ val generateResourcePack = tasks.register("generateResourcePack") {
 
 
 
-        // PLAYING 阶段底部物品栏 HUD 遮罩：默认 100 档为 182×22 不透明底，绘制九个纯色调试槽。
-        // 75/125 档仅从默认底图最近邻派生；每档使用独立字体和独立码位，避免客户端把不同
-        // scale 的 provider 混在同一张字体页中。默认码位继续为 0xEF00，选中框继续为 0xEF02。
-        // 【宽/高/槽数/advance/码位必须与 PackAssets 的 HOTBAR_* 常量保持一致】
+        // PLAYING 阶段只生成三张独立 Hotbar 图标；每张 20×22，图标间隔 4px，step=24。
+        // 75/125 档从各自基础图标最近邻派生；每档使用独立字体和独立码位窗口。
+        // 旧 EF00/EF01 九槽底板不再生成，选中框仍独立生成并继续使用 EF02/EF03 默认码位。
+        // 【尺寸/step/advance/码位必须与 PackAssets.hotbarIcon* 保持一致】
         val hotbarFontDir = outputAssetsRoot.resolve("textures/font")
-        val hotbarBaseImage = BufferedImage(hotbarHudGlyphWidth, hotbarHudGlyphHeight, BufferedImage.TYPE_INT_ARGB)
-        writeHotbarSlotsGlyph(hotbarFontDir.resolve("hotbar_slots.png"))
-        // 读取刚生成的基础 PNG 只用于确定性最近邻派生；不在额外 scale 上重新绘制图标或数字。
-        val hotbarBasePng = hotbarFontDir.resolve("hotbar_slots.png")
-        val hotbarBaseSource = ImageIO.read(hotbarBasePng)
-        check(hotbarBaseSource.width == hotbarBaseImage.width && hotbarBaseSource.height == hotbarBaseImage.height) {
-            "hotbar 基础 PNG 尺寸与构建常量不一致"
+        val hotbarIconSources = hotbarIconNames.indices.map { index ->
+            val file = hotbarFontDir.resolve("hotbar_${hotbarIconNames[index]}.png")
+            writeHotbarIconGlyph(file, index)
+            file to ImageIO.read(file)
         }
         val hotbarSelectSource = run {
             writeHotbarSelectGlyph(hotbarFontDir.resolve("hotbar_select.png"))
@@ -1603,18 +1650,23 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         }
         for (scale in hotbarScaleTiers.filter { it != defaultHudScale }) {
             val scaledDir = hotbarFontDir.resolve("scale_$scale")
-            writeCounterGlyph(scaledDir.resolve("hotbar_slots.png"), scaleNearest(hotbarBaseSource, scale))
+            hotbarIconSources.forEach { (file, image) ->
+                writeCounterGlyph(scaledDir.resolve(file.name), scaleNearest(image, scale))
+            }
             writeCounterGlyph(scaledDir.resolve("hotbar_select.png"), scaleNearest(hotbarSelectSource, scale))
         }
 
-        // 【不再覆盖原版 hotbar sprite】：原先这里会生成全透明的 hotbar.png 与
-        // hotbar_selection.png。资源包贴图是客户端全局状态，无法按「玩家是否正在打牌」切换，
-        // 结果是不在牌桌时原版 9 槽背景也永久消失，只剩悬空物品。
-        //
-        // 自定义九槽 HUD 现在只由 HotbarHudService 在 GamePhase.PLAYING 正式出牌阶段通过
-        // ActionBar 字形推送；等待、叫地主、加倍、结算及普通游玩时不推送，客户端自然显示原版物品栏。
-        // generateResourcePack 每次先 deleteRecursively() 清空 outputRoot（见任务开头），
-        // 所以删除这两次生成调用后，旧透明 sprite 不会残留进新构建。
+        // 桌面道具模型：番茄模型复用 Hotbar 番茄图标；水幕使用独立半透明纹理并以薄片模型渲染。
+        val tomatoTexture = "$resourceNamespace:font/hotbar_tomato"
+        val waterSheetTexture = "$resourceNamespace:item/$tableGadgetWaterSheetId"
+        writeWaterSheetTexture(outputAssetsRoot.resolve("textures/item/$tableGadgetWaterSheetId.png"))
+        writeTomatoGadgetModel(modelGadgetDir.resolve("$tableGadgetTomatoId.json"), tomatoTexture)
+        writeWaterSheetModel(modelGadgetDir.resolve("$tableGadgetWaterSheetId.json"), waterSheetTexture)
+        writeItemDefinition(itemGadgetDir.resolve("$tableGadgetTomatoId.json"), "$resourceNamespace:item/$tableGadgetTomatoId")
+        writeItemDefinition(itemGadgetDir.resolve("$tableGadgetWaterSheetId.json"), "$resourceNamespace:item/$tableGadgetWaterSheetId")
+
+        // 【不再覆盖原版 hotbar sprite】：自定义 HUD 只由 HotbarHudService 在 PLAYING 阶段
+        // 通过 ActionBar 推送，等待、叫地主、加倍、结算及普通游玩时保留原版物品栏。
 
         val uiTexturesRoot = outputAssetsRoot.resolve("textures/item/ui")
         if (uiTexturesRoot.exists()) {
@@ -1972,7 +2024,7 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 char: $botAvatarFarmerCharEscape
         """.trimIndent() + "\n" + botAvatarDownImages
 
-        // hotbar 每档是独立字体/码位窗口；默认 100 档的条目名、路径、码位与旧声明保持不变。
+        // hotbar 每档是独立字体/码位窗口；每档声明三张基础图标与一张选中框。
         val hotbarImagesByScale = linkedMapOf<String, String>()
         hotbarScaleTiers.forEachIndexed { scaleIndex, scale ->
             val suffix = if (scale == defaultHudScale) "" else "_s$scale"
@@ -1980,30 +2032,41 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
             val textureDirectory = if (scale == defaultHudScale) "font" else "font/scale_$scale"
             val width = scaledPixels(hotbarHudGlyphWidth, scale)
             val height = scaledPixels(hotbarHudGlyphHeight, scale)
+            val iconWidth = scaledPixels(hotbarIconGlyphWidth, scale)
+            val iconHeight = scaledPixels(hotbarIconGlyphHeight, scale)
             val selectWidth = scaledPixels(hotbarSelectGlyphWidth, scale)
             val selectHeight = scaledPixels(hotbarSelectGlyphHeight, scale)
-            val baseCharEscape = "\\u%04x".format(hotbarScaleBaseCodepoints[scaleIndex])
+            val baseCodepoint = hotbarScaleBaseCodepoints[scaleIndex]
+            val debugCodepoint = hotbarScaleDebugCodepoints[scaleIndex]
             val selectCharEscape = "\\u%04x".format(hotbarScaleSelectCodepoints[scaleIndex])
             val body = buildString {
                 appendLine("images:")
-                appendLine("  $resourceNamespace:hotbar_slots$suffix:")
-                appendLine("    height: $height")
-                appendLine("    ascent: ${scaledSigned(-128, scale)}")
-                appendLine("    font: $font")
-                appendLine("    file: $resourceNamespace:$textureDirectory/hotbar_slots.png")
-                appendLine("    char: $baseCharEscape")
+                hotbarIconNames.forEachIndexed { iconIndex, iconName ->
+                    appendLine("  $resourceNamespace:hotbar_${iconName}$suffix:")
+                    appendLine("    height: $iconHeight")
+                    appendLine("    ascent: ${scaledSigned(-100, scale)}")
+                    appendLine("    font: $font")
+                    appendLine("    file: $resourceNamespace:$textureDirectory/hotbar_${iconName}.png")
+                    appendLine("    char: \\u%04x".format(baseCodepoint + iconIndex))
+                }
                 appendLine("  $resourceNamespace:hotbar_select$suffix:")
                 appendLine("    height: $selectHeight")
-                appendLine("    ascent: ${scaledSigned(-128, scale)}")
+                appendLine("    ascent: ${scaledSigned(-100, scale)}")
                 appendLine("    font: $font")
                 appendLine("    file: $resourceNamespace:$textureDirectory/hotbar_select.png")
                 appendLine("    char: $selectCharEscape")
             }
+            check(width == iconWidth * hotbarIconCount + scaledPixels(hotbarIconStep - hotbarIconGlyphWidth, scale) * (hotbarIconCount - 1)) {
+                "hotbar scale=$scale 三图标总宽与 step 不一致"
+            }
             check(width + 1 == if (scale == defaultHudScale) hotbarHudGlyphAdvance else scaledPixels(hotbarHudGlyphAdvance - 1, scale) + 1) {
-                "hotbar scale=$scale 底图前进量与宽度不一致"
+                "hotbar scale=$scale 三图标整体前进量与宽度不一致"
             }
             check(selectWidth + 1 == if (scale == defaultHudScale) hotbarSelectGlyphAdvance else scaledPixels(hotbarSelectGlyphAdvance - 1, scale) + 1) {
                 "hotbar scale=$scale 选中框前进量与宽度不一致"
+            }
+            check(debugCodepoint == baseCodepoint + hotbarIconCount) {
+                "hotbar scale=$scale overlay 图标码位必须紧跟基础图标"
             }
             hotbarImagesByScale[if (scale == defaultHudScale) "hotbar_hud" else "hotbar_hud_s$scale"] = body
         }
@@ -2051,7 +2114,7 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
         val botEntryCount = (avatarDownOffsetTiers.size - 1) * botAvatarGlyphs.size + botAvatarGlyphs.size
         val counterEntryCountPerScale = counterDownOffsetTiers.size * counterGlyphFiles.size
         val counterEntryCount = counterScaleTiers.size * counterEntryCountPerScale
-        val hotbarEntryCount = hotbarScaleTiers.size * 2
+        val hotbarEntryCount = hotbarScaleTiers.size * (hotbarIconCount + 1)
         val totalImageBytes = imageParts.keys.sumOf { imagesDir.resolve("$it.yml").length() }
         logger.lifecycle(
             ("[muz] configuration/images/ 共 %,d 条"

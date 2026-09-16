@@ -1,6 +1,7 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.ui.MuzTheme;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -44,6 +45,7 @@ public final class PlayerConnectionListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        clearTableGadget(event.getPlayer());
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 离线，当前对局已重置。");
         // hover/选中/调试面板那几张按玩家分组的 map 同理：tick() 只遍历在线玩家，
         // 离线的 key 永远轮不到清理，不在这里显式清就会无上限累积。
@@ -52,6 +54,7 @@ public final class PlayerConnectionListener implements Listener {
 
     @EventHandler
     public void onKick(PlayerKickEvent event) {
+        clearTableGadget(event.getPlayer());
         plugin.getTableManager().removePlayerSilently(event.getPlayer(), event.getPlayer().getName() + " 被移出服务器，当前对局已重置。");
         // 被踢和自己退出是同一种离线，缓存清理不能只做一边。
         plugin.getPhysicalTableManager().clearPlayerCaches(event.getPlayer().getUniqueId());
@@ -59,12 +62,21 @@ public final class PlayerConnectionListener implements Listener {
 
     @EventHandler
     public void onRespawn(PlayerRespawnEvent event) {
+        clearTableGadget(event.getPlayer());
         scheduleViewerWarmup(event.getPlayer(), "respawn");
     }
 
     @EventHandler
     public void onChangedWorld(PlayerChangedWorldEvent event) {
+        clearTableGadget(event.getPlayer());
         scheduleViewerWarmup(event.getPlayer(), "world-change");
+    }
+
+    private void clearTableGadget(org.bukkit.entity.Player player) {
+        TableGadgetService service = plugin.tableGadgets();
+        if (service != null) {
+            service.clearPlayer(player.getUniqueId());
+        }
     }
 
     private Component progressMessage(String text, double progress, NamedTextColor color) {

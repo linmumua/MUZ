@@ -4,6 +4,7 @@ import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackSounds;
 import linmumua.doudizhu.model.CardPattern;
 import linmumua.doudizhu.model.CardRank;
+import linmumua.doudizhu.model.TableGadget;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -124,6 +125,38 @@ final class TableEffectCoordinator {
             return;
         }
         playSound(playerId, sound.key(), sound.volume(), sound.pitch(), EFFECT_DEDUPLICATION_TICKS);
+    }
+
+    /**
+     * 桌内道具音效统一出口。效果实体不得直接对玩家播放声音，避免把桌内音效去重规则分散到动画服务。
+     */
+    static void playGadgetSound(DoudizhuPlugin plugin, GameTable table, TableGadget gadget, boolean impact) {
+        if (plugin == null || table == null || gadget == null) {
+            return;
+        }
+        String sound = switch (gadget) {
+            case EGG -> impact ? "minecraft:block.glass.break" : "minecraft:entity.chicken.egg";
+            case WATER -> impact ? "minecraft:item.bucket.fill" : "minecraft:item.bucket.empty";
+            case TOMATO -> impact ? "minecraft:block.wet_sponge.break" : "minecraft:entity.slime.squish";
+        };
+        float pitch = switch (gadget) {
+            case EGG -> impact ? 1.05f : 1.2f;
+            case WATER -> impact ? 0.9f : 1.0f;
+            case TOMATO -> impact ? 0.8f : 1.1f;
+        };
+        float volume = plugin.getEffectVolume();
+        if (volume <= 0.0f) {
+            return;
+        }
+        for (UUID seat : table.getSeats()) {
+            if (table.isBot(seat)) {
+                continue;
+            }
+            Player player = Bukkit.getPlayer(seat);
+            if (player != null && player.isOnline()) {
+                player.playSound(player.getLocation(), sound, volume, pitch);
+            }
+        }
     }
 
     private void playSound(UUID playerId, String soundKey, float volume, float pitch, int cooldownTicks) {

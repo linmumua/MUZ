@@ -55,10 +55,15 @@ public final class HudResourcePackVerifier {
     private static final String COUNTER_FONT = "assets/minecraft/font/muz_counter.json";
     private static final String HOTBAR_FONT = "assets/minecraft/font/muz_hotbar.json";
     private static final String COUNTER_TEXTURE_ROOT = "assets/muz/textures/font/counter/";
-    private static final String HOTBAR_TEXTURE = "assets/muz/textures/font/hotbar_slots.png";
-    // 选中槽高亮框贴图（0xEF02）：与 hotbar_slots 同字体族、独立贴图；构建期由
-    // build.gradle.kts 的 writeHotbarSelectGlyph 生成，运行期由 HotbarHudService 定位。
+    private static final List<String> HOTBAR_ICON_FILES = List.of(
+        "hotbar_egg.png", "hotbar_water.png", "hotbar_tomato.png"
+    );
+    // 选中槽高亮框贴图（0xEF02）：三图标共用同一字体族，仍独立于图标 PNG。
     private static final String HOTBAR_SELECT_TEXTURE = "assets/muz/textures/font/hotbar_select.png";
+    // 桌内道具采用现代 item definition + models/item 两段资源链，必须和材质一起进 ZIP。
+    private static final List<String> GADGET_ITEM_IDS = List.of(
+        "table_gadget_tomato", "table_gadget_water_sheet"
+    );
 
     private static final String LEGACY_HOTBAR = "assets/minecraft/textures/gui/sprites/hud/hotbar.png";
     private static final String LEGACY_HOTBAR_SELECTION =
@@ -136,6 +141,7 @@ public final class HudResourcePackVerifier {
         verifyCounterPngs(zip);
         verifyHotbarPng(zip);
         verifySelectPng(zip);
+        verifyGadgetModelsAndItems(zip);
         verifyPackMetadata(zip);
     }
 
@@ -243,8 +249,8 @@ public final class HudResourcePackVerifier {
             return false;
         }
         if (relative.equals(LEGACY_HOTBAR) || relative.equals(LEGACY_HOTBAR_SELECTION)
-            || isCounterTexturePath(relative) || isHotbarTexturePath(relative)
-            || isHotbarSelectTexturePath(relative)) {
+            || isLegacyHotbarTexturePath(relative) || isCounterTexturePath(relative)
+            || isHotbarTexturePath(relative) || isHotbarSelectTexturePath(relative)) {
             return true;
         }
         if (!relative.startsWith(FONT_ROOT) || !relative.endsWith(".json")) {
@@ -269,8 +275,19 @@ public final class HudResourcePackVerifier {
             && relative.substring(slash + 1).endsWith(".png");
     }
 
+    private boolean isLegacyHotbarTexturePath(String path) {
+        return path.startsWith("assets/muz/textures/font/")
+            && (path.endsWith("hotbar_slots.png") || path.matches("assets/muz/textures/font/scale_[^/]+/hotbar_slots\\.png"));
+    }
+
     private boolean isHotbarTexturePath(String path) {
-        return HOTBAR_TEXTURE.equals(path) || isScaledHotbarTexturePath(path, "hotbar_slots.png");
+        for (String file : HOTBAR_ICON_FILES) {
+            if (("assets/muz/textures/font/" + file).equals(path)
+                || isScaledHotbarTexturePath(path, file)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isHotbarSelectTexturePath(String path) {
@@ -349,6 +366,9 @@ public final class HudResourcePackVerifier {
                 String relative = overlayRelative(name, zip.overlayPrefixes);
                 if (relative.equals(LEGACY_HOTBAR) || relative.equals(LEGACY_HOTBAR_SELECTION)) {
                     throw new IOException("资源包 overlay 覆盖原版全局 hotbar 贴图，拒绝验证：" + name);
+                }
+                if (isLegacyHotbarTexturePath(relative)) {
+                    throw new IOException("资源包 overlay 残留旧九槽 hotbar 底图，拒绝验证：" + name);
                 }
                 if (relative.endsWith(".png")) {
                     String assetPath = relative;
@@ -495,7 +515,22 @@ public final class HudResourcePackVerifier {
         return PACK_META.equals(name)
             || (name.startsWith(FONT_ROOT + "muz_counter") && name.endsWith(".json"))
             || (name.startsWith(FONT_ROOT + "muz_hotbar") && name.endsWith(".json"))
-            || isCounterTexturePath(name) || isHotbarTexturePath(name) || isHotbarSelectTexturePath(name);
+            || isLegacyHotbarTexturePath(name) || isCounterTexturePath(name)
+            || isHotbarTexturePath(name) || isHotbarSelectTexturePath(name)
+            || isGadgetResourcePath(name);
+    }
+
+    private boolean isGadgetResourcePath(String name) {
+        if (name.equals("assets/muz/textures/item/table_gadget_water_sheet.png")) {
+            return true;
+        }
+        for (String id : GADGET_ITEM_IDS) {
+            if (name.equals("assets/muz/items/" + id + ".json")
+                || name.equals("assets/muz/models/item/" + id + ".json")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Set<String> requiredEntries(Map<String, ImageDeclaration> bundle) throws IOException {
@@ -503,6 +538,11 @@ public final class HudResourcePackVerifier {
         required.add(PACK_META);
         required.addAll(rootFontJsonPaths(bundle).values());
         required.addAll(bundleTexturePaths(bundle));
+        for (String id : GADGET_ITEM_IDS) {
+            required.add("assets/muz/items/" + id + ".json");
+            required.add("assets/muz/models/item/" + id + ".json");
+        }
+        required.add("assets/muz/textures/item/table_gadget_water_sheet.png");
         return required;
     }
 
@@ -955,7 +995,7 @@ public final class HudResourcePackVerifier {
     }
 
     private void verifyHotbarBundleGeometry(Map<String, ImageDeclaration> declarations) throws IOException {
-        int expectedCount = PackAssets.HOTBAR_SCALE_TIERS.length * 2;
+        int expectedCount = PackAssets.HOTBAR_SCALE_TIERS.length * (PackAssets.HOTBAR_ICON_COUNT + 1);
         int actualCount = 0;
         for (ImageDeclaration declaration : declarations.values()) {
             if (isHotbarFont(declaration.font)) {
@@ -968,16 +1008,16 @@ public final class HudResourcePackVerifier {
 
         for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
             PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-            ImageDeclaration base = findDeclaration(declarations, tier.font(), tier.baseCodepoint());
+            for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+                ImageDeclaration icon = findDeclaration(declarations, tier.font(), tier.baseCodepoint() + index);
+                if (icon == null || icon.height != tier.slotHeight()
+                    || icon.ascent != tier.baseAscent()
+                    || !PackAssets.hotbarIconTexture(index, scale).equals(icon.file)) {
+                    throw new IOException("hotbar bundle 图标声明与 PackAssets 不一致：scale=" + scale + ", index=" + index);
+                }
+            }
             ImageDeclaration select = findDeclaration(declarations, tier.font(), tier.selectCodepoint());
-            if (base == null || select == null) {
-                throw new IOException("hotbar bundle 缺少 scale=" + scale + " 的基础或选中框字形声明");
-            }
-            if (base.height != tier.height() || base.ascent != tier.baseAscent()
-                || !tier.texture().equals(base.file)) {
-                throw new IOException("hotbar bundle 基础字形与 PackAssets 不一致：scale=" + scale);
-            }
-            if (select.height != tier.selectHeight() || select.ascent != tier.baseAscent()
+            if (select == null || select.height != tier.selectHeight() || select.ascent != tier.baseAscent()
                 || !tier.selectTexture().equals(select.file)) {
                 throw new IOException("hotbar bundle 选中框字形与 PackAssets 不一致：scale=" + scale);
             }
@@ -1078,9 +1118,24 @@ public final class HudResourcePackVerifier {
 
     private void verifyHotbarPngShape(BufferedImage image, String source) throws IOException {
         PackAssets.HotbarTier tier = PackAssets.hotbarTier(hotbarScaleFromTexturePath(source));
-        if (image.getWidth() != tier.width() || image.getHeight() != tier.height()) {
-            throw new IOException("hotbar PNG 尺寸不一致：实际 " + image.getWidth() + "x" + image.getHeight()
-                + "，预期 " + tier.width() + "x" + tier.height());
+        if (image.getWidth() != tier.slotWidth() || image.getHeight() != tier.slotHeight()) {
+            throw new IOException("hotbar 图标 PNG 尺寸不一致：实际 " + image.getWidth() + "x" + image.getHeight()
+                + "，预期 " + tier.slotWidth() + "x" + tier.slotHeight());
+        }
+        boolean visible = false;
+        boolean transparent = false;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int alpha = (image.getRGB(x, y) >>> 24) & 0xFF;
+                visible |= alpha > 0;
+                transparent |= alpha == 0;
+            }
+        }
+        if (!visible || !transparent) {
+            throw new IOException("hotbar 图标 PNG 必须同时包含可见像素与透明背景：" + source);
+        }
+        if (((image.getRGB(image.getWidth() - 1, image.getHeight() - 1) >>> 24) & 0xFF) != 1) {
+            throw new IOException("hotbar 图标 PNG 缺少右下角 alpha=1 锚点：" + source);
         }
     }
 
@@ -1093,8 +1148,11 @@ public final class HudResourcePackVerifier {
     }
 
     private int hotbarScaleFromTexturePath(String source) throws IOException {
-        if (HOTBAR_TEXTURE.equals(source) || HOTBAR_SELECT_TEXTURE.equals(source)) {
-            return PackAssets.HOTBAR_DEFAULT_SCALE;
+        if (source.startsWith("assets/muz/textures/font/")) {
+            String file = source.substring("assets/muz/textures/font/".length());
+            if (HOTBAR_ICON_FILES.contains(file) || "hotbar_select.png".equals(file)) {
+                return PackAssets.HOTBAR_DEFAULT_SCALE;
+            }
         }
         String prefix = "assets/muz/textures/font/scale_";
         if (!source.startsWith(prefix)) {
@@ -1103,6 +1161,10 @@ public final class HudResourcePackVerifier {
         int slash = source.indexOf('/', prefix.length());
         if (slash <= prefix.length()) {
             throw new IOException("hotbar PNG scale 路径无效：" + source);
+        }
+        String file = source.substring(slash + 1);
+        if (!HOTBAR_ICON_FILES.contains(file) && !"hotbar_select.png".equals(file)) {
+            throw new IOException("未知 hotbar PNG：" + source);
         }
         try {
             int scale = Integer.parseInt(source.substring(prefix.length(), slash));
@@ -1118,71 +1180,47 @@ public final class HudResourcePackVerifier {
 
     private void verifyHotbarPng(ZipIndex zip) throws IOException {
         for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            String zipPath = hotbarTextureZipPath(scale, false);
-            byte[] bytes = requireSelected(zip, zipPath);
-            verifyBinaryAgainstBundle(bytes, zipPath);
-            verifyPngLength(bytes, zipPath);
-            BufferedImage image = readPng(bytes, zipPath);
-            verifyHotbarPngShape(image, zipPath);
-            if (scale == PackAssets.HOTBAR_DEFAULT_SCALE) {
-                verifyHotbarPngPixels(image);
+            for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+                String zipPath = hotbarTextureZipPath(scale, index);
+                byte[] bytes = requireSelected(zip, zipPath);
+                verifyBinaryAgainstBundle(bytes, zipPath);
+                verifyPngLength(bytes, zipPath);
+                BufferedImage image = readPng(bytes, zipPath);
+                verifyHotbarPngShape(image, zipPath);
+                if (scale == PackAssets.HOTBAR_DEFAULT_SCALE) {
+                    verifyHotbarIconPixels(image, index, zipPath);
+                }
             }
         }
+    }
+
+    private String hotbarTextureZipPath(int scale, int index) throws IOException {
+        return textureZipPath(PackAssets.hotbarIconTexture(index, scale), "PackAssets hotbar icon");
     }
 
     private String hotbarTextureZipPath(int scale, boolean select) throws IOException {
         PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-        return textureZipPath(select ? tier.selectTexture() : tier.texture(), "PackAssets hotbar");
+        return textureZipPath(select ? tier.selectTexture() : PackAssets.hotbarIconTexture(0, scale), "PackAssets hotbar");
     }
 
-    private void verifyHotbarPngPixels(BufferedImage image) throws IOException {
-        int background = 0xFF121216;
-        int[] colors = {
-            0xFFE03A3A, 0xFFE06A2A, 0xFFE08A2A, 0xFFD8D030, 0xFF3CC050,
-            0xFF30C0A8, 0xFF3888E0, 0xFF7050D8, 0xFFC04AA0
+    private void verifyHotbarIconPixels(BufferedImage image, int index, String source) throws IOException {
+        int expected = switch (index) {
+            case 0 -> 0xFFF4ECD8;
+            case 1 -> 0xFFC8D0D8;
+            case 2 -> 0xFFE03A2A;
+            default -> throw new IOException("未知 hotbar 图标下标：" + index);
         };
-        // 槽 0..5 仍是无边框纯色块，逐像素锁死；槽 6/7/8 是「物品图标 + 烘焙数字」槽，
-        // 底色为对应槽色但叠了确定性图标与数字，只校验整幅全不透明、非槽区仍为底色、
-        // 图标槽内出现过白色数字像素（可辨识度靠人工进服确认，见汇报）。
-        for (int y = 0; y < image.getHeight(); y++) {
+        boolean found = false;
+        for (int y = 0; y < image.getHeight() && !found; y++) {
             for (int x = 0; x < image.getWidth(); x++) {
-                int argb = image.getRGB(x, y);
-                if (((argb >>> 24) & 0xFF) != 0xFF) {
-                    throw new IOException("hotbar PNG 存在非全不透明像素：(" + x + "," + y + ")");
-                }
-                boolean slot = y >= 1 && y < 21 && x >= 2 && x < 180 && (x - 2) % 20 < 18;
-                if (!slot) {
-                    if (argb != background) {
-                        throw new IOException("hotbar PNG 非槽位区域必须为底色 #121216：(" + x + "," + y + ")");
-                    }
-                    continue;
-                }
-                int slotIndex = (x - 2) / 20;
-                if (slotIndex <= 5 && argb != colors[slotIndex]) {
-                    throw new IOException("hotbar PNG 纯色槽 " + slotIndex + " 像素不一致：("
-                        + x + "," + y + ")");
+                if (image.getRGB(x, y) == expected) {
+                    found = true;
+                    break;
                 }
             }
         }
-        boolean sawWhiteNumber = false;
-        for (int slotIndex = 6; slotIndex <= 8; slotIndex++) {
-            int startX = 2 + slotIndex * 20;
-            boolean slotHasWhite = false;
-            for (int y = 1; y < 21 && !slotHasWhite; y++) {
-                for (int x = startX; x < startX + 18; x++) {
-                    if (image.getRGB(x, y) == 0xFFFFFFFF) {
-                        slotHasWhite = true;
-                        break;
-                    }
-                }
-            }
-            if (!slotHasWhite) {
-                throw new IOException("hotbar 图标槽 " + slotIndex + " 缺少烘焙示例数字（白色像素）");
-            }
-            sawWhiteNumber = true;
-        }
-        if (!sawWhiteNumber) {
-            throw new IOException("hotbar 图标槽未烘焙任何示例数字");
+        if (!found) {
+            throw new IOException("hotbar 图标未包含预期的可辨识主体像素：index=" + index + "，" + source);
         }
     }
 
@@ -1224,6 +1262,58 @@ public final class HudResourcePackVerifier {
                 }
             }
         }
+    }
+
+    private void verifyGadgetModelsAndItems(ZipIndex zip) throws IOException {
+        for (String id : GADGET_ITEM_IDS) {
+            String itemPath = "assets/muz/items/" + id + ".json";
+            JsonObject item = parseJsonObject(requireSelected(zip, itemPath), itemPath);
+            JsonObject modelRef = item.getAsJsonObject("model");
+            if (modelRef == null || !"minecraft:model".equals(stringValue(modelRef, "type"))
+                || !("muz:item/" + id).equals(stringValue(modelRef, "model"))) {
+                throw new IOException("桌内道具 item definition 模型引用不一致：" + itemPath);
+            }
+
+            String modelPath = "assets/muz/models/item/" + id + ".json";
+            JsonObject model = parseJsonObject(requireSelected(zip, modelPath), modelPath);
+            JsonObject textures = model.getAsJsonObject("textures");
+            if (textures == null) {
+                throw new IOException("桌内道具模型缺少 textures：" + modelPath);
+            }
+            String expectedTexture = "table_gadget_tomato".equals(id)
+                ? "muz:font/hotbar_tomato" : "muz:item/table_gadget_water_sheet";
+            if (!expectedTexture.equals(stringValue(textures, "0"))
+                || !expectedTexture.equals(stringValue(textures, "particle"))) {
+                throw new IOException("桌内道具模型材质命名不一致：" + modelPath);
+            }
+        }
+
+        String texturePath = "assets/muz/textures/item/table_gadget_water_sheet.png";
+        byte[] textureBytes = requireSelected(zip, texturePath);
+        verifyBinaryAgainstBundle(textureBytes, texturePath);
+        verifyPngLength(textureBytes, texturePath);
+        BufferedImage texture = readPng(textureBytes, texturePath);
+        if (texture.getWidth() != 16 || texture.getHeight() != 16) {
+            throw new IOException("水幕道具材质必须为 16x16：" + texturePath);
+        }
+        boolean translucent = false;
+        boolean transparent = false;
+        for (int y = 0; y < texture.getHeight(); y++) {
+            for (int x = 0; x < texture.getWidth(); x++) {
+                int alpha = (texture.getRGB(x, y) >>> 24) & 0xFF;
+                translucent |= alpha > 0 && alpha < 255;
+                transparent |= alpha == 0;
+            }
+        }
+        if (!translucent || transparent) {
+            throw new IOException("水幕道具材质必须是连续半透明薄片：" + texturePath);
+        }
+    }
+
+    private String stringValue(JsonObject object, String key) {
+        JsonElement value = object.get(key);
+        return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+            ? value.getAsString() : null;
     }
 
     private void verifyPackMetadata(ZipIndex zip) throws IOException {

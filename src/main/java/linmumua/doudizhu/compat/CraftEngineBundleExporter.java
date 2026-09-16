@@ -241,38 +241,19 @@ public final class CraftEngineBundleExporter {
         if (!Files.exists(targetRoot)) {
             return;
         }
-        // 用 HashSet 而不是 Collectors.toSet()：后者不保证返回可变集合，加不进指纹存档
-        Set<Path> expectedFiles = bundledEntries.stream()
-            .map(targetRoot::resolve)
-            .collect(Collectors.toCollection(java.util.HashSet::new));
-        // 指纹存档不在清单里，但它是我们自己写的，不能当残留删掉
-        expectedFiles.add(targetRoot.resolve(BUNDLE_FINGERPRINT_FILE));
-        expectedFiles.add(targetRoot.resolve(RUNTIME_HOTBAR_OVERLAY));
-
-        try (var walk = Files.walk(targetRoot)) {
-            List<Path> existing = walk
-                .filter(Files::isRegularFile)
-                .toList();
-            for (Path file : existing) {
-                if (!expectedFiles.contains(file)) {
-                    Files.deleteIfExists(file);
-                }
-            }
+        // 只清理本插件明确生成过的旧九槽底图；不得按 bundle 清单删除用户放在 resources/muz
+        // 下的其它资源。三图标迁移后这些文件若残留，会被旧字体/旧路径误加载。
+        Path fontRoot = targetRoot.resolve("resourcepack/assets/muz/textures/font");
+        if (!Files.isDirectory(fontRoot)) {
+            return;
         }
-
-        try (var walk = Files.walk(targetRoot)) {
-            List<Path> directories = walk
-                .filter(Files::isDirectory)
-                .sorted(Comparator.reverseOrder())
-                .toList();
-            for (Path directory : directories) {
-                if (directory.equals(targetRoot)) {
-                    continue;
-                }
-                try (var children = Files.list(directory)) {
-                    if (children.findAny().isEmpty()) {
-                        Files.deleteIfExists(directory);
-                    }
+        try (var walk = Files.walk(fontRoot)) {
+            for (Path file : walk.filter(Files::isRegularFile).toList()) {
+                Path relative = fontRoot.relativize(file);
+                String path = relative.toString().replace('\\', '/');
+                if (path.equals("hotbar_slots.png")
+                    || path.matches("scale_[^/]+/hotbar_slots\\.png")) {
+                    Files.deleteIfExists(file);
                 }
             }
         }

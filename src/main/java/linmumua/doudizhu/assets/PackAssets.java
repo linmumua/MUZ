@@ -220,7 +220,7 @@ public final class PackAssets {
         }
     }
 
-    /** hotbar 的完整缩放/九槽/选中框几何快照；offset-y 的运行期范围也随 scale 提供。 */
+    /** hotbar 的完整缩放/三图标/选中框几何快照；offset-y 的运行期范围也随 scale 提供。 */
     public record HotbarTier(
         int scale,
         int width,
@@ -251,15 +251,10 @@ public final class PackAssets {
     }
 
     /**
-     * 底部物品栏 HUD 字形族的字体名与码位。
+     * 底部物品栏 HUD 字形族的字体名。
      *
-     * <p>单张静态字形（无偏移档），用于在 ActionBar 中渲染 9 个物品槽背景，
-     * 通过负 ascent 把贴图压到屏幕底部物品栏区域显示。
-     *
-     * <p>必须与 build.gradle.kts 里的 {@code hotbarHudFont} 和 {@code hotbarHudCodepoint}
-     * 保持一致。选 {@code 0xEF00} 是因为 PUA 区 0xE000-0xF8FF 里前段被牌面、头像、
-     * 记牌器占据，后段预留给 CraftEngine 内置配置，{@code 0xEF00} 处于空隙且不与
-     * 任何已知字形冲突。
+     * <p>正式渲染由三张独立透明图标组成；旧九槽码位常量仍保留给兼容调用方，
+     * 但构建资源不再声明旧底板。
      */
     /**
      * 允许的资源包 {@code pack_format} 集合，与 build.gradle.kts 的 {@code MuzTarget}
@@ -278,58 +273,44 @@ public final class PackAssets {
 
     public static final String HOTBAR_HUD_FONT = "minecraft:muz_hotbar";
 
-    /** 底部物品栏字形码位（对应贴图文件 {@code muz:font/hotbar_slots.png}）。 */
+    /** 旧九槽底图码位，仅为二进制兼容保留；新资源不再声明或发布此码位。 */
+    @Deprecated
     public static final int HOTBAR_HUD_CODEPOINT = 0xEF00;
 
-    /** PLAYING 阶段显示的九个彩色调试槽；必须与构建期绘图常量一致。 */
-    public static final int HOTBAR_HUD_SLOT_COUNT = 9;
+    /** 三张独立 Hotbar 图标，顺序固定为 egg、water、tomato。 */
+    public static final int HOTBAR_ICON_COUNT = 3;
+    public static final int HOTBAR_ICON_WIDTH = 20;
+    public static final int HOTBAR_ICON_HEIGHT = 22;
+    public static final int HOTBAR_ICON_STEP = 24;
+    public static final int HOTBAR_ICON_ADVANCE = 21;
+
+    /** 新 Hotbar 的图标数量；旧名称保留以兼容既有调用方。 */
+    public static final int HOTBAR_HUD_SLOT_COUNT = HOTBAR_ICON_COUNT;
+
+    /** 三张独立图标组合后的视觉宽度：20×3 + 4×2 = 68px。 */
+    public static final int HOTBAR_HUD_GLYPH_WIDTH = HOTBAR_ICON_WIDTH * HOTBAR_ICON_COUNT
+        + (HOTBAR_ICON_COUNT - 1) * (HOTBAR_ICON_STEP - HOTBAR_ICON_WIDTH);
+
+    /** 三图标 Hotbar 的原生高度；每张独立图标与选框均为 22px。 */
+    public static final int HOTBAR_HUD_GLYPH_HEIGHT = HOTBAR_ICON_HEIGHT;
 
     /**
-     * 底部物品栏遮罩字形的贴图宽度，固定为原版 9 槽 hotbar 的 182px。
-     *
-     * <p>九个槽块各为 18×20px，位于 x=2,22,...,162；底色填满 182×22 遮罩。
-     * 该遮罩只由 PLAYING 阶段 ActionBar 推送，不修改 minecraft 原版 hotbar sprite。
-     */
-    public static final int HOTBAR_HUD_GLYPH_WIDTH = 182;
-
-    /** 底部物品栏遮罩字形的原生高度；CraftEngine {@code height} 必须恒等于此值以保持 1:1。 */
-    public static final int HOTBAR_HUD_GLYPH_HEIGHT = 22;
-
-    /**
-     * 底部物品栏字形的光标前进量（183px）。
-     *
-     * <p>Minecraft 位图字形在 182px 渲染宽度之外额外加 1 像素字间距（与牌面字形同理），
-     * 所以前进量 = 贴图宽 + 1。{@link HotbarHudService} 用 CraftEngine 负空格把这个
-     * 前进量抵消，使文本有效宽度 = 叠加消息宽度，客户端按叠加消息居中。
+     * 三图标组合字形的整体光标前进量（69px = 68px 视觉宽度 + 1px）。
+     * {@link HotbarHudService} 用图标间的负空格抵消各自 advance，再用整体抵消保持居中。
      */
     public static final int HOTBAR_HUD_GLYPH_ADVANCE = HOTBAR_HUD_GLYPH_WIDTH + 1;
 
     /**
-     * 调试覆盖层的底部物品栏字形码位。
-     *
-     * <p>与 {@link #HOTBAR_HUD_CODEPOINT}（0xEF00）【同字体、同贴图】，唯一差别是
-     * ascent 的来源：
-     * <ul>
-     *   <li>0xEF00 的 ascent 由 build.gradle.kts 烘焙成字面量 -128，进了 jar 就固定；</li>
-     *   <li>0xEF01 的 ascent 由 {@code HotbarDebugOverlayWriter} 在运行期写出，
-     *       等于 {@code -128 - hotbar-hud.offset-y}，所以可以连续调整。</li>
-     * </ul>
-     *
-     * <p>【为什么两个码位都要保留】：生产环境不能依赖运行期写出的文件（本类的契约是
-     * 「插件侧靠枚举复算，不读资源包」），所以必须有一个纯 bundle 的兜底码位；
-     * 而连续可拖的 ascent 又只能来自运行期生成的 YAML。两者职责不重叠，
-     * 共用同一张 {@code muz:font/hotbar_slots.png} 与同一个字体族，已是最小形态。
-     *
-     * <p>【必须与 {@code HotbarDebugOverlayWriter} 生成侧严格对齐】：那边写
-     * {@code char: \uef01}、{@code font: minecraft:muz_hotbar}、{@code height: 22}，
-     * 与这里的码位、{@link #HOTBAR_HUD_FONT}、贴图原生高一一对应。
-     * 任意一侧改了另一侧不改，游戏内就是豆腐块或位置突变。
+     * 旧单码位 API 的调试兼容别名；正式三图标渲染使用
+     * {@link #HOTBAR_SCALE_DEBUG_CODEPOINTS} 的三个连续码位。
      */
     public static final int HOTBAR_HUD_DEBUG_CODEPOINT = 0xEF01;
 
-    /** hotbar 各 scale 的底图/Debug/选中框/overlay 选中框码位，100 档保留 EF00/EF01/EF02/EF03。 */
+    /** hotbar 各 scale 三张基础图标的起始码位，顺序为 egg、water、tomato。 */
     public static final int[] HOTBAR_SCALE_BASE_CODEPOINTS = PackTiers.HOTBAR_SCALE_BASE_CODEPOINTS;
+    /** hotbar 各 scale 三张 overlay 图标的起始码位，顺序为 egg、water、tomato。 */
     public static final int[] HOTBAR_SCALE_DEBUG_CODEPOINTS = PackTiers.HOTBAR_SCALE_DEBUG_CODEPOINTS;
+    /** hotbar 各 scale 的选框码位；默认 100% 继续为 EF02/EF03。 */
     public static final int[] HOTBAR_SCALE_SELECT_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_CODEPOINTS;
     public static final int[] HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS;
 
@@ -337,16 +318,14 @@ public final class PackAssets {
     public static final int HOTBAR_SELECT_DEBUG_CODEPOINT = 0xEF03;
 
     /**
-     * 取底部物品栏字形的 MiniMessage 片段（已包含字体标签）。
-     *
-     * <p>返回 {@code <font:minecraft:muz_hotbar>\uef00</font>}，可直接拼入
-     * MiniMessage 字符串中，由 {@link HotbarHudService} 负责后续合成。
+     * 旧单字形 API 的兼容片段，返回三图标组合中的第一个基础图标；正式渲染请使用
+     * {@link #hotbarIconChar(int, int, boolean)} 逐个组合。
      */
     public static String hotbarHudGlyphText() {
         return hotbarHudGlyphText(DEFAULT_HUD_SCALE);
     }
 
-    /** 返回指定 scale 的 hotbar 底图字形片段。 */
+    /** 返回指定 scale 的三图标组合中的第一个基础图标片段（兼容 API）。 */
     public static String hotbarHudGlyphText(int scale) {
         HotbarTier tier = hotbarTier(scale);
         return "<font:" + tier.font() + ">"
@@ -355,12 +334,8 @@ public final class PackAssets {
     }
 
     /**
-     * 取调试覆盖层字形的 MiniMessage 片段（已包含字体标签）。
-     *
-     * <p>返回 {@code <font:minecraft:muz_hotbar>\uef01</font>}。只有在 Debug Web
-     * 生成过覆盖层资源、且 CraftEngine 重新打包下发之后，客户端才认得这个码位；
-     * 覆盖层缺失时客户端会显示豆腐块，所以调用方必须先确认覆盖层就绪
-     * （{@link HotbarHudService} 用 Debug Web 的接管状态做这个判断）。
+     * 旧单字形调试兼容片段，返回三图标组合中的第一个 overlay 图标；只有 overlay 资源
+     * 已由 CraftEngine 重载并重新下发后才可使用，正式渲染应按图标逐个组合。
      */
     public static String hotbarHudDebugGlyphText() {
         return hotbarHudDebugGlyphText(DEFAULT_HUD_SCALE);
@@ -377,11 +352,10 @@ public final class PackAssets {
     /**
      * 「选中槽」高亮框字形码位（对应贴图文件 {@code muz:font/hotbar_select.png}）。
      *
-     * <p>与 {@link #HOTBAR_HUD_CODEPOINT}（0xEF00）【同字体族 minecraft:muz_hotbar】，
-     * 但是【另一张贴图、另一个码位】：0xEF00 是完整 9 槽底图，0xEF02 是单个可移动的
-     * 空心高亮框。{@link linmumua.doudizhu.game.HotbarHudService} 按玩家当前持槽
-     * （{@code heldSlot}）用零净前进量的负空格夹心把它定位到对应槽位的像素位置，
-     * 因此不改变底图字形的净前进量与客户端居中。
+     * <p>与三张图标共用字体族 minecraft:muz_hotbar，但使用独立贴图与码位：
+     * 0xEF02 是单个可移动的空心高亮框。{@link linmumua.doudizhu.game.HotbarHudService}
+     * 按玩家当前虚拟持槽（{@code heldSlot}）用零净前进量的负空格夹心把它定位到对应
+     * 图标的像素位置，因此不改变三图标组合的净前进量与客户端居中。
      *
      * <p>【必须与 build.gradle.kts 的 {@code hotbarSelectCodepoint} 保持一致】。
      * 选 {@code 0xEF02} 是因为紧邻已用的 0xEF00/0xEF01，同处 PUA 空隙且不与任何已知字形冲突。
@@ -389,7 +363,7 @@ public final class PackAssets {
     public static final int HOTBAR_SELECT_CODEPOINT = 0xEF02;
 
     /**
-     * 「选中槽」高亮框贴图宽度：20px，比 18px 槽块每边多 1px（左右各 1px 描边外扩）。
+     * 「选中槽」高亮框贴图宽度：20px，与每张独立图标的盒宽一致。
      *
      * <p>必须与 build.gradle.kts 的 {@code hotbarSelectGlyphWidth} 保持一致。
      */
@@ -974,11 +948,45 @@ public final class PackAssets {
         return scale == DEFAULT_HUD_SCALE ? HOTBAR_HUD_FONT : HOTBAR_HUD_FONT + "_s" + scale;
     }
 
-    public static String hotbarTexturePath(int scale) {
+    /** 三张图标的码位字符，debug=true 时取运行期 overlay 码位窗口。 */
+    public static String hotbarIconChar(int index, int scale, boolean debug) {
+        requireHotbarIconIndex(index);
+        int scaleIndex = hotbarScaleIndex(scale);
+        int start = debug ? HOTBAR_SCALE_DEBUG_CODEPOINTS[scaleIndex] : HOTBAR_SCALE_BASE_CODEPOINTS[scaleIndex];
+        return new String(Character.toChars(start + index));
+    }
+
+    public static int hotbarIconWidth(int scale) {
         hotbarScaleIndex(scale);
-        return scale == DEFAULT_HUD_SCALE
-            ? "muz:font/hotbar_slots.png"
-            : "muz:font/scale_" + scale + "/hotbar_slots.png";
+        return scalePixel(HOTBAR_ICON_WIDTH, scale);
+    }
+
+    public static int hotbarIconHeight(int scale) {
+        hotbarScaleIndex(scale);
+        return scalePixel(HOTBAR_ICON_HEIGHT, scale);
+    }
+
+    public static int hotbarIconStep(int scale) {
+        hotbarScaleIndex(scale);
+        return scalePixel(HOTBAR_ICON_STEP, scale);
+    }
+
+    public static int hotbarIconAdvance(int scale) {
+        return hotbarIconWidth(scale) + 1;
+    }
+
+    /** 返回指定图标的完整资源键；默认档位位于 font 根目录，其余档位位于 scale_<n>。 */
+    public static String hotbarIconTexture(int index, int scale) {
+        requireHotbarIconIndex(index);
+        hotbarScaleIndex(scale);
+        String folder = scale == DEFAULT_HUD_SCALE ? "font" : "font/scale_" + scale;
+        return "muz:" + folder + "/hotbar_" + HOTBAR_ICON_NAMES[index] + ".png";
+    }
+
+    /** 旧 API 兼容别名：正式渲染请使用 hotbarIconTexture(index, scale)。 */
+    @Deprecated
+    public static String hotbarTexturePath(int scale) {
+        return hotbarIconTexture(0, scale);
     }
 
     public static String hotbarSelectTexturePath(int scale) {
@@ -998,15 +1006,22 @@ public final class PackAssets {
         return new HotbarTier(
             scale, width, height, width + 1, baseAscent,
             baseAscent - height, 256,
-            hotbarFont(scale), hotbarTexturePath(scale), hotbarSelectTexturePath(scale),
+            hotbarFont(scale), hotbarIconTexture(0, scale), hotbarSelectTexturePath(scale),
             selectWidth, selectHeight, selectWidth + 1,
-            HOTBAR_HUD_SLOT_COUNT,
-            scalePixel(18, scale), scalePixel(20, scale), scalePixel(20, scale),
-            scaleCoordinate(2, scale), scaleCoordinate(1, scale),
-            scaleCoordinate(1, scale), 0,
+            HOTBAR_ICON_COUNT,
+            hotbarIconWidth(scale), hotbarIconHeight(scale), hotbarIconStep(scale),
+            0, 0, 0, 0,
             HOTBAR_SCALE_BASE_CODEPOINTS[scaleIndex], HOTBAR_SCALE_DEBUG_CODEPOINTS[scaleIndex],
             HOTBAR_SCALE_SELECT_CODEPOINTS[scaleIndex], HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS[scaleIndex]
         );
+    }
+
+    private static final String[] HOTBAR_ICON_NAMES = {"egg", "water", "tomato"};
+
+    private static void requireHotbarIconIndex(int index) {
+        if (index < 0 || index >= HOTBAR_ICON_COUNT) {
+            throw new IllegalArgumentException("hotbar 图标下标必须为 0.." + (HOTBAR_ICON_COUNT - 1) + "：" + index);
+        }
     }
 
     public static HotbarTier hotbarGeometry(int scale) {

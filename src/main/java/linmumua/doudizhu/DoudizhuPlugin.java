@@ -14,6 +14,9 @@ import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.debug.DebugWebServer;
 import linmumua.doudizhu.game.HotbarHudService;
+import linmumua.doudizhu.game.TableGadgetService;
+import linmumua.doudizhu.game.TableGadgetSettings;
+import linmumua.doudizhu.game.TableGadgetEffectService;
 import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.game.TableManager;
 import linmumua.doudizhu.listener.CraftEngineLifecycleListener;
@@ -151,6 +154,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private CraftEngineFurnitureService craftEngineFurnitureService;
     private CraftEngineOffsetService craftEngineOffsetService;
     private HotbarHudService hotbarHudService;
+    /** 桌内道具状态与效果由专用服务管理，入口仅负责装配。 */
+    private TableGadgetService tableGadgetService;
     /** Debug Web 调试面板；仅 debug.web-ui.enabled=true 时非 null。 */
     private DebugWebServer debugWebServer;
     private PlayerHeadRenderer playerHeadRenderer;
@@ -407,6 +412,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
         craftEngineOffsetService = new CraftEngineOffsetService(this);
         hotbarHudService = new HotbarHudService(this, craftEngineOffsetService);
+        tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this),
+            TableGadgetSettings.load(yamlConfig()));
         syncHotbarHudRuntime(yamlConfig().getBoolean("debug.web-ui.enabled", false));
         // Debug Web 调试面板：仅在 debug.web-ui.enabled=true 时启动，生产环境默认关闭。
         // 面板启用时只切换到可拖动 ascent 字形，PLAYING 阶段的 hotbar 推送仍继续；
@@ -444,6 +451,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (debugWebServer != null) {
             debugWebServer.close();
         }
+        if (tableGadgetService != null) {
+            tableGadgetService.shutdown();
+        }
         if (hotbarHudService != null) {
             hotbarHudService.stop();
         }
@@ -474,6 +484,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public HotbarHudService getHotbarHudService() {
         return hotbarHudService;
+    }
+
+    /** 提供桌内道具交互入口，业务与临时实体均由服务持有。 */
+    public TableGadgetService tableGadgets() {
+        return tableGadgetService;
     }
 
     /**
@@ -3495,6 +3510,20 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hotbarHudService.setOffsetX(yamlConfig().getInt("hotbar-hud.offset-x", 0));
         hotbarHudService.setScale(yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
         hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride);
+        if (tableGadgetService != null) {
+            // 重载只传不可变配置；非法互动参数拒绝应用并停止旧互动，不能静默使用错误范围。
+            try {
+                tableGadgetService.reload(TableGadgetSettings.load(yamlConfig()));
+                if (hotbarHudEnabled) {
+                    tableGadgetService.start();
+                } else {
+                    tableGadgetService.stop();
+                }
+            } catch (IllegalArgumentException exception) {
+                tableGadgetService.stop();
+                getLogger().log(java.util.logging.Level.WARNING, "道具互动配置无效，已停止互动", exception);
+            }
+        }
     }
 
     /**

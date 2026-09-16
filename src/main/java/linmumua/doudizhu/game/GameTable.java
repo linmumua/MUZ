@@ -567,6 +567,9 @@ public final class GameTable {
         if (!contains(playerId)) {
             return;
         }
+        if (plugin.tableGadgets() != null) {
+            plugin.tableGadgets().clearPlayer(playerId);
+        }
         Component leaveMessage = MuzTheme.field("离桌", MuzTheme.danger(reason));
         if (phase != GamePhase.LOBBY) {
             // 先回到大厅并清掉上一帧自定义 hotbar，再发送离桌提示，避免 resetRound
@@ -1027,6 +1030,9 @@ public final class GameTable {
         if (hotbarHud != null) {
             hotbarHud.clearTable(this);
         }
+        if (plugin.tableGadgets() != null) {
+            plugin.tableGadgets().clearTable(this);
+        }
         detachAllSeatsForForceClose(reason);
         clearTableStateForForceClose();
     }
@@ -1242,6 +1248,9 @@ public final class GameTable {
         if (hotbarHud != null) {
             // phase 切回 LOBBY 前主动清掉最后一帧字形，避免等待下一次周期 tick。
             hotbarHud.clearTable(this);
+        }
+        if (plugin.tableGadgets() != null) {
+            plugin.tableGadgets().clearTable(this);
         }
         resetRoundStateForLobby();
         plugin.getHandGuiService().closeHands(this);

@@ -189,6 +189,32 @@ public class DebugHudConfigControllerTest {
     }
 
     @Test
+    void hotbarGeometryPublishesThreeIndependentIconsAndVirtualSelection() {
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length, geometry.hotbars().size());
+        for (DebugHudConfigController.PreviewGeometry.HotbarGeometry hotbar : geometry.hotbars()) {
+            assertEquals(68, hotbar.width());
+            assertEquals(22, hotbar.height());
+            assertEquals(69, hotbar.advance());
+            assertEquals(3, hotbar.slotCount());
+            assertEquals(24, hotbar.slotStep());
+            assertEquals(0, hotbar.selectStartX());
+            assertEquals(3, hotbar.icons().size());
+            for (int index = 0; index < 3; index++) {
+                var icon = hotbar.icons().get(index);
+                assertEquals(index, icon.index());
+                assertEquals(20, icon.width());
+                assertEquals(22, icon.height());
+                assertEquals(24, icon.step());
+                assertEquals(21, icon.advance());
+                assertEquals(PackAssets.hotbarIconTexture(index, hotbar.scale()), icon.texture());
+                assertTrue(icon.codepoint() > 0);
+                assertTrue(icon.debugCodepoint() > 0);
+            }
+        }
+    }
+
+    @Test
     void avatarLayoutGeometryCoversEveryScaleAndOutlineCombination() {
         DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
 

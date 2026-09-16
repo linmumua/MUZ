@@ -74,15 +74,18 @@ class ResourceProfileGenerationTest {
     }
 
     @Test
-    void hotbar当前Scale只声明底图和选中框() throws IOException {
+    void hotbar当前Scale只声明三图标与选中框() throws IOException {
         requireGeneratedBundle();
         Path hotbar = IMAGES_DIR.resolve("hotbar_hud.yml");
         Assumptions.assumeTrue(Files.isRegularFile(hotbar), "缺少 hotbar provider：" + hotbar);
         String yaml = Files.readString(hotbar, StandardCharsets.UTF_8);
-        assertEquals(2, countOccurrences(yaml, "muz:hotbar_"),
-            "当前 Hotbar scale 必须只声明底图与选中框");
-        assertTrue(yaml.contains("muz:hotbar_slots:"), "缺少 Hotbar 底图声明");
+        assertEquals(4, countOccurrences(yaml, "muz:hotbar_"),
+            "当前 Hotbar scale 必须只声明三张独立图标与选中框");
+        assertTrue(yaml.contains("muz:hotbar_egg:"), "缺少鸡蛋 Hotbar 图标声明");
+        assertTrue(yaml.contains("muz:hotbar_water:"), "缺少水桶 Hotbar 图标声明");
+        assertTrue(yaml.contains("muz:hotbar_tomato:"), "缺少番茄 Hotbar 图标声明");
         assertTrue(yaml.contains("muz:hotbar_select:"), "缺少 Hotbar 选中框声明");
+        assertFalse(yaml.contains("hotbar_slots"), "不得继续发布旧九槽底图");
         assertFalse(yaml.contains("hotbar_slots_s75") || yaml.contains("hotbar_slots_s125"),
             "Hotbar provider 不得声明 profile 外的 scale");
     }
