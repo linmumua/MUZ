@@ -24,6 +24,7 @@ MUZ 是一个 Paper / Purpur 服务端插件，用 Display Entity 在真实世�
 ### 桌内道具互动
 
 鸡蛋和番茄可以朝同桌对手投掷（无伤害），水桶会在目标身边生成短暂的水幕效果。被选中的目标会短时发光提示，所有效果实体在离桌、关桌或停服时自动清理。
+
 <img width="480" height="270" alt="2026-09-20 00-03-14_batch_1" src="https://github.com/user-attachments/assets/3d892e41-6503-4f1d-9909-131c945fa701" />
 ### 沉浸式音效
 
