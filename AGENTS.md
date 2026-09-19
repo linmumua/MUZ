@@ -284,6 +284,7 @@ linmumua.doudizhu
 - `paper-26.2` 强制执行 `compileJava compileTestJava processResources processTestResources --rerun-tasks`，7 项任务全部实际执行成功。定向回归 184/184、15 个容器成功；独立全量 JUnit 873/873、128 个容器成功，均无失败、跳过或中止。
 - `paper-1.21.11`、`paper-26.1.2`、`paper-26.2` 均干净执行 `clean shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml`，每目标 10 项任务实际执行成功。九归档 CRC、重复条目、版本 `1.10.38`、作者 `linmumua`、资源格式 75/84/88、三种桌内道具资源及退役 Hotbar 禁止项均通过。
 - 三目标 JAR SHA-256 依次为：`5e62727e1b4c3e3351308097a6761fc4209b6cd9917066132dcaf615f0c1d826`、`857ed544fe257b3a0eb17f8dbd28f00930f062d5b5635f0fd3b43b8b5c821cd4`、`0b55fb14a129d3477d2b8886d91502594d2a721d90ac45c74ba2b0e76d73a668`。
+- 推送收口保留 GitHub 远程 README 的三张托管演示图，并将真实存在的 `/muz bot add|remove` 补入命令列表；同时沿用远程对旧 `docs/` 截图与说明文件的删除，不恢复已退役文档。
 - **未验证（需进服人工确认）**：真实 CraftEngine 保存/重载、资源上传与客户端下载、三层 HUD 和私有语音面板的实际显示；家具行走及真实尺寸档位仍由独立阻塞项跟踪。本轮未部署或重启实服。
 
 ### 1.10.37（开局后对入座真人隐藏桌边动态，编译与单测通过，客户端待验）
