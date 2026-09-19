@@ -89,6 +89,28 @@ public final class WorldTableInteractionListener implements Listener {
         return service != null && service.tryUse(player);
     }
 
+    /** 发牌和明牌窗口都不允许手牌点击抢走桌面/家具事件。 */
+    private boolean isHandInteractionBlocked(Player player) {
+        if (player == null || plugin.getTableManager() == null) {
+            return false;
+        }
+        GameTable table = plugin.getTableManager().getTableOf(player);
+        if (table == null) {
+            return false;
+        }
+        GamePhase phase = table.getPhase();
+        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
+    }
+
+    /** 新增开局过渡阶段不显示个人 HUD 假预览，避免和真实发牌/明牌状态混淆。 */
+    private boolean isRoundTransitionPhase(GameTable table) {
+        if (table == null) {
+            return false;
+        }
+        GamePhase phase = table.getPhase();
+        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
+    }
+
     /**
      * 判断 PlayerInteractEvent 是否来自主手。
      * 手牌点击不能依赖这个条件；这里只给必须由主手持有的调试棒使用。
@@ -158,7 +180,8 @@ public final class WorldTableInteractionListener implements Listener {
             rows = plugin.cycleHudRowOverride(playerId);
         }
         GameTable table = plugin.getTableManager().getTableOf(player);
-        if (rows == 0 || (table != null && table.getPhase() == GamePhase.PLAYING)) {
+        if (rows == 0 || (table != null
+            && (table.getPhase() == GamePhase.PLAYING || isRoundTransitionPhase(table)))) {
             hideHudDebugPreview(player);
         } else {
             plugin.showHudDebugPreview(player);
@@ -262,7 +285,8 @@ public final class WorldTableInteractionListener implements Listener {
             if (!plugin.isTablePlacer(event.getItem()) && !plugin.isDoudizhuTableRemover(event.getItem())) {
                 // 主手/副手会为同一次右键各发一次事件，去重在 handleHandCardClick 里按 tick 做，
                 // 这里不能靠"只认主手"过滤：主手空手时那一次未必发得出来。
-                if (plugin.getPhysicalTableManager().handleHandCardClick(event.getPlayer(), rightClick)) {
+                if (!isHandInteractionBlocked(event.getPlayer())
+                    && plugin.getPhysicalTableManager().handleHandCardClick(event.getPlayer(), rightClick)) {
                     event.setCancelled(true);
                     return; // 命中手牌，不再做方块保护（牌悬浮在桌子上方，准星必然同时落在桌面方块上）
                 }
@@ -341,7 +365,8 @@ public final class WorldTableInteractionListener implements Listener {
         // 事件最后走到下面的保护判定被静默取消——点牌连提示都没有。
         // 让位判据见 handleHandCardClickBlockedBy：按能否消费点击决定，不比距离。
         // 放桌/拆桌棍握在手里时不认手牌点击，和 onHandCardClick 同口径。
-        if (!plugin.isTablePlacer(event.getPlayer().getInventory().getItemInMainHand())
+        if (!isHandInteractionBlocked(event.getPlayer())
+            && !plugin.isTablePlacer(event.getPlayer().getInventory().getItemInMainHand())
             && !plugin.isDoudizhuTableRemover(event.getPlayer().getInventory().getItemInMainHand())
             && plugin.getPhysicalTableManager()
                 .handleHandCardClickBlockedBy(event.getPlayer(), true, event.getRightClicked())) {
@@ -436,7 +461,8 @@ public final class WorldTableInteractionListener implements Listener {
         // 悬停不受影响，因为它走 tick 里的解析求交，从不看实体。
         // 重复执行由 handleHandCardClick 内部按「同一玩家 + 同一 tick」去重兜住：
         // 两个包真的都到达时第二次直接返回 true，不会把 toggle 执行两遍。
-        if (!plugin.isTablePlacer(event.getPlayer().getInventory().getItemInMainHand())
+        if (!isHandInteractionBlocked(event.getPlayer())
+            && !plugin.isTablePlacer(event.getPlayer().getInventory().getItemInMainHand())
             && !plugin.isDoudizhuTableRemover(event.getPlayer().getInventory().getItemInMainHand())
             && plugin.getPhysicalTableManager()
                 .handleHandCardClickBlockedBy(event.getPlayer(), true, event.getRightClicked())) {
@@ -556,7 +582,8 @@ public final class WorldTableInteractionListener implements Listener {
             NamedTextColor.DARK_PURPLE, () ->
                 "入口 EntityDamageByEntityEvent: rightClick=" + rightClick
                 + " blocking=" + (blocking == null ? "null" : blocking.getType().name()));
-        if (!plugin.isTablePlacer(damager.getInventory().getItemInMainHand())
+        if (!isHandInteractionBlocked(damager)
+            && !plugin.isTablePlacer(damager.getInventory().getItemInMainHand())
             && !plugin.isDoudizhuTableRemover(damager.getInventory().getItemInMainHand())
             && plugin.getPhysicalTableManager()
                 .handleHandCardClickBlockedBy(damager, false, event.getEntity())) {
@@ -771,7 +798,8 @@ public final class WorldTableInteractionListener implements Listener {
                 continue;
             }
             int rows = plugin.hudRowOverride(playerId);
-            if (table != null && table.getPhase() == GamePhase.PLAYING) {
+            if (table != null
+                && (table.getPhase() == GamePhase.PLAYING || isRoundTransitionPhase(table))) {
                 hideHudDebugPreview(player);
             } else if (rows == 0) {
                 hideHudDebugPreview(player);

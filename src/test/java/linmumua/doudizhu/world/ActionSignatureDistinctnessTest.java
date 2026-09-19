@@ -49,6 +49,16 @@ class ActionSignatureDistinctnessTest {
     }
 
     @Test
+    void revealButtonDiffersFromBiddingButtons() {
+        String bid3 = PhysicalTableManager.buttonSignatureFragment(
+            "bid", "叫3分", ButtonAction.BID_3, 0.96);
+        String reveal = PhysicalTableManager.buttonSignatureFragment(
+            "inspect", "明牌 ×2", ButtonAction.REVEAL_HAND, 0.0);
+
+        assertNotEquals(bid3, reveal, "REVEALING 明牌按钮必须与叫分按钮保持独立签名");
+    }
+
+    @Test
     void biddingButtonsAllShareModelIdButDifferInSignature() {
         // 四个叫分按钮 modelId 全是 "bid"，只靠 label/action/offsetX 区分。
         String bid0 = PhysicalTableManager.buttonSignatureFragment("bid", "不叫", ButtonAction.BID_0, -0.96);

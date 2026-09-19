@@ -40,6 +40,9 @@ public final class CraftEngineLifecycleListener implements Listener {
             plugin.getCraftEngineOffsetService().invalidate();
             plugin.ensureCraftEngineProtectionListenerRegistered();
             plugin.getCraftEngineBundleExporter().ensureBundleReady("craftengine-enable", false);
+            if (plugin.getHudResourceRecoveryService() != null) {
+                plugin.getHudResourceRecoveryService().onCraftEngineEnabled("craftengine-enable");
+            }
             plugin.attemptPersistedTableRestore();
             plugin.scheduleVisualWarmupRebuilds("craftengine-enable", 60L, 180L);
             return;

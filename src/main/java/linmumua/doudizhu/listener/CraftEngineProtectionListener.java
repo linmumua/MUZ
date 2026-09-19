@@ -1,6 +1,8 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.GamePhase;
+import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.TableGadgetService;
 import net.momirealms.craftengine.bukkit.api.event.CustomBlockBreakEvent;
 import net.momirealms.craftengine.bukkit.api.event.FurnitureBreakEvent;
@@ -126,7 +128,7 @@ public final class CraftEngineProtectionListener implements Listener {
      */
     private boolean handleHandCardClickOnFurniture(
         org.bukkit.entity.Player player, boolean rightClick, Entity base) {
-        if (player == null || base == null) {
+        if (player == null || base == null || isHandInteractionBlocked(player)) {
             return false;
         }
         // 放桌/拆桌棍握在手里时不认手牌点击，和另外三条入口同口径。
@@ -136,6 +138,19 @@ public final class CraftEngineProtectionListener implements Listener {
         }
         return plugin.getPhysicalTableManager()
             .handleHandCardClickBlockedBy(player, rightClick, base);
+    }
+
+    /** 发牌和明牌窗口都不允许 CE 家具路径抢走手牌交互。 */
+    private boolean isHandInteractionBlocked(Player player) {
+        if (player == null || plugin.getTableManager() == null) {
+            return false;
+        }
+        GameTable table = plugin.getTableManager().getTableOf(player);
+        if (table == null) {
+            return false;
+        }
+        GamePhase phase = table.getPhase();
+        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
     }
 
     /** CE 发包家具没有 Bukkit 实体事件，右键道具必须在 FurnitureInteractEvent 路由。 */

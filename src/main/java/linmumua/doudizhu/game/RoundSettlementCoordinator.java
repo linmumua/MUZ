@@ -68,9 +68,9 @@ final class RoundSettlementCoordinator {
             : support.seats().stream().filter(seat -> !Objects.equals(seat, landlord)).toList();
         int roundScore = support.resolvedCoreScore(landlordWin);
         Map<UUID, Integer> scoreDeltas = new LinkedHashMap<>();
-        // 【为什么要夹上限】：roundScore = 叫分 × 炸弹倍数 × 春天2 × 加倍系数，全是 int 相乘。
-        // 当前配置下实测峰值约 3.2 万，离 int 上限还远，但这条链上每加一个乘子（明牌、
-        // 欢乐豆加倍之类）门槛就掉一个数量级，溢出后会变成负数——那意味着输家反而收钱。
+        // 【为什么要夹上限】：roundScore = 叫分 × 明牌公共倍率 × 炸弹倍数 × 春天2，
+        // 这里的核心分仍由 GameTable 统一计算，座位加倍在分差层单独处理。当前配置下实测峰值约 3.2 万，
+        // 离 int 上限还远，但这条链上每加一个乘子门槛就掉一个数量级，溢出后会变成负数——那意味着输家反而收钱。
         // 夹在这里而不是各乘法点：这是所有分差的唯一源头，夹一次就够，且不改变正常量级的结果。
         roundScore = Math.clamp(roundScore, 0, MAX_ROUND_SCORE);
         if (landlordWin) {

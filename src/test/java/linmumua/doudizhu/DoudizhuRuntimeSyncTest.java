@@ -68,21 +68,39 @@ class DoudizhuRuntimeSyncTest {
     }
 
     @Test
+    void reload的HUD恢复失败必须异步补发红色反馈() throws IOException {
+        String source = Files.readString(PLUGIN);
+        assertTrue(source.contains("hudRecovery.whenComplete((result, failure) ->"),
+            "/muz reload 必须观察 HUD 恢复 Future，不能 fire-and-forget 后永远报告成功");
+        assertTrue(source.contains("feedback.recoveryFailed(\"HUD 四层资源恢复失败：\""),
+            "HUD 恢复失败必须通过 ReloadFeedback 补发独立失败反馈");
+        assertTrue(source.contains("void recoveryFailed(String detail);"),
+            "ReloadFeedback 必须提供 HUD 恢复失败出口");
+        assertTrue(source.contains("NamedTextColor.RED"),
+            "HUD 恢复失败反馈必须使用红色文案");
+    }
+
+    @Test
     void DebugWeb接管时Hotbar仍继续推送() throws IOException {
         // 【这条守的是一个已经踩过的坑】：原先 suspended=true（Debug Web 面板开着）会直接
         // stop()，理由是「避免和 Web 页面争抢底部物品栏」。但那让调试闭环断掉了 ——
         // 在面板上拖 hotbar 位置时游戏内根本没有底图在推送，拖了也看不到任何变化。
-        // 现在 suspended 的含义是「Web 接管定位参数」：周期任务照常，只把字形切到
-        // 可拖动 ascent 的那个码位。实际接收者仍必须是 PLAYING 牌桌中的真人座位。
+        // 现在 suspended 的含义是「Web 接管定位参数编辑」：周期任务照常；正式字形是否切到
+        // 可拖动 ascent 码位由已验证请求、当前 scale 与非零 raw offset-y 决定。实际接收者仍必须是
+        // PLAYING 牌桌中的真人座位。
         String hotbar = Files.readString(HOTBAR);
         int at = hotbar.indexOf("public void reloadEnabled(boolean configuredEnabled, boolean suspended)");
         assertTrue(at > 0, "reloadEnabled 应当存在");
         String body = hotbar.substring(at, Math.min(hotbar.length(), at + 500));
         assertTrue(body.contains("if (configuredEnabled) {"),
             "启停只能由 configuredEnabled 决定；把 suspended 也纳入判断会让面板一开就停推送");
-        assertTrue(body.contains("this.useDebugOverlayGlyph = suspended && overlayReady;"),
-            "suspended 应当只在覆盖层已验证就绪时切换字形来源，不再用于停推送");
-        assertTrue(body.contains("overlayReadyScale != scale"),
+        assertTrue(body.contains("refreshOverlayGlyphSelection();"),
+            "正式字形必须由完整 ready、当前 scale 与 raw offset-y 决定");
+        assertFalse(body.contains("suspended && overlayReady"),
+            "Debug Web 生命周期不得阻断已验证的 hotbar offset-y overlay");
+        assertTrue(hotbar.contains("&& offsetY != 0;"),
+            "offset-y=0 必须继续使用 bundle 基线，非零已验证 offset-y 才切换 overlay");
+        assertTrue(hotbar.contains("overlayReadyScale == scale"),
             "Debug Web 覆盖层必须绑定当前 hotbar scale，不能跨档发送未声明码位");
         // 1.10.22 从九槽整幅字形迁移为三独立图标：守护真实发送路径，而非旧方法名。
         assertTrue(hotbar.contains("PackAssets.hotbarIconChar(i, scale, useOverlay)"),
@@ -231,6 +249,46 @@ class DoudizhuRuntimeSyncTest {
         String body = source.substring(at, at + 260);
         assertTrue(body.contains("reloadVisualState(false, ReloadFeedback.silent())"),
             "Web 编辑器回调只应复用现有轻量 reload，不把表单逻辑堆进主类");
+    }
+
+    @Test
+    void 启动恢复与CraftEngine启用事件共用独立恢复服务() throws IOException {
+        String plugin = Files.readString(PLUGIN);
+        String lifecycle = Files.readString(Path.of(
+            "src/main/java/linmumua/doudizhu/listener/CraftEngineLifecycleListener.java"));
+        assertTrue(plugin.contains("hudResourceRecoveryService = new HudResourceRecoveryService(this, hudWebApplyCoordinator)"),
+            "插件启动必须装配独立 HUD 资源恢复服务");
+        assertTrue(plugin.contains("hudResourceRecoveryService.reloadFromDisk(\"manual-reload\")"),
+            "/muz reload 必须从磁盘恢复四层 request，而不是只重读普通 HUD 设置");
+        assertTrue(lifecycle.contains("plugin.getHudResourceRecoveryService() != null"),
+            "CraftEngine enable 事件必须防护恢复服务为空");
+        assertTrue(lifecycle.contains("onCraftEngineEnabled(\"craftengine-enable\")"),
+            "CraftEngine enable 必须触发完整四层恢复");
+        assertFalse(lifecycle.contains("reloadFromDiskForWeb()"),
+            "生命周期监听器不得绕过 coordinator 直接读 Web 配置");
+    }
+
+    @Test
+    void 四层运行态应用只在coordinator验证后调用() throws IOException {
+        String coordinator = Files.readString(Path.of(
+            "src/main/java/linmumua/doudizhu/debug/HudWebApplyCoordinator.java"));
+        int resource = coordinator.indexOf("private CompletableFuture<ApplyResult> resourceAndApply");
+        int apply = coordinator.indexOf("private CompletableFuture<ApplyResult> applyOnMain");
+        assertTrue(resource >= 0 && apply > resource, "必须存在资源同步与最终运行态应用两个阶段");
+        String body = coordinator.substring(resource, apply);
+        assertTrue(body.contains("plugin.getHudOverlayRuntimeState().clear()"),
+            "CE reload/generate/ZIP 校验前必须清除旧 ready");
+        assertTrue(body.contains("plugin.setHotbarOverlayReady(false)"),
+            "四层资源未验证前必须关闭 hotbar overlay ready");
+        String applyBody = coordinator.substring(apply);
+        assertTrue(applyBody.contains("markVerified(request, metrics)"),
+            "只有最终应用阶段才能原子发布完整 request 和对应字体快照");
+        assertTrue(body.indexOf("loadVerifiedHotbarFontMetrics") > body.indexOf("reloadGenerateAndVerify"),
+            "字体快照必须在真实资源校验后加载，不能独立提前发布");
+        assertTrue(applyBody.contains("runIfActiveAtomically"),
+            "close/timeout 与最终 apply 必须通过原子闸门仲裁");
+        assertTrue(applyBody.contains("setHotbarOverlayReady(true, request.hotbarScale())"),
+            "ready 必须绑定当前 hotbar scale");
     }
 
     /** 源码契约断言不应被注释里的示例或历史说明误命中。 */

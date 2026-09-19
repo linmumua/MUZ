@@ -162,16 +162,7 @@ public final class PhysicalTableManager {
     static final double CHAIR_PLACEMENT_RADIUS = 0.55;
     static final double CHAIR_PLACEMENT_MIN_Y = -0.10;
     static final double CHAIR_PLACEMENT_MAX_Y = 1.05;
-    // 叫分阶段带明牌的五按钮布局。偏移取 ±0.96/±0.48/0，
-    // 按默认弧度算相邻判定框间距约 0.267，远大于最宽标签 0.115，不会误触。
-    private static final List<ActionButtonState> BIDDING_BUTTONS_WITH_REVEAL = List.of(
-        new ActionButtonState("bid", "不叫", ButtonAction.BID_0, -0.96),
-        new ActionButtonState("bid", "叫1分", ButtonAction.BID_1, -0.48),
-        new ActionButtonState("bid", "叫2分", ButtonAction.BID_2, 0.00),
-        new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, 0.48),
-        new ActionButtonState("inspect", "明牌", ButtonAction.REVEAL_HAND, 0.96)
-    );
-    // 已明牌后的四按钮布局，回到原来的对称偏移。
+    // 叫分阶段只保留四个叫分按钮；明牌按钮仅在独立 REVEALING 窗口出现。
     private static final List<ActionButtonState> BIDDING_BUTTONS_ONLY = List.of(
         new ActionButtonState("bid", "不叫", ButtonAction.BID_0, -0.96),
         new ActionButtonState("bid", "叫1分", ButtonAction.BID_1, -0.32),
@@ -196,6 +187,8 @@ public final class PhysicalTableManager {
     private final Map<String, String> actionSignatureByTable = new LinkedHashMap<>();
     private final Map<String, Map<UUID, String>> privateHandSignatureByTable = new LinkedHashMap<>();
     private final Map<String, Map<UUID, String>> backsideHandSignatureByTable = new LinkedHashMap<>();
+    /** 开局逐批发牌与原地翻面的固定槽位展示缓存。 */
+    private final Map<String, HandDealPresentation> handDealPresentations = new LinkedHashMap<>();
     /**
      * 「捕获器可能挡住按钮」这条告警是否已经喊过。
      *
@@ -1239,6 +1232,11 @@ public final class PhysicalTableManager {
             if (placed.playDetailDisplayId() != null) {
                 showPublicEntitiesTo(viewer, List.of(placed.playDetailDisplayId()));
             }
+            // staticEntities 与上面的显式 show 会无条件显示 playDetail，
+            // 这里在其后按阶段/入座权威重算一次，确保开局后入座真人（含刚上线的这名 viewer）不被重新显示出来。
+            if (table != null) {
+                updatePlayDetailVisibility(table, placed);
+            }
         }
         hidePrivateEntitiesFrom(viewer);
     }
@@ -1331,6 +1329,10 @@ public final class PhysicalTableManager {
         GameTable table = plugin.getTableManager().getTableOf(player);
         if (table == null) {
             return false;
+        }
+        if (table.isOpeningHandLocked()) {
+            hint(player, table.openingRevealLabel(), NamedTextColor.YELLOW);
+            return true;
         }
         PlacedTable placed = placedTable(table.getName());
         if (placed == null || table.getHand(player.getUniqueId()).isEmpty()) {
@@ -1596,6 +1598,7 @@ public final class PhysicalTableManager {
             actionSignatureByTable.clear();
             privateHandSignatureByTable.clear();
             backsideHandSignatureByTable.clear();
+            handDealPresentations.clear();
             return;
         }
         for (PlacedTable placed : new ArrayList<>(placedTables.values())) {
@@ -1643,7 +1646,7 @@ public final class PhysicalTableManager {
             }
             updateHoverState(table, viewer);
             PlacedTable placed = placedTable(table.getName());
-            if (placed != null) {
+            if (placed != null && !table.isOpeningHandLocked()) {
                 updatePrivateSelection(table, placed, viewer.getUniqueId());
                 updateBacksideSelection(table, placed, viewer.getUniqueId());
                 // 排在悬停之后：线框要读 pickHandCard 的结果，那是悬停算出来的同一份。
@@ -2316,11 +2319,14 @@ public final class PhysicalTableManager {
         TablePlacement tablePlacement = spawnTableVisual(tableLocation, yaw);
         UUID tableVisualId;
         if (tablePlacement.entityId() != null) {
-            addEntityTreeIds(tablePlacement.entityId(), staticEntities);
-            tableVisualId = tablePlacement.entityId();
             if (tablePlacement.craftEngineEntity()) {
-                addEntityTreeIds(tablePlacement.entityId(), placed.craftEngineVisualEntities());
+                // CE 家具必须保留持久化状态，让 CE 自己处理区块卸载/加载和旧映射失效；这里只登记实体树 UUID。
+                collectEntityTreeIds(tablePlacement.entityId(), staticEntities);
+                collectEntityTreeIds(tablePlacement.entityId(), placed.craftEngineVisualEntities());
+            } else {
+                addEntityTreeIds(tablePlacement.entityId(), staticEntities);
             }
+            tableVisualId = tablePlacement.entityId();
         } else {
             ItemDisplay fallbackTableDisplay = spawnFurnitureDisplay(tableLocation, tableItem(), plugin.getTableScale());
             staticEntities.add(fallbackTableDisplay.getUniqueId());
@@ -2334,9 +2340,12 @@ public final class PhysicalTableManager {
             Location chairLocation = chairLocation(anchor, yaw, index);
             ChairPlacement chairPlacement = spawnChairVisual(chairLocation, yaw + chairYawOffset(index) + (float) plugin.getChairRotationDegrees());
             if (chairPlacement.entityId() != null) {
-                addEntityTreeIds(chairPlacement.entityId(), staticEntities);
                 if (chairPlacement.craftEngineEntity()) {
-                    addEntityTreeIds(chairPlacement.entityId(), placed.craftEngineVisualEntities());
+                    // 椅子同样由 CE 管理生命周期，不能被 MUZ 的非持久化保护覆盖。
+                    collectEntityTreeIds(chairPlacement.entityId(), staticEntities);
+                    collectEntityTreeIds(chairPlacement.entityId(), placed.craftEngineVisualEntities());
+                } else {
+                    addEntityTreeIds(chairPlacement.entityId(), staticEntities);
                 }
             }
             if (chairPlacement.blockRestore() != null) {
@@ -2712,6 +2721,48 @@ public final class PhysicalTableManager {
         // 且本方法在 tick() 中每 2 秒调用一次，加日志会刷屏
         Entity entity = Bukkit.getEntity(placed.playDetailDisplayId());
         updateTextEntity(entity, buildPlayDetail(table));
+        // 开局后（非 LOBBY）对入座真人隐藏桌边动态，避免浮空字挡住其低头看牌；文本刷新后立即重算可见性。
+        updatePlayDetailVisibility(table, placed);
+    }
+
+    /**
+     * 「桌边动态」浮空字对某座位玩家是否应隐藏。
+     * 开局后（非 LOBBY）对坐在本桌的在线真人隐藏，避免浮空字挡住其低头看牌；
+     * 大厅阶段以及旁观者一律可见，机器人不参与可见性控制。
+     * 抽成 static 纯函数以便单测锁定“开局后才隐藏”这条边界，防止回归。
+     */
+    static boolean playDetailHiddenForSeatedPlayer(GamePhase phase, boolean seatedHuman) {
+        return seatedHuman && phase != GamePhase.LOBBY;
+    }
+
+    /**
+     * 桌边动态浮空字是公共实体（默认对所有人可见），这里按阶段+入座情况做按人可见性控制。
+     * hideEntity 的隐藏状态按玩家持久，故每次都对全体在线玩家显式 show/hide；
+     * 玩家离桌或本局结束回到 LOBBY 后，下一次 refresh/tick 会把可见性重新算回来，无需单独在离桌路径补代码。
+     * 写法与 {@link #updateSeatInfoVisibility} 一致（同样遍历在线玩家、排除机器人）。
+     */
+    private void updatePlayDetailVisibility(GameTable table, PlacedTable placed) {
+        if (plugin.isShuttingDown()) {
+            return;
+        }
+        if (placed.playDetailDisplayId() == null) {
+            return;
+        }
+        Entity entity = Bukkit.getEntity(placed.playDetailDisplayId());
+        if (entity == null) {
+            return;
+        }
+        GamePhase phase = table.getPhase();
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            UUID viewerId = viewer.getUniqueId();
+            // 坐在本桌且不是机器人的真人，开局后对本人隐藏桌边动态；旁观者与大厅阶段一律显示。
+            boolean seatedHuman = table.contains(viewerId) && !table.isBot(viewerId);
+            if (playDetailHiddenForSeatedPlayer(phase, seatedHuman)) {
+                viewer.hideEntity(plugin, entity);
+            } else {
+                viewer.showEntity(plugin, entity);
+            }
+        }
     }
 
     private void refreshSeatInfos(GameTable table, PlacedTable placed) {
@@ -2766,7 +2817,427 @@ public final class PhysicalTableManager {
         }
     }
 
+    /**
+     * 开局展示使用固定 17 槽位和独立旋转变换。
+     * 普通手牌仍走下方既有 renderPrivateHand/updatePrivateSelection 路径。
+     */
+    private void refreshOpeningHands(GameTable table, PlacedTable placed) {
+        String tableKey = normalize(table.getName());
+        HandDealPresentation presentation = handDealPresentations.computeIfAbsent(
+            tableKey, ignored -> new HandDealPresentation());
+        if (!presentation.active()) {
+            presentation.activate();
+            privateHandSignatureByTable.remove(tableKey);
+            backsideHandSignatureByTable.remove(tableKey);
+            for (UUID playerId : new ArrayList<>(placed.privateEntitiesByPlayer().keySet())) {
+                clearPrivateEntities(placed, playerId);
+            }
+            for (UUID playerId : new ArrayList<>(placed.backsideEntitiesByPlayer().keySet())) {
+                clearBacksideEntities(placed, playerId);
+            }
+        }
+        GameTable.OpeningPresentationSnapshot snapshot = table.getOpeningPresentationSnapshot();
+        boolean openingPhase = snapshot.phase() == GamePhase.DEALING;
+        double flipDegrees = presentation.continuousDegrees(snapshot.flipDegrees(), openingPhase);
+        Set<UUID> currentPlayers = snapshot.seats().stream()
+            .map(GameTable.OpeningSeatSnapshot::playerId)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (UUID stale : new ArrayList<>(presentation.seats().keySet())) {
+            if (!currentPlayers.contains(stale)) {
+                clearOpeningSeat(placed, presentation, stale);
+            }
+        }
+        for (GameTable.OpeningSeatSnapshot seat : snapshot.seats()) {
+            List<DoudizhuCard> hand = table.getHand(seat.playerId());
+            renderOpeningLayer(table, placed, presentation, seat.playerId(), hand, false, flipDegrees);
+            renderOpeningLayer(table, placed, presentation, seat.playerId(), hand, true, flipDegrees);
+        }
+    }
+
+    private void renderOpeningLayer(
+        GameTable table,
+        PlacedTable placed,
+        HandDealPresentation presentation,
+        UUID playerId,
+        List<DoudizhuCard> hand,
+        boolean backside,
+        double flipDegrees
+    ) {
+        int seatIndex = placedSeatIndex(placed, playerId);
+        if (seatIndex < 0) {
+            return;
+        }
+        HandDealPresentation.Seat seat = presentation.seat(playerId);
+        List<UUID> entityIds = backside
+            ? placed.backsideEntitiesByPlayer().computeIfAbsent(playerId, ignored -> new ArrayList<>())
+            : placed.privateEntitiesByPlayer().computeIfAbsent(playerId, ignored -> new ArrayList<>());
+        for (int index = 0; index < HandDealPresentation.SLOT_COUNT; index++) {
+            int cardId = index < hand.size() ? hand.get(index).id() : -1;
+            HandDealPresentation.Slot previous = backside ? seat.backsideSlot(index) : seat.privateSlot(index);
+            ItemDisplay display = previous == null ? null : asItemDisplay(previous.displayId());
+            boolean created = display == null;
+            boolean cardChanged = HandDealPresentation.itemNeedsUpdate(previous, cardId);
+            Location location = openingCardLocation(placed, playerId, index, backside);
+            if (created) {
+                display = spawnOpeningCard(location,
+                    cardId < 0 ? new ItemStack(Material.AIR) : (backside ? backCardItem() : cardItem(hand.get(index))),
+                    privateCardScale(false, false), handCardYaw(placed.yaw(), seatIndex), flipDegrees);
+                replaceOpeningEntityId(entityIds, index, display.getUniqueId());
+            } else {
+                teleportIfMoved(display, location, CARD_TRACK_EPSILON_SQUARED);
+                if (cardChanged) {
+                    display.setItemStack(cardId < 0 ? new ItemStack(Material.AIR)
+                        : (backside ? backCardItem() : cardItem(hand.get(index))));
+                }
+                applyOpeningRotation(display, privateCardScale(false, false), flipDegrees);
+            }
+            if (!backside && cardId >= 0 && (created || cardChanged)) {
+                cardBindings.put(display.getUniqueId(), new CardBinding(table.getName(), playerId, cardId));
+            } else if (!backside && cardChanged) {
+                cardBindings.remove(display.getUniqueId());
+            }
+            boolean revealed = table.isHandRevealed(playerId);
+            if (backside && (revealed || cardId < 0)) {
+                hideEntityFromEveryone(display);
+            } else if (backside) {
+                applyBacksideVisibility(playerId, display);
+            } else {
+                applyPrivateVisibility(playerId, display, revealed);
+            }
+            HandDealPresentation.Slot slot = new HandDealPresentation.Slot(index, display.getUniqueId(), cardId);
+            if (backside) {
+                seat.backsideSlot(index, slot);
+            } else {
+                seat.privateSlot(index, slot);
+            }
+        }
+    }
+
+    private void replaceOpeningEntityId(List<UUID> entityIds, int slot, UUID entityId) {
+        while (entityIds.size() <= slot) {
+            entityIds.add(null);
+        }
+        entityIds.set(slot, entityId);
+    }
+
+    private ItemDisplay asItemDisplay(UUID id) {
+        Entity entity = id == null ? null : Bukkit.getEntity(id);
+        return entity instanceof ItemDisplay display ? display : null;
+    }
+
+    private Location openingCardLocation(PlacedTable placed, UUID playerId, int slot, boolean backside) {
+        int seatIndex = placedSeatIndex(placed, playerId);
+        Vector step = backside ? handStep(seatIndex) : privateHandStep(seatIndex, playerId);
+        Vector center = handCenter(seatIndex);
+        Vector depth = handDepth(seatIndex);
+        Vector adjustment = backside ? globalHandAdjustment(seatIndex) : privateHandAdjustment(seatIndex, playerId);
+        double delta = HandDealPresentation.slotOffset(slot);
+        return rotate(
+            placed.anchor(), placed.yaw(),
+            center.x() + adjustment.x() + step.x() * delta + depth.x() * delta,
+            center.y() + adjustment.y(),
+            center.z() + adjustment.z() + step.z() * delta + depth.z() * delta
+        );
+    }
+
+    private ItemDisplay spawnOpeningCard(Location location, ItemStack item, Vector3f scale, float yaw, double degrees) {
+        ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
+            // 开局牌先以不可见默认值出生；授权可见性在实体创建后统一按牌主/旁观者逐人放行。
+            spawned.setVisibleByDefault(false);
+            spawned.setItemStack(item);
+            spawned.setBillboard(Display.Billboard.FIXED);
+            spawned.setTransformation(openingCardTransformation(scale, 0.0f, degrees));
+            configureOpeningAnimation(spawned);
+            protectEntity(spawned);
+        });
+        applyStableYaw(display, yaw);
+        return display;
+    }
+
+    private void applyOpeningRotation(ItemDisplay display, Vector3f scale, double degrees) {
+        configureOpeningAnimation(display);
+        display.setTransformation(openingCardTransformation(scale, 0.0f, degrees));
+    }
+
+    private Transformation openingCardTransformation(Vector3f scale, float lift, double degrees) {
+        // 只改 Display 的本地右旋转；实体 yaw 仍由既有稳定朝向路径维护。
+        // 资源模型已有 Y -90，故此处使用本地竖轴，不绕桌心公转。
+        return new Transformation(
+            new Vector3f(0.0f, lift, 0.0f),
+            new AxisAngle4f(),
+            scale,
+            new AxisAngle4f((float) Math.toRadians(degrees), 0.0f, 1.0f, 0.0f)
+        );
+    }
+
+    private void configureOpeningAnimation(Display display) {
+        display.setInterpolationDelay(0);
+        display.setInterpolationDuration(1);
+        try {
+            display.setTeleportDuration(0);
+        } catch (NoSuchMethodError ignored) {
+            // 旧目标没有 setTeleportDuration，插值仍由 Display 变换持续时间保证。
+        }
+    }
+
+    private void applyBacksideVisibility(UUID ownerId, Entity entity) {
+        if (plugin.isShuttingDown()) {
+            return;
+        }
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            if (viewer.getUniqueId().equals(ownerId)) {
+                viewer.hideEntity(plugin, entity);
+            } else {
+                viewer.showEntity(plugin, entity);
+            }
+        }
+    }
+
+    private void hideEntityFromEveryone(Entity entity) {
+        if (plugin.isShuttingDown()) {
+            return;
+        }
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            viewer.hideEntity(plugin, entity);
+        }
+    }
+
+    private void clearOpeningSeat(PlacedTable placed, HandDealPresentation presentation, UUID playerId) {
+        HandDealPresentation.Seat seat = presentation.seats().remove(playerId);
+        if (seat == null) {
+            return;
+        }
+        List<UUID> privateIds = placed.privateEntitiesByPlayer().remove(playerId);
+        List<UUID> backsideIds = placed.backsideEntitiesByPlayer().remove(playerId);
+        placed.privateVisualsByPlayer().remove(playerId);
+        placed.backsideVisualsByPlayer().remove(playerId);
+        if (privateIds != null) {
+            privateIds.forEach(cardBindings::remove);
+            clearEntities(privateIds, false);
+        }
+        if (backsideIds != null) {
+            backsideIds.forEach(cardBindings::remove);
+            clearEntities(backsideIds, false);
+        }
+    }
+
+    private void clearOpeningPresentation(GameTable table, PlacedTable placed) {
+        String tableKey = normalize(table.getName());
+        HandDealPresentation presentation = handDealPresentations.remove(tableKey);
+        if (presentation == null) {
+            return;
+        }
+        for (UUID playerId : new ArrayList<>(presentation.seats().keySet())) {
+            clearOpeningSeat(placed, presentation, playerId);
+        }
+    }
+
+    private void migrateOpeningPresentation(GameTable table, PlacedTable placed) {
+        String tableKey = normalize(table.getName());
+        HandDealPresentation presentation = handDealPresentations.get(tableKey);
+        if (presentation == null) {
+            return;
+        }
+        GameTable.OpeningPresentationSnapshot snapshot = table.getOpeningPresentationSnapshot();
+        Set<UUID> currentPlayers = snapshot.seats().stream()
+            .map(GameTable.OpeningSeatSnapshot::playerId)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (UUID stale : new ArrayList<>(presentation.seats().keySet())) {
+            if (!currentPlayers.contains(stale)) {
+                clearOpeningSeat(placed, presentation, stale);
+            }
+        }
+        boolean migrated = true;
+        for (GameTable.OpeningSeatSnapshot seat : snapshot.seats()) {
+            if (!migrateOpeningSeat(table, placed, presentation, seat.playerId())) {
+                migrated = false;
+                break;
+            }
+        }
+        if (!migrated) {
+            // 任一槽位实体已经丢失就回退到既有完整重建，优先保证牌面与点击捕获器不残缺。
+            clearOpeningPresentation(table, placed);
+            return;
+        }
+        Map<UUID, String> privateSignatures = privateHandSignatureByTable.computeIfAbsent(
+            tableKey, ignored -> new LinkedHashMap<>());
+        Map<UUID, String> backsideSignatures = backsideHandSignatureByTable.computeIfAbsent(
+            tableKey, ignored -> new LinkedHashMap<>());
+        for (UUID playerId : currentPlayers) {
+            String signature = handSignature(table, placed, playerId);
+            privateSignatures.put(playerId, signature);
+            backsideSignatures.put(playerId, signature);
+        }
+        presentation.seats().clear();
+        handDealPresentations.remove(tableKey);
+    }
+
+    private boolean migrateOpeningSeat(
+        GameTable table,
+        PlacedTable placed,
+        HandDealPresentation presentation,
+        UUID playerId
+    ) {
+        HandDealPresentation.Seat dealSeat = presentation.seat(playerId);
+        List<DoudizhuCard> hand = table.getHand(playerId);
+        if (hand.isEmpty() || hand.size() > HandDealPresentation.SLOT_COUNT) {
+            return false;
+        }
+        int seatIndex = placedSeatIndex(placed, playerId);
+        if (seatIndex < 0) {
+            return false;
+        }
+        List<UUID> openingPrivateIds = placed.privateEntitiesByPlayer()
+            .getOrDefault(playerId, List.of());
+        List<UUID> openingBacksideIds = placed.backsideEntitiesByPlayer()
+            .getOrDefault(playerId, List.of());
+        List<UUID> privateIds = new ArrayList<>();
+        List<UUID> backsideIds = new ArrayList<>();
+        Map<Integer, HandCardVisual> visuals = new LinkedHashMap<>();
+        Map<Integer, UUID> backsideVisuals = new LinkedHashMap<>();
+        Set<Integer> selected = table.getSelection(playerId);
+        Integer hovered = hoveredCardIds.get(playerId);
+        HandCardPickGeometry.Envelope[] pickEnvelopes = unifiedHandCardEnvelopes();
+        HandCardPickGeometry.Envelope capturerEnvelope =
+            handCardCapturerEnvelope(pickEnvelopes[0], pickEnvelopes[1]);
+        float capturerWidth = (float) handCardCapturerWidth(plugin.getHandSpacing());
+        float capturerHeight = (float) (capturerEnvelope.halfHeight() * 2.0);
+        double edgeTileWidth = HandCardPickGeometry.edgeTileWidth(
+            pickEnvelopes[0].halfWidth(), capturerWidth);
+        Vector privateStep = privateHandStep(seatIndex, playerId);
+        Vector privateCenter = handCenter(seatIndex);
+        Vector privateDepth = handDepth(seatIndex);
+        Vector privateAdjustment = privateHandAdjustment(seatIndex, playerId);
+        Vector backsideStep = handStep(seatIndex);
+        Vector backsideCenter = handCenter(seatIndex);
+        Vector backsideDepth = handDepth(seatIndex);
+        Vector backsideAdjustment = globalHandAdjustment(seatIndex);
+        Map<CardRank, Integer> rankCounts = countRanks(hand);
+        boolean revealed = table.isHandRevealed(playerId);
+        try {
+            for (int index = 0; index < hand.size(); index++) {
+                DoudizhuCard card = hand.get(index);
+                HandDealPresentation.Slot slot = dealSeat.privateSlot(index);
+                ItemDisplay display = slot == null ? null : asItemDisplay(slot.displayId());
+                if (display == null) {
+                    clearEntities(privateIds, false);
+                    clearEntities(backsideIds, false);
+                    return false;
+                }
+                privateIds.add(display.getUniqueId());
+                if (slot.cardId() != card.id()) {
+                    display.setItemStack(cardItem(card));
+                }
+                double delta = HandDealPresentation.centeredSlotOffset(hand.size(), index);
+                Location cardBaseLocation = rotate(
+                    placed.anchor(), placed.yaw(),
+                    privateCenter.x() + privateAdjustment.x() + privateStep.x() * delta + privateDepth.x() * delta,
+                    privateCenter.y() + privateAdjustment.y(),
+                    privateCenter.z() + privateAdjustment.z() + privateStep.z() * delta + privateDepth.z() * delta
+                );
+                teleportIfMoved(display, cardBaseLocation, CARD_TRACK_EPSILON_SQUARED);
+                float selectedProgress = currentAnimationProgress(selectedProgressByPlayer, playerId, card.id());
+                float hoverProgress = currentAnimationProgress(hoverProgressByPlayer, playerId, card.id());
+                double lift = animatedCardLift(selectedProgress, hoverProgress);
+                configureCardAnimation(display);
+                display.setTransformation(cardTransformation(privateCardScale(hoverProgress), (float) lift));
+                applyStableYaw(display, handCardYaw(placed.yaw(), seatIndex));
+                applyCardGlow(display, playerId, selected.contains(card.id()), hovered != null && hovered == card.id());
+                cardBindings.put(display.getUniqueId(), new CardBinding(table.getName(), playerId, card.id()));
+                UUID capturerId = spawnHandCardCapturer(
+                    table, placed, playerId, card, cardBaseLocation,
+                    capturerEnvelope, capturerWidth, capturerHeight, privateIds);
+                UUID leftEdgeTileId = index == 0
+                    ? placeHandCardEdgeTile(table, playerId, card, HandEdge.LEFT, cardBaseLocation, privateStep,
+                        capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth, null, privateIds)
+                    : null;
+                UUID rightEdgeTileId = index == hand.size() - 1
+                    ? placeHandCardEdgeTile(table, playerId, card, HandEdge.RIGHT, cardBaseLocation, privateStep,
+                        capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth, null, privateIds)
+                    : null;
+                UUID labelId = null;
+                if (shouldShowPrivateLabel(playerId, card, rankCounts)) {
+                    TextDisplay label = spawnText(
+                        privateCardLabelLocation(cardBaseLocation, seatIndex, placed.yaw(), lift),
+                        MuzTheme.cardLabel(card.rank().label()),
+                        Display.Billboard.CENTER,
+                        false,
+                        plugin.getLabelTextScale(), false
+                    );
+                    mountTextDisplay(display, label, label.getLocation(), false);
+                    privateIds.add(label.getUniqueId());
+                    cardBindings.put(label.getUniqueId(), new CardBinding(table.getName(), playerId, card.id()));
+                    applyPrivateVisibility(playerId, label, revealed);
+                    labelId = label.getUniqueId();
+                }
+                visuals.put(card.id(), new HandCardVisual(
+                    display.getUniqueId(), labelId, capturerId, leftEdgeTileId, rightEdgeTileId));
+                applyPrivateVisibility(playerId, display, revealed);
+            }
+            clearEntities(openingPrivateIds.stream()
+                .filter(Objects::nonNull)
+                .filter(id -> !privateIds.contains(id))
+                .toList(), false);
+            placed.privateEntitiesByPlayer().put(playerId, privateIds);
+            placed.privateVisualsByPlayer().put(playerId, visuals);
+
+            if (revealed) {
+                clearEntities(openingBacksideIds.stream().filter(Objects::nonNull).toList(), false);
+                placed.backsideEntitiesByPlayer().remove(playerId);
+                placed.backsideVisualsByPlayer().remove(playerId);
+            } else {
+                for (int index = 0; index < hand.size(); index++) {
+                    DoudizhuCard card = hand.get(index);
+                    HandDealPresentation.Slot slot = dealSeat.backsideSlot(index);
+                    ItemDisplay display = slot == null ? null : asItemDisplay(slot.displayId());
+                    if (display == null) {
+                        clearEntities(privateIds, false);
+                        clearEntities(backsideIds, false);
+                        return false;
+                    }
+                    backsideIds.add(display.getUniqueId());
+                    if (slot.cardId() != card.id()) {
+                        display.setItemStack(backCardItem());
+                    }
+                    double delta = HandDealPresentation.centeredSlotOffset(hand.size(), index);
+                    Location cardBaseLocation = rotate(
+                        placed.anchor(), placed.yaw(),
+                        backsideCenter.x() + backsideAdjustment.x() + backsideStep.x() * delta + backsideDepth.x() * delta,
+                        backsideCenter.y() + backsideAdjustment.y(),
+                        backsideCenter.z() + backsideAdjustment.z() + backsideStep.z() * delta + backsideDepth.z() * delta
+                    );
+                    teleportIfMoved(display, cardBaseLocation, CARD_TRACK_EPSILON_SQUARED);
+                    configureCardAnimation(display);
+                    display.setTransformation(cardTransformation(privateCardScale(false, false),
+                        (float) selectedCardLift(selected.contains(card.id()), false)));
+                    applyStableYaw(display, handCardYaw(placed.yaw(), seatIndex));
+                    applyCardGlow(display, playerId, selected.contains(card.id()), false);
+                    applyBacksideVisibility(playerId, display);
+                    backsideVisuals.put(card.id(), display.getUniqueId());
+                }
+                clearEntities(openingBacksideIds.stream()
+                    .filter(Objects::nonNull)
+                    .filter(id -> !backsideIds.contains(id))
+                    .toList(), false);
+                placed.backsideEntitiesByPlayer().put(playerId, backsideIds);
+                placed.backsideVisualsByPlayer().put(playerId, backsideVisuals);
+            }
+            return true;
+        } catch (RuntimeException exception) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                "开局手牌接管失败，将重建牌桌 " + table.getName() + " 的手牌", exception);
+            clearEntities(privateIds, false);
+            clearEntities(backsideIds, false);
+            return false;
+        }
+    }
+
     private void refreshPrivateHands(GameTable table, PlacedTable placed) {
+        if (table.isOpeningHandLocked()) {
+            refreshOpeningHands(table, placed);
+            return;
+        }
+        migrateOpeningPresentation(table, placed);
         // 每位玩家都有两层牌：
         // 1. 只有自己能看到的正面牌
         // 2. 其他人能看到的背面牌
@@ -2827,7 +3298,7 @@ public final class PhysicalTableManager {
         Vector center = handCenter(seatIndex);
         Vector depth = handDepth(seatIndex);
         Vector adjustment = globalHandAdjustment(seatIndex);
-        double startOffset = -((hand.size() - 1) * 0.5);
+        double startOffset = HandDealPresentation.centeredStartOffset(hand.size());
         float cardYaw = handCardYaw(placed.yaw(), seatIndex);
         for (int index = 0; index < hand.size(); index++) {
             DoudizhuCard card = hand.get(index);
@@ -3022,7 +3493,7 @@ public final class PhysicalTableManager {
         Vector center = handCenter(seatIndex);
         Vector depth = handDepth(seatIndex);
         Vector adjustment = privateHandAdjustment(seatIndex, playerId);
-        double startOffset = -((hand.size() - 1) * 0.5);
+        double startOffset = HandDealPresentation.centeredStartOffset(hand.size());
         float cardYaw = handCardYaw(placed.yaw(), seatIndex);
         Map<CardRank, Integer> rankCounts = countRanks(hand);
         // 点击捕获器的尺寸与拾取包络同源，见 unifiedHandCardEnvelopes 与 handCardCapturerWidth。
@@ -3099,7 +3570,7 @@ public final class PhysicalTableManager {
                     MuzTheme.cardLabel(card.rank().label()),
                     Display.Billboard.CENTER,
                     false,
-                    plugin.getLabelTextScale()
+                    plugin.getLabelTextScale(), false
                 );
                 mountTextDisplay(cardDisplay, label, labelLocation, false);
                 spawned.add(label.getUniqueId());
@@ -3468,7 +3939,7 @@ public final class PhysicalTableManager {
         Vector center = handCenter(seatIndex);
         Vector depth = handDepth(seatIndex);
         Vector adjustment = privateHandAdjustment(seatIndex, playerId);
-        double startOffset = -((hand.size() - 1) * 0.5);
+        double startOffset = HandDealPresentation.centeredStartOffset(hand.size());
         float cardYaw = handCardYaw(placed.yaw(), seatIndex);
         float animationStep = cardAnimationStep();
         float animationFallStep = Math.min(1.0f, animationStep * 1.8f);
@@ -3588,7 +4059,7 @@ public final class PhysicalTableManager {
         Vector center = handCenter(seatIndex);
         Vector depth = handDepth(seatIndex);
         Vector adjustment = globalHandAdjustment(seatIndex);
-        double startOffset = -((hand.size() - 1) * 0.5);
+        double startOffset = HandDealPresentation.centeredStartOffset(hand.size());
         float cardYaw = handCardYaw(placed.yaw(), seatIndex);
         float animationStep = cardAnimationStep();
         float animationFallStep = Math.min(1.0f, animationStep * 1.8f);
@@ -3694,6 +4165,7 @@ public final class PhysicalTableManager {
         actionSignatureByTable.remove(tableKey);
         privateHandSignatureByTable.remove(tableKey);
         backsideHandSignatureByTable.remove(tableKey);
+        handDealPresentations.remove(tableKey);
         clearEntities(placed.actionEntities(), false);
         for (UUID playerId : new ArrayList<>(placed.backsideEntitiesByPlayer().keySet())) {
             clearBacksideEntities(placed, playerId);
@@ -3899,6 +4371,8 @@ public final class PhysicalTableManager {
 
     private ItemDisplay spawnPlacedCard(Location location, ItemStack item, Vector3f scale, float yaw, float lift) {
         ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
+            // 与开局槽位同样先隐藏，再由牌主/背面可见性路由放行，重建也不能先泄露牌面。
+            spawned.setVisibleByDefault(false);
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(cardTransformation(scale, lift));
@@ -3914,7 +4388,14 @@ public final class PhysicalTableManager {
     }
 
     private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background, float scale) {
+        return spawnText(location, text, billboard, background, scale, true);
+    }
+
+    private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background,
+                                  float scale, boolean visibleByDefault) {
         return VersionCompat.spawnEntity(location.getWorld(), location, TextDisplay.class, spawned -> {
+            // 私有牌点数标签与牌面同步，出生即隐藏，不能在后续 hide 前暴露一次。
+            spawned.setVisibleByDefault(visibleByDefault);
             try {
                 spawned.text(text);
             } catch (NoSuchMethodError e) {
@@ -4099,6 +4580,26 @@ public final class PhysicalTableManager {
             return;
         }
         protectEntityTree(root);
+        collectEntityTreeIds(root, target);
+    }
+
+    /**
+     * 只登记实体树 UUID，不改变实体持久化属性。
+     *
+     * <p>CraftEngine 家具必须走这条路径：CE 需要通过持久化状态接管区块卸载/加载，
+     * 否则旧家具映射会在区块返回后留下失效的 BukkitEntity。</p>
+     *
+     * @param rootId 实体树根 UUID
+     * @param target 接收实体 UUID 的列表
+     */
+    private void collectEntityTreeIds(UUID rootId, List<UUID> target) {
+        Entity root = Bukkit.getEntity(rootId);
+        if (root == null) {
+            if (!target.contains(rootId)) {
+                target.add(rootId);
+            }
+            return;
+        }
         collectEntityTreeIds(root, target);
     }
 
@@ -4461,7 +4962,9 @@ public final class PhysicalTableManager {
      */
     private List<ActionButtonState> phaseButtonStates(GamePhase phase) {
         return switch (phase) {
-            case BIDDING -> BIDDING_BUTTONS_WITH_REVEAL;
+            case BIDDING -> BIDDING_BUTTONS_ONLY;
+            case REVEALING -> List.of();
+            case DEALING -> List.of();
             case DOUBLING -> List.of(
                 new ActionButtonState("pass", "不加倍", ButtonAction.DOUBLE_NO, -0.40),
                 new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.40)
@@ -4491,9 +4994,17 @@ public final class PhysicalTableManager {
             if (owner == null || !owner.equals(table.getCurrentTurn())) {
                 return List.of();
             }
-            // 已经明牌就把明牌按钮撤掉，并换回四按钮的对称布局，
-            // 否则弧线右端会空出一格，看起来像按钮丢了。
-            return table.isHandRevealed(owner) ? BIDDING_BUTTONS_ONLY : phaseStates;
+            return phaseStates;
+        }
+        if (table.getPhase() == GamePhase.REVEALING) {
+            if (owner == null || table.isBot(owner) || !table.canRevealHand(owner)) {
+                return List.of();
+            }
+            return List.of(new ActionButtonState(
+                "inspect", table.openingRevealButtonLabel(), ButtonAction.REVEAL_HAND, 0.0));
+        }
+        if (table.getPhase() == GamePhase.DEALING) {
+            return List.of();
         }
         if (table.getPhase() == GamePhase.DOUBLING) {
             if (owner == null || !owner.equals(table.getCurrentTurn())) {
@@ -4791,6 +5302,8 @@ public final class PhysicalTableManager {
             return null;
         }
         return switch (table.getPhase()) {
+            case DEALING -> MuzTheme.warm("当前发牌");
+            case REVEALING -> MuzTheme.warm("当前明牌");
             case BIDDING -> MuzTheme.warm("当前叫分");
             case DOUBLING -> MuzTheme.warm("当前加倍");
             case PLAYING -> MuzTheme.warm("当前出牌");
@@ -4803,6 +5316,8 @@ public final class PhysicalTableManager {
             return null;
         }
         return switch (table.getPhase()) {
+            case DEALING -> TypewriterTextStyle.accent("当前发牌");
+            case REVEALING -> TypewriterTextStyle.accent("当前明牌");
             case BIDDING -> TypewriterTextStyle.accent("当前叫分");
             case DOUBLING -> TypewriterTextStyle.accent("当前加倍");
             case PLAYING -> TypewriterTextStyle.accent("当前出牌");

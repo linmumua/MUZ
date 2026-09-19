@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.UUID;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import org.junit.jupiter.api.Test;
@@ -116,6 +117,45 @@ class TrickHudBotAvatarTest {
             "占位用错了角色字形或偏移档，图标会和真人头像上下错开");
         assertEquals(PackAssets.botAvatarAdvanceWidth(PlayerRole.FARMER), slot.advancePixels(),
             "占位图标报出的宽度不是图标自己的宽度，槽内居中会偏");
+    }
+
+    @Test
+    void 连续覆盖层下真人掉线占位使用独立字体与base字形() {
+        TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
+            human(PlayerRole.FARMER), SCALE, true, null, DOWN_TIER, true, true);
+
+        String continuousFont = HudOverlayLayout.continuousFont(PackAssets.BOT_AVATAR_FONT);
+        assertTrue(slot.text().contains("<font:" + continuousFont + ">"),
+            "连续覆盖层离线占位必须使用独立 continuous bot 字体");
+        assertTrue(slot.text().contains(PackAssets.botAvatarChar(PlayerRole.FARMER)),
+            "连续覆盖层离线占位必须使用 base tier 0 角色字形");
+        assertFalse(slot.text().contains(PackAssets.botAvatarChar(PlayerRole.FARMER, DOWN_TIER)),
+            "连续覆盖层不得继续引用旧 avatar Y 档 bot 字形");
+        assertEquals(PackAssets.botAvatarAdvanceWidth(PlayerRole.FARMER), slot.advancePixels(),
+            "连续 bot 占位的 advance 必须与旧图标几何一致");
+    }
+
+    /**
+     * 连续 Y 覆盖层就绪时，离线真人 fallback 必须切到独立 continuous 字体与 base tier 0。
+     * 否则 avatar-offset-down 的连续值只会作用在线头像，掉线槽仍会使用旧档字形。
+     */
+    @Test
+    void 连续覆盖层离线真人使用连续字体和基准码位() {
+        for (PlayerRole role : new PlayerRole[]{null, PlayerRole.LANDLORD, PlayerRole.FARMER}) {
+            TrickHudView.Avatar slot = TrickHudService.avatarSlotOf(
+                human(role), SCALE, true, null, 83, true, true);
+            String expectedFont = HudOverlayLayout.continuousFont(PackAssets.BOT_AVATAR_FONT);
+            String expectedGlyph = PackAssets.botAvatarChar(role);
+
+            assertTrue(slot.text().contains("<font:" + expectedFont + ">"),
+                "角色 " + role + "：连续 fallback 必须使用独立 continuous 字体");
+            assertTrue(slot.text().contains(expectedGlyph),
+                "角色 " + role + "：连续 fallback 必须使用 base tier 0 码位，不能继续使用旧 Y 档");
+            assertFalse(slot.text().contains(PackAssets.BOT_AVATAR_FONT + ">"),
+                "角色 " + role + "：连续 fallback 不得直接引用旧 bot 字体");
+            assertEquals(PackAssets.botAvatarAdvanceWidth(role), slot.advancePixels(),
+                "角色 " + role + "：连续 fallback advance 必须保持 bot 图标宽度");
+        }
     }
 
     /**

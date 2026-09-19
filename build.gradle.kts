@@ -7,7 +7,18 @@ import java.awt.geom.Ellipse2D
 import java.awt.geom.GeneralPath
 import java.awt.image.BufferedImage
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.LinkedHashMap
 import java.util.jar.JarFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import groovy.json.JsonSlurper
 import javax.imageio.ImageIO
 
 plugins {
@@ -19,7 +30,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.22"
+version = "1.10.37"
 
 data class MuzTarget(
     val id: String,
@@ -724,6 +735,9 @@ val hotbarHudGlyphWidth = hotbarIconGlyphWidth * hotbarIconCount + (hotbarIconCo
 val hotbarHudGlyphHeight = hotbarIconGlyphHeight
 val hotbarHudSlotCount = hotbarIconCount
 val hotbarHudGlyphAdvance = hotbarHudGlyphWidth + 1
+// Hotbar 三图标基础 ascent；必须与 PackAssets.HOTBAR_BASE_ASCENT 和
+// HotbarDebugOverlayWriter.BASE_ASCENT 保持同源，offset-y=0 时构建期/运行期位置重合。
+val hotbarBaseAscent = -43
 
 // 0xEF02：hotbar HUD「选中槽」高亮框字形（muz:font/hotbar_select.png）。
 // 【必须与 PackAssets.HOTBAR_SELECT_CODEPOINT / WIDTH / HEIGHT / ADVANCE 保持一致】
@@ -1491,7 +1505,7 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int HOTBAR_SELECT_HEIGHT = $hotbarSelectGlyphHeight;
                 public static final int HOTBAR_SELECT_ADVANCE = $hotbarSelectGlyphAdvance;
                 public static final int HOTBAR_SLOT_COUNT = $hotbarHudSlotCount;
-                public static final int HOTBAR_BASE_ASCENT = -100;
+                public static final int HOTBAR_BASE_ASCENT = $hotbarBaseAscent;
 
                 /** 头像放大倍数档位（按资源 profile 精确生成，可能不是连续范围）。 */
                 public static final int[] AVATAR_SCALE_TIERS = {
@@ -1590,6 +1604,9 @@ val generateResourcePack = tasks.register("generateResourcePack") {
 
         // 记牌行分层字形：默认 100 档仍只保留 22 张基础 PNG，运行期按偏移档注册 22 个字形声明。
         // 75/125 档只从这 22 张默认 PNG 最近邻派生，不生成「点数 × 已出数」组合贴图。
+        // 运行期四层连续覆盖层不改这里的 profile 离散生成逻辑：Trick 使用独立
+        // baseFont_continuous/base tier 0 char，hotbar 复用既有 debug font/char；连续 alias
+        // 与 baseAscent、scale 必须和本循环生成的基础 PNG/字体声明逐项同源，避免覆盖正式 char。
         val counterFontDir = outputAssetsRoot.resolve("textures/font/counter")
         val counterBaseImages = linkedMapOf<String, BufferedImage>()
         counterRankGlyphFiles.forEachIndexed { index, file ->
@@ -1637,6 +1654,8 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         // PLAYING 阶段只生成三张独立 Hotbar 图标；每张 20×22，图标间隔 4px，step=24。
         // 75/125 档从各自基础图标最近邻派生；每档使用独立字体和独立码位窗口。
         // 旧 EF00/EF01 九槽底板不再生成，选中框仍独立生成并继续使用 EF02/EF03 默认码位。
+        // 运行期 hotbar_debug 连续 alias 只引用这里生成的基础/Debug char 与同 scale 资源，
+        // 不改变本循环的 profile 档位数量，也不覆盖正式 hotbar font/char。
         // 【尺寸/step/advance/码位必须与 PackAssets.hotbarIcon* 保持一致】
         val hotbarFontDir = outputAssetsRoot.resolve("textures/font")
         val hotbarIconSources = hotbarIconNames.indices.map { index ->
@@ -1732,6 +1751,219 @@ val generateResourcePack = tasks.register("generateResourcePack") {
             appendLine("}")
         }
         writeText(outputAssetsRoot.resolve("sounds.json"), soundsJson)
+    }
+}
+
+// 26.1.2 客户端字体度量归档：只嵌入字体 JSON 及其递归引用的 PNG/unihex，运行期
+// HotbarFontMetrics.load(InputStream, Path, int) 直接读取该 ZIP；不把整份 client.jar 带入插件。
+val vanillaHotbarFontArchive = layout.buildDirectory.file("hotbar-font/vanilla-26.1.2.zip")
+
+private fun sha1Hex(file: File): String = MessageDigest.getInstance("SHA-1").let { digest ->
+    file.inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        var count: Int
+        while (input.read(buffer).also { count = it } != -1) digest.update(buffer, 0, count)
+    }
+    digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+private fun downloadVerified(url: String, destination: File, expectedSha1: String) {
+    destination.parentFile.mkdirs()
+    val temp = destination.resolveSibling(".${destination.name}.${System.nanoTime()}.part")
+    temp.delete()
+    try {
+        val connection = (URI(url).toURL().openConnection() as HttpURLConnection).apply {
+            connectTimeout = 30_000
+            readTimeout = 60_000
+            instanceFollowRedirects = true
+            requestMethod = "GET"
+        }
+        try {
+            check(connection.responseCode == HttpURLConnection.HTTP_OK) {
+                "下载失败 ${connection.responseCode}：$url"
+            }
+            connection.inputStream.use { input -> temp.outputStream().use { output -> input.copyTo(output) } }
+        } finally {
+            connection.disconnect()
+        }
+        check(sha1Hex(temp) == expectedSha1) { "下载内容 SHA-1 校验失败：$url" }
+        try {
+            Files.move(temp.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temp.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    } finally {
+        temp.delete()
+    }
+}
+
+private fun cachedVerified(cacheDir: File, name: String, url: String, expectedSha1: String): File {
+    val target = cacheDir.resolve(name)
+    if (target.isFile && sha1Hex(target).equals(expectedSha1, ignoreCase = true)) return target
+    if (target.exists()) target.delete()
+    downloadVerified(url, target, expectedSha1)
+    check(target.isFile && sha1Hex(target).equals(expectedSha1, ignoreCase = true)) {
+        "缓存写入后 SHA-1 校验失败：$target"
+    }
+    return target
+}
+
+private fun jsonMap(value: Any?): Map<*, *>? = value as? Map<*, *>
+private fun jsonString(map: Map<*, *>, key: String): String? = map[key] as? String
+private fun normalizedArchivePath(value: String, defaultNamespace: String = "minecraft"): String {
+    val trimmed = value.trim().replace('\\', '/')
+    require(trimmed.isNotEmpty() && !trimmed.startsWith('/') && !trimmed.split('/').contains("..")) {
+        "字体资源路径非法：$value"
+    }
+    if (trimmed.startsWith("assets/")) return trimmed
+    val colon = trimmed.indexOf(':')
+    return if (colon >= 0) {
+        "assets/${trimmed.substring(0, colon)}/${trimmed.substring(colon + 1)}"
+    } else {
+        "assets/$defaultNamespace/$trimmed"
+    }
+}
+
+private fun fontArchivePath(id: String): String {
+    val normalized = id.trim().replace('\\', '/')
+    require(normalized.isNotEmpty()) { "字体 reference id 不能为空" }
+    if (normalized.startsWith("assets/")) {
+        return normalizedArchivePath(normalized.removeSuffix(".json"), "minecraft") + ".json"
+    }
+    val colon = normalized.indexOf(':')
+    val namespace = if (colon >= 0) normalized.substring(0, colon) else "minecraft"
+    val path = (if (colon >= 0) normalized.substring(colon + 1) else normalized).removeSuffix(".json")
+    // Minecraft 的 reference id 既可能是 `minecraft:include/space`，也可能已经带有
+    // `font/` 前缀；后者不能再次拼接 namespace/font，否则会变成
+    // assets/minecraft/minecraft/font/include/space.json。
+    val resourcePath = if (path.startsWith("font/")) path else "font/$path"
+    return normalizedArchivePath("$namespace:$resourcePath.json")
+}
+
+private fun bitmapArchivePath(file: String): String {
+    val normalized = file.trim().replace('\\', '/')
+    val colon = normalized.indexOf(':')
+    val namespace = if (colon >= 0) normalized.substring(0, colon) else "minecraft"
+    val path = if (colon >= 0) normalized.substring(colon + 1) else normalized
+    val texturePath = if (path.startsWith("textures/")) path else "textures/$path"
+    return normalizedArchivePath("$namespace:$texturePath")
+}
+
+val generateHotbarVanillaFonts = tasks.register("generateHotbarVanillaFonts") {
+    onlyIf { muzTarget.id == "paper-26.1.2" }
+    // 每次任务被要求执行时都重新校验 Gradle 缓存；不能仅凭归档文件存在就跳过 SHA-1 校验。
+    outputs.upToDateWhen { false }
+    outputs.file(vanillaHotbarFontArchive)
+    doLast {
+        val cacheDir = gradle.gradleUserHomeDir.resolve("caches/muz-font")
+        val clientSha1 = "4e618f09a0c649dde3fdf829df443ce0b8831e65"
+        val assetIndexSha1 = "c0f421369aed2b80c0490be50630519c49a2db77"
+        val client = cachedVerified(
+            cacheDir,
+            "client-$clientSha1.jar",
+            "https://piston-data.mojang.com/v1/objects/$clientSha1/client.jar",
+            clientSha1
+        )
+        val assetIndex = cachedVerified(
+            cacheDir,
+            "asset-index-$assetIndexSha1.json",
+            "https://piston-meta.mojang.com/v1/packages/$assetIndexSha1/30.json",
+            assetIndexSha1
+        )
+        val parsedIndex = JsonSlurper().parse(assetIndex) as? Map<*, *>
+            ?: throw GradleException("Minecraft asset index 根节点不是对象")
+        val objects = jsonMap(parsedIndex["objects"]) ?: emptyMap<Any, Any>()
+        fun assetHash(archivePath: String): String? =
+            jsonMap(objects[archivePath.removePrefix("assets/")])?.get("hash") as? String
+        val objectCache = cacheDir.resolve("objects")
+        fun indexedBytes(archivePath: String): ByteArray? {
+            val hash = assetHash(archivePath) ?: return null
+            require(hash.matches(Regex("[0-9a-fA-F]{40}"))) { "asset index 的 hash 非 SHA-1：$archivePath" }
+            return cachedVerified(
+                objectCache,
+                hash,
+                "https://resources.download.minecraft.net/${hash.substring(0, 2)}/$hash",
+                hash
+            ).readBytes()
+        }
+
+        ZipFile(client).use { clientZip ->
+            val clientEntries = LinkedHashMap<String, ByteArray>()
+            clientZip.entries().asSequence()
+                .filter { !it.isDirectory && it.name.startsWith("assets/minecraft/font/") &&
+                    it.name.endsWith(".json") }
+                .sortedBy { it.name }
+                .forEach { entry -> clientEntries[entry.name] = clientZip.getInputStream(entry).use { it.readBytes() } }
+            require(clientEntries.isNotEmpty()) { "client.jar 未找到 assets/minecraft/font/*.json" }
+
+            val selected = linkedMapOf<String, ByteArray>()
+            val visiting = mutableSetOf<String>()
+            fun readClient(path: String): ByteArray? = clientEntries[path] ?: clientZip.getEntry(path)?.let { entry ->
+                clientZip.getInputStream(entry).use { it.readBytes() }
+            }
+            fun readResource(path: String): ByteArray {
+                return indexedBytes(path) ?: readClient(path)
+                    ?: throw GradleException("字体资源缺失：$path")
+            }
+            fun readFont(path: String): ByteArray {
+                // asset index 的字体 JSON 是客户端高包的权威内容；只要索引中存在，始终
+                // 覆盖 client.jar 内对应声明，而不是只对空 unifont 做特判。
+                return indexedBytes(path) ?: readClient(path)
+                    ?: throw GradleException("字体 JSON 缺失：$path")
+            }
+            fun visitFont(path: String) {
+                val normalized = normalizedArchivePath(path)
+                if (!visiting.add(normalized)) return
+                try {
+                    val bytes = readFont(normalized)
+                    selected[normalized] = bytes
+                    val root = jsonMap(JsonSlurper().parseText(bytes.toString(Charsets.UTF_8)))
+                        ?: throw GradleException("字体 JSON 根节点不是对象：$normalized")
+                    val providers = root["providers"] as? List<*> ?: return
+                    providers.forEach { raw ->
+                        val provider = jsonMap(raw) ?: return@forEach
+                        when (jsonString(provider, "type")) {
+                            "reference" -> jsonString(provider, "id")?.let { visitFont(fontArchivePath(it)) }
+                            "bitmap" -> jsonString(provider, "file")?.let {
+                                val resource = bitmapArchivePath(it)
+                                selected[resource] = readResource(resource)
+                            }
+                            "unihex" -> (jsonString(provider, "hex_file") ?: jsonString(provider, "file"))?.let {
+                                val resource = normalizedArchivePath(it)
+                                selected[resource] = readResource(resource)
+                            }
+                        }
+                    }
+                } finally {
+                    visiting.remove(normalized)
+                }
+            }
+            clientEntries.keys.sorted().forEach(::visitFont)
+
+            val output = vanillaHotbarFontArchive.get().asFile
+            output.parentFile.mkdirs()
+            val temp = output.resolveSibling(".${output.name}.${System.nanoTime()}.part")
+            temp.delete()
+            try {
+                ZipOutputStream(temp.outputStream().buffered()).use { zip ->
+                    selected.toSortedMap().forEach { (name, bytes) ->
+                        ZipEntry(name).also { it.time = 0L }.let { entry ->
+                            zip.putNextEntry(entry)
+                            zip.write(bytes)
+                            zip.closeEntry()
+                        }
+                    }
+                }
+                try {
+                    Files.move(temp.toPath(), output.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(temp.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
+            } finally {
+                temp.delete()
+            }
+            logger.lifecycle("[muz] 已生成 26.1.2 Hotbar 原版字体归档：${output}（${selected.size} 个文件）")
+        }
     }
 }
 
@@ -2044,14 +2276,14 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 hotbarIconNames.forEachIndexed { iconIndex, iconName ->
                     appendLine("  $resourceNamespace:hotbar_${iconName}$suffix:")
                     appendLine("    height: $iconHeight")
-                    appendLine("    ascent: ${scaledSigned(-100, scale)}")
+                    appendLine("    ascent: ${scaledSigned(hotbarBaseAscent, scale)}")
                     appendLine("    font: $font")
                     appendLine("    file: $resourceNamespace:$textureDirectory/hotbar_${iconName}.png")
                     appendLine("    char: \\u%04x".format(baseCodepoint + iconIndex))
                 }
                 appendLine("  $resourceNamespace:hotbar_select$suffix:")
                 appendLine("    height: $selectHeight")
-                appendLine("    ascent: ${scaledSigned(-100, scale)}")
+                appendLine("    ascent: ${scaledSigned(hotbarBaseAscent, scale)}")
                 appendLine("    font: $font")
                 appendLine("    file: $resourceNamespace:$textureDirectory/hotbar_select.png")
                 appendLine("    char: $selectCharEscape")
@@ -2388,8 +2620,15 @@ tasks {
 
     processResources {
         dependsOn(generateCraftEngineBundle)
+        dependsOn(generateHotbarVanillaFonts)
         filteringCharset = Charsets.UTF_8.name()
         from(generatedJarResourcesDir)
+        // 仅 26.1.2 目标将经过 SHA-1 校验的原版字体快照嵌入 JAR；其它目标不声明缺失的源文件。
+        if (muzTarget.id == "paper-26.1.2") {
+            from(vanillaHotbarFontArchive) {
+                into("hotbar-font")
+            }
+        }
         // 【清掉上一次构建留下的单份 images.yml】：images.yml 已按族拆成
         // configuration/images/*.yml，但 Gradle 的增量拷贝只做「源 → 目标」，
         // 不会删除目标里那些源已经不存在的旧文件。留着它的后果很重：

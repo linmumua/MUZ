@@ -1,11 +1,14 @@
 package linmumua.doudizhu.compat;
 
 import linmumua.doudizhu.DoudizhuPlugin;
-import linmumua.doudizhu.assets.PackAssets;
+import linmumua.doudizhu.assets.HotbarFontMetrics;
+import linmumua.doudizhu.assets.HudResourceRequest;
 import net.momirealms.craftengine.core.plugin.CraftEngine;
 import net.momirealms.craftengine.core.plugin.config.Config;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -27,15 +30,22 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
 
     private final DoudizhuPlugin plugin;
     private final ResourceVerifier verifier;
+    private final RequestVerifier requestVerifier;
     private volatile EngineAccess engineAccess;
     private volatile boolean linkageFailureLogged;
+    // 仅在主线程资源重载入口记录服务器版本；异步字体阶段不得查询 Bukkit。
+    private volatile boolean supportedFontVersion;
 
     /**
      * 创建生产桥接。构造阶段不读取资源包文件；实际 CE API 访问延迟到
      * {@link #preflightFailureOnMainThread()} 或资源任务开始时。
      */
     public CraftEngineHudResourceBridge(DoudizhuPlugin plugin) {
-        this(plugin, new HudResourcePackVerifier(plugin::getResource)::verify, null);
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
+        HudResourcePackVerifier created = new HudResourcePackVerifier(plugin::getResource);
+        this.verifier = created::verify;
+        this.requestVerifier = created::verify;
+        this.engineAccess = null;
     }
 
     /**
@@ -43,8 +53,16 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
      */
     CraftEngineHudResourceBridge(DoudizhuPlugin plugin, ResourceVerifier verifier,
                                  EngineAccess engineAccess) {
+        this(plugin, verifier,
+            (path, request) -> verifier.verify(path, request.hotbarOffsetY(), request.hotbarScale()),
+            engineAccess);
+    }
+
+    CraftEngineHudResourceBridge(DoudizhuPlugin plugin, ResourceVerifier verifier,
+                                 RequestVerifier requestVerifier, EngineAccess engineAccess) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.verifier = Objects.requireNonNull(verifier, "verifier");
+        this.requestVerifier = Objects.requireNonNull(requestVerifier, "requestVerifier");
         this.engineAccess = engineAccess;
     }
 
@@ -70,18 +88,15 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
         }
     }
 
+    /**
+     * 按一次性四层请求穿透既有 reload → generate → verify 链；Bridge 不复制资源事务算法。
+     */
     @Override
-    public CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, Executor ioExecutor,
+    public CompletableFuture<Void> reloadGenerateAndVerify(HudResourceRequest request, Executor ioExecutor,
                                                              Executor mainExecutor) {
-        return reloadGenerateAndVerify(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, ioExecutor, mainExecutor);
-    }
-
-    @Override
-    public CompletableFuture<Void> reloadGenerateAndVerify(int offsetY, int hotbarScale,
-                                                             Executor ioExecutor, Executor mainExecutor) {
+        Objects.requireNonNull(request, "request");
         Objects.requireNonNull(ioExecutor, "ioExecutor");
         Objects.requireNonNull(mainExecutor, "mainExecutor");
-
         final EngineAccess access;
         try {
             String failure = preflightFailureOnMainThread();
@@ -92,7 +107,6 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
             if (access == null) {
                 return failedFuture(new IOException("CraftEngine 实例尚未就绪。"));
             }
-            // 二次检查与真正 reload 紧邻，避免 preflight 后被其它 CE 任务抢占。
             if (access.isReloading()) {
                 return failedFuture(new IOException("CraftEngine 资源仍在重载。"));
             }
@@ -103,31 +117,45 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
             return failedFuture(new IOException("读取 CraftEngine 状态失败：" + messageOf(exception), exception));
         }
 
-        HudResourcePackSync.Verifier syncVerifier = new HudResourcePackSync.Verifier() {
-            @Override
-            public void verify(Path packPath, int configuredOffsetY) throws IOException {
-                verifier.verify(packPath, configuredOffsetY);
-            }
-
-            @Override
-            public void verify(Path packPath, int configuredOffsetY, int configuredScale) throws IOException {
-                verifier.verify(packPath, configuredOffsetY, configuredScale);
-            }
-        };
+        supportedFontVersion = "26.1.2".equals(plugin.getServer().getMinecraftVersion());
         return HudResourcePackSync.run(
-            // overlay YAML 只有在 CE 真实 reload 完成后才会进入 pack manager；不能只生成旧内存快照。
-            // 保存与磁盘重载都经过同一条 reload → generate → verify 链，避免“写成功但包未更新”。
             access::reload,
             access::generateResourcePack,
             access::generatedPackPath,
             access::uploadPackPath,
-            syncVerifier,
-            offsetY,
-            hotbarScale,
+            requestVerifier::verify,
+            request,
             ioExecutor,
             mainExecutor
         );
     }
+
+    @Override
+    public CompletableFuture<HotbarFontMetrics> loadVerifiedHotbarFontMetrics(
+        HudResourceRequest request, Executor ioExecutor) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(ioExecutor, "ioExecutor");
+        // 调用方在校验 Future 完成后进入此处，可能位于异步线程；只消费主线程已解析的访问器。
+        final EngineAccess access = engineAccess;
+        if (!supportedFontVersion || access == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try (InputStream vanilla = plugin.getResource("hotbar-font/vanilla-26.1.2.zip")) {
+                Path actualPack = access.uploadPackPath();
+                if (vanilla == null || actualPack == null || !Files.isRegularFile(actualPack)) {
+                    return null;
+                }
+                // 原版字体归档只覆盖已验证的 26.1.2 客户端；其它目标没有该资源并明确降级。
+                return HotbarFontMetrics.load(vanilla, actualPack, 84);
+            } catch (IOException | RuntimeException exception) {
+                plugin.getLogger().warning("Hotbar 客户端字体快照加载失败，已降级：" + messageOf(exception));
+                return null;
+            }
+        }, ioExecutor);
+    }
+
+    // 旧 offset/scale 入口由 HudResourcePackBridge 接口统一 fail-closed；生产桥接不得绕过四层请求。
 
     private boolean isCraftEngineEnabled() {
         try {
@@ -183,6 +211,11 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
         default void verify(Path packPath, int offsetY, int hotbarScale) throws IOException {
             verify(packPath, offsetY);
         }
+    }
+
+    @FunctionalInterface
+    interface RequestVerifier {
+        void verify(Path packPath, HudResourceRequest request) throws IOException;
     }
 
     interface EngineAccess {

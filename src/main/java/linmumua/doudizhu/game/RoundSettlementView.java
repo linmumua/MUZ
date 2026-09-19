@@ -8,6 +8,7 @@ record RoundSettlementView(
     int resolvedCoreScore,
     int highestBid,
     int bombMultiplier,
+    int revealMultiplier,
     int boostedFarmerCount,
     int farmerSeatCount,
     Integer landlordBoostFactor,
@@ -27,6 +28,8 @@ record RoundSettlementView(
             .append(MuzTheme.hotMetric("本局核心", MuzTheme.multiplierToken("x" + resolvedCoreScore)))
             .append(Component.newline())
             .append(MuzTheme.hotMetric("叫分", MuzTheme.multiplierToken("x" + highestBid)))
+            .append(Component.newline())
+            .append(MuzTheme.hotMetric("明牌", MuzTheme.multiplierToken("x" + revealMultiplier)))
             .append(Component.newline())
             .append(MuzTheme.hotMetric("炸弹", MuzTheme.multiplierToken("x" + bombMultiplier)));
         if (farmerSeatCount > 0) {

@@ -235,8 +235,8 @@ trick-hud:
   # 改了要连 avatar-offset-down 一起核算，见那一项的说明。
   # 默认资源 profile 生成 4、6 两档：4 给两侧小头像，6 给中间大头像。
   # 只能填写当前 profile 已生成的离散档位；未生成的倍数没有对应字形，
-  # 会回退成 6 并留警告（不是钳到边界）。切换档位需同步重新生成资源包。
-  # 照用会让头像整片变豆腐块。这一项和下面两项的「就近吸附」不是一套规则。
+  # 必须拒绝并留明确警告，不得 nearest 或静默回退。切换档位需同步重新生成资源包。
+  # 非法档位会让头像缺少声明字形；这一项与下面四个连续 Y 字段不是一套规则。
   #
   # 【6 倍占 72 像素高，不是 48】：48 是关掉描边后能看见的那张 8x8 脸，
   # 而字形盒恒按 12 行算：描边那两行永远参与度量（关描边只是不画），
@@ -249,19 +249,19 @@ trick-hud:
   card-step: 22
   # 牌面渲染高度（像素），也就是缩放。
   # 只允许当前 muz-resource-profile.yml / PackTiers 已生成的牌高档位；当前为 53。
-  # 53 是贴图原始尺寸即 1:1。越界值会被钳到最近的边界并留警告。
+  # 53 是贴图原始尺寸即 1:1。未生成或越界值必须拒绝并留明确警告，不得 nearest 或静默回退。
   # 放大到 56 只是插值模糊，而且满手 20 张会横出屏幕，一般别超过 53。
   # 注意缩放后牌宽会等比变窄，叠放看着会变松，一般要把 card-step 一起调小
   card-height: 53
   # 整条 HUD 相对 BossBar 默认位置往下推多少像素。这里只调【牌那一行】，
   # 头像行由下面的 avatar-offset-down 单独调，两行互不影响。
-  # 只允许当前 profile / PackTiers 已生成的牌行偏移档位；当前为 0、50。
-  # 没有「往上」：BossBar 本来就贴着屏幕顶部，往上会直接出屏。
+  # 连续整数范围 -128..512；当前默认值 50 保留，原 profile 的 0/50 仅作为基础 bundle 兼容。
+  # 运行期由四层连续覆盖层生成对应 ascent/PNG，非法值拒绝保存，不 nearest 或静默回退。
   offset-down: 50
   # 头像那一行往下推多少像素。与上面的 offset-down 【完全独立】：
   # 改 offset-down 不会动头像行，改这一项也不会动牌行。
-  # 只允许当前 profile / PackTiers 已生成的头像偏移档位；当前为 0、122。
-  # 资源包按每个像素档预生成，越界值会钳到边界并留警告。
+  # 连续整数范围 -128..512；当前默认值 122 保留，原 profile 的 0/122 仅作为基础 bundle 兼容。
+  # 运行期由四层连续覆盖层生成对应 ascent/PNG，非法值拒绝保存，不 nearest 或静默回退。
   #
   # 【两行会不会重叠要自己算】：这一项独立可调的代价就是插件不再替你保证不重叠。
   # 不重叠的条件是：avatar-offset-down >= offset-down + 12 * avatar-scale
@@ -310,7 +310,8 @@ trick-hud:
     enabled: true
     # 记牌器资源缩放档，只允许当前 muz-resource-profile.yml 已生成的档位；默认 profile 仅生成 100。底图与三层 cell 共用该档。
     scale: 100
-    # 记牌器独立的纵向偏移，只允许当前 profile / PackTiers 已生成的档位；当前为 0、122。旧配置缺键时迁移自 avatar-offset-down。
+    # 连续整数范围 -128..512；当前默认值 122 保留，原 profile 的 0/122 仅作为基础 bundle 兼容。
+    # 旧配置缺键时迁移自 avatar-offset-down；非法值拒绝保存，不 nearest 或静默回退。
     offset-down: 122
     # 相邻两格的间距。
     # 【每格自身的宽度不在这里配】：紧凑仪表盘的 label/frame 分层字形固定宽 21px、高 12px，
@@ -331,6 +332,27 @@ trick-hud:
     # 记牌行单独的水平偏移，叠加在 trick-hud.offset-x 之上。正右负左。
     # 15 格排开后这一行通常比另两行宽得多，需要单独往左拉才对得齐
     offset-x: 0
+
+# 开局：每人三张轮发（末批两张）→ 360° 翻转且 180° 排序 → 自愿明牌窗口 → 原有叫分流程。
+# 每局开始固定配置快照；/muz reload 仅影响下一局，不打断正在播放的动画。
+round-opening:
+  # 相邻三张批次的间隔 tick，3..200；批内每 tick 发一张，20 tick 约 1 秒。
+  batch-interval-ticks: 4
+  # 翻转一圈的时长 tick，8..200 的偶数，确保 180° 有明确中点；结束后等待最后一帧归位。
+  flip-ticks: 20
+  # 明牌窗口 tick，1..1200；默认 60 tick（3 秒），任何真人明牌使整局最多 ×2，不叠乘。
+  reveal-ticks: 60
+  # 本功能文案为普通文本；%seconds% 替换剩余秒数，%player% 替换明牌玩家名。
+  messages:
+    dealing: "正在发牌，请稍候。"
+    flipping: "手牌翻转中，请稍候。"
+    revealing: "明牌窗口：还剩 %seconds% 秒，可自愿明牌（整局最多 ×2）。"
+    revealed: "%player% 已明牌，本局公共倍率变为 ×2。"
+    reveal-button: "明牌 ×2"
+    reveal-closed: "明牌窗口已结束，开始叫地主。"
+    already-revealed: "你这一局已经明牌了。"
+    bot-cannot-reveal: "机器人默认不明牌。"
+    reveal-unavailable: "现在不能明牌。"
 
 cards:
   hologram-labels:
@@ -415,11 +437,13 @@ debug:
     # trick-hud.counter.enabled/scale/offset-down/gap/hide-exhausted/offset-x、
     # hotbar-hud.scale/enabled/offset-x/offset-y。
     # 不提供构建期 hotbar glyph-ascent/slot-count 等参数编辑。
-    # “保存并应用”先在 Debug Web 单线程异步写回 config.yml 与当前唯一的 hotbar CE overlay，
-    # 再异步生成并校验 ZIP 后应用 HUD 运行态；保存本身不触发 CraftEngine 重载，重载交给“重新读取配置”
-    # 或管理员手动执行 /ce reload all。“重新读取配置”也走同一条 HUD 专用异步链路，只从磁盘重载，
-    # 不调用完整 reloadVisualState，不重建牌桌，会丢弃页面上尚未保存的改动。
-    # 空 patch 不触发资源流程；配置、overlay、资源包生成/校验或运行态应用任一步失败都不会返回成功。
+    # “保存并应用”按“异步 config I/O + 四层自有资源 → 主线程真实 CraftEngine reload →
+    # 异步 generateResourcePack 与实际 ZIP 字形/PNG 校验 → 主线程 markVerified/apply/snapshot”执行。
+    # “重新读取配置”也走同一条 HUD 专用异步链路，只从磁盘重载，不调用完整 reloadVisualState，不重建牌桌，
+    # 会丢弃页面上尚未保存的改动；启动、/muz reload 与 CraftEngine enable 的资源恢复不依赖 Web 开关。
+    # 空 patch 不触发资源流程；任一步失败都会清除 ready 并回滚四层自有资源与 HUD 配置。
+    # 若检测到其它入口已改写 config.yml，则保留并发文件、跳过整文件回滚并记录警告；失败不返回成功。
+    # 租约 120 秒只 abandon 本次结果，底层 raw 任务结束前不 cancel、不释放；客户端必须重下资源包才能看到 Y 变化。
     # Web 保存/重载共用配置锁，但该锁只覆盖 Web 自身边界，尚未统一其它旧配置入口的竞态。
     # Hotbar 仅在 hotbar-hud.enabled=true、牌桌处于 GamePhase.PLAYING 正式出牌阶段、
     # 且座位为在线真人时显示；LOBBY/BIDDING/DOUBLING/结算/离桌/停服/普通玩家保留原版 9 槽。
@@ -429,8 +453,8 @@ debug:
     # 监听端口。服务只绑定回环地址，外部机器不能直接访问。
     port: 2000
     # 预览拖动交互：只影响 Debug Web 页面，不属于 22 个 HUD 运行期白名单键。
-    # snap-enabled=true 是页面初始默认值；页面上的 snapToggle 还可临时切换吸附，
-    # 该开关只影响当前页面拖动行为，不写入 HUD patch。
+    # 页面默认自由拖动；页面上的 snapToggle 仍可临时切换吸附，
+    # 该开关只影响当前页面拖动行为，不写入 HUD patch，也不改变四个连续 Y 字段的保存范围。
     # 吸附目标基于实际 layer 几何，阈值单位是 Minecraft 像素。
     # center-guides-enabled 控制预览中心线与网格；alt-axis-lock=true 时按住 Alt 首次移动超过死区后锁定主轴。
     drag:
@@ -568,7 +592,7 @@ player-options:
 # ============================================================================
 # 用 ActionBar 通道 + 独立透明字形渲染鸡蛋、水桶、番茄三个道具图标与选中高亮。
 # 每个图标盒为 20×22 像素，图标间隔 4 像素，总宽 68 像素，advance 为 69；
-# 默认基础 ascent 为 -100，相对历史九槽字形的 -128 上移 28 像素。
+# 默认基础 ascent 为 -43，按现代客户端 ActionBar 的 BitmapProvider 基线校准；offset-y=0 时三道具底部贴合逻辑屏幕底线。
 # 仅当 hotbar-hud.enabled=true、牌桌处于 GamePhase.PLAYING 正式出牌阶段、且座位为在线真人时显示；
 # 互动目标限同桌其他在线真人。机器人、旁观者、跨桌玩家和无效目标不参与。
 # 三道具叠加在原版 9 槽物品栏上方，不接 BetterHud，也不覆盖 minecraft 原版 hotbar sprite。
@@ -584,21 +608,20 @@ hotbar-hud:
   # 下一次推送就能看到，不需要重新构建、不需要玩家重下资源包。
   # 任意整数都合法，不依赖预生成字形。
   offset-x: 0
-  # 道具 HUD 垂直偏移（像素，正数向下、负数向上）。
-  # 【与 offset-x 不同，这个不是即时的】：垂直位置由位图字形的 ascent 决定，
-  # 而 ascent 烘焙在资源包里。Debug Web 会把这个值写成一份「调试覆盖层」资源
-  # （plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml），
-  # 然后异步写入、触发 CraftEngine 重载、重建并校验 ZIP；客户端必须重新下载资源包。
+  # 道具 HUD 垂直偏移（像素，正数向下、负数向上），当前 100% 档连续范围 -299..512。
+  # 【与 offset-x 不同，这个不是即时的】：垂直位置由位图字形 ascent 与必要 padding PNG 决定，
+  # 而 ascent/PNG 烘焙在资源包里。Debug Web 会把这个值写入
+  # plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml，并与 Trick 三层
+  # 覆盖层一起异步写入、触发 CraftEngine 重载、重建并校验 ZIP；客户端必须重新下载资源包。
   # 所以每改一次都要：写文件 → 重载 CE → 生成/校验资源包 → 客户端重新下载，才能看到效果。
-  # 覆盖层不存在时此值不生效，图标仍按 bundle 内烘焙的基础 ascent(-100) 显示。
+  # 图标可见高度仍为 22px；向上补透明行时 provider height 可能增加，但不得改变可见尺寸/advance。
   offset-y: 0
-  # 图标字形的垂直偏移（ascent 值），构建期烘焙进 CraftEngine bundle。
-  # 【当前运行期并不读取这个键】，它只记录构建期约定：build.gradle.kts 生成三道具字形时
-  # 把基础 ascent 写成字面量 -100（相对历史 -128 上移 28 像素）。
-  # 要在运行期调垂直位置请改上面的 offset-y（走调试覆盖层），不要改这里 ——
-  # 改这里不会有任何效果，真要动构建期烘焙值必须同步 build.gradle.kts 生成侧、
-  # PackAssets 的图标宽度/advance/码位约定，并重新构建、重启服务器、让玩家重下资源包。
-  glyph-ascent: -100
+  # 图标字形的基础 ascent 约定，构建期烘焙进 CraftEngine bundle。
+  # 【当前运行期并不读取这个键】，它只记录 build.gradle.kts 与 PackAssets 的基础约定：
+  # hotbar 基础 ascent 为 -43；运行期四层覆盖层按 baseAscent-rawY 生成自己的声明与必要 PNG。
+  # 要在运行期调垂直位置请改上面的 offset-y 或 trick-hud 的连续 offset-down，不要改这里 ——
+  # 改这里不会有任何效果，真要动构建期烘焙值必须同步构建侧/运行期 alias/码位约定并重新构建资源包。
+  glyph-ascent: -43
   # 图标数量（当前固定 3 个：鸡蛋、水桶、番茄）。
   # 【当前运行期同样不读取这个键】，数量与图标盒几何由构建期资源和 PackAssets 共同决定：
   # 每个图标盒 20×22px，图标间隔 4px，总宽 68px，advance=69；选中高亮复用 20×22 几何。

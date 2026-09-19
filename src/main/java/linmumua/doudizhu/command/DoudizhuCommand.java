@@ -231,6 +231,14 @@ public final class DoudizhuCommand implements TabExecutor {
                     if (ddzTable == null) {
                         throw new IllegalStateException("你现在不在任何牌桌里。");
                     }
+                    if (ddzTable.getPhase() == GamePhase.DEALING) {
+                        sender.sendMessage(message("当前阶段：发牌中，请稍候。", NamedTextColor.AQUA));
+                        return true;
+                    }
+                    if (ddzTable.getPhase() == GamePhase.REVEALING) {
+                        sender.sendMessage(message("当前阶段：明牌窗口，仅允许真人明牌；完整手牌和底牌不会在此处展示。", NamedTextColor.AQUA));
+                        return true;
+                    }
                     ddzTable.buildStatusLines().forEach(sender::sendMessage);
                 }
                 case "forceend" -> {

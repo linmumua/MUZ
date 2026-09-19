@@ -132,6 +132,20 @@ class PlayerHeadRendererTest {
      * 区间，再要求 {@code 第 c 列的左缘 == 第 c-1 列的右缘}。差一个像素就红。
      */
     @Test
+    void 连续头像使用基准零档码位和真实连续字体() {
+        String rendered = PlayerHeadRenderer.renderMiniMessage(
+            opaqueHead(), 4, FAKE_OFFSET, 1, true, true);
+        assertTrue(rendered.contains("<font:" + HudOverlayLayout.continuousFont(
+            PackAssets.avatarPixelFont(0)) + ">"),
+            "连续头像必须使用 base tier 0 的 continuous 字体");
+        assertTrue(rendered.contains("<font:" + HudOverlayLayout.continuousFont(
+            PackAssets.avatarCrownFont(0)) + ">"),
+            "连续王冠必须使用 base tier 0 的 continuous 字体");
+        assertFalse(rendered.contains("<font:" + PackAssets.avatarPixelFont(1) + ">"),
+            "连续头像不得继续使用旧 Y 档字体");
+    }
+
+    @Test
     void 同一行相邻两列的方块必须紧邻无缝() {
         for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
             int rows = PackAssets.AVATAR_HEAD_PIXELS;

@@ -21,6 +21,7 @@ public final class CraftEngineBundleExporter {
     private static final String BUNDLE_ROOT = "craftengine/muz";
     private static final String BUNDLE_INDEX = BUNDLE_ROOT + "/_bundle_index.txt";
     private static final String BUNDLE_PACK_FILE = BUNDLE_ROOT + "/pack.yml";
+    private static final String PACK_FILE_NAME = "pack.yml";
 
     /**
      * 内容指纹存档的文件名，写在导出目标目录下。
@@ -31,6 +32,10 @@ public final class CraftEngineBundleExporter {
     private static final String BUNDLE_FINGERPRINT_FILE = ".muz-bundle-fingerprint";
     /** 运行期 Hotbar overlay 直接位于 muz bundle 内，但不是 JAR 固定清单。 */
     private static final String RUNTIME_HOTBAR_OVERLAY = "configuration/images/hotbar_debug.yml";
+    /** 连续 Trick overlay 与运行期 Hotbar 共用同一个 CE resources/muz 根。 */
+    private static final String RUNTIME_TRICK_OVERLAY = "configuration/images/trick_hud_continuous.yml";
+    /** 运行期补行 PNG 的专属目录；bundle 导出不得清理或覆盖其中的文件。 */
+    private static final String RUNTIME_CONTINUOUS_TEXTURE_DIR = "resourcepack/assets/muz/textures/font/continuous";
     private static final String LEGACY_HOTBAR_OVERLAY_DIR = "muz_hotbar_debug";
 
     private final DoudizhuPlugin plugin;
@@ -77,7 +82,15 @@ public final class CraftEngineBundleExporter {
 
             cleanupStaleFiles(targetRoot, entries);
             for (String entry : entries) {
-                copyBundledFile(entry, targetRoot.resolve(entry));
+                Path target = targetRoot.resolve(entry).normalize();
+                // 运行期 overlay/补行 PNG 是 Debug Web 事务写入的状态；bundle 重导不能把它们
+                // 覆盖回固定资源。首次导出目标不存在时仍允许复制内置同名入口，保证冷启动可用。
+                if (isRuntimeOverlayEntry(entry) && Files.exists(target)) {
+                    copiedEntries++;
+                    progressListener.onProgress(copiedEntries, entries.size(), entry);
+                    continue;
+                }
+                copyBundledFile(entry, target);
                 copiedEntries++;
                 progressListener.onProgress(copiedEntries, entries.size(), entry);
             }
@@ -235,6 +248,14 @@ public final class CraftEngineBundleExporter {
             }
             throw exception;
         }
+    }
+
+    private static boolean isRuntimeOverlayEntry(String relativePath) {
+        String normalized = relativePath.replace('\\', '/');
+        return normalized.equals(PACK_FILE_NAME)
+            || normalized.equals(RUNTIME_HOTBAR_OVERLAY)
+            || normalized.equals(RUNTIME_TRICK_OVERLAY)
+            || normalized.startsWith(RUNTIME_CONTINUOUS_TEXTURE_DIR + "/");
     }
 
     private void cleanupStaleFiles(Path targetRoot, List<String> bundledEntries) throws IOException {

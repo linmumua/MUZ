@@ -1851,6 +1851,7 @@ class CraftEngineBundleResourcesTest {
             Map<String, String> selectEntry = entries.get("hotbar_select" + suffix);
             assertNotNull(selectEntry, "缺少 hotbar scale=" + scale + " 选中框声明");
             assertEquals(tier.selectHeight(), Integer.parseInt(selectEntry.get("height")));
+            assertEquals(tier.baseAscent(), Integer.parseInt(selectEntry.get("ascent")));
             assertEquals(tier.font(), selectEntry.get("font"));
             assertEquals(tier.selectCodepoint(), codePoint(selectEntry.get("char")));
             fontChars.add(tier.font() + " " + tier.selectCodepoint());

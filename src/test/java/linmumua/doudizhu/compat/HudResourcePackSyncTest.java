@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import linmumua.doudizhu.assets.HudResourceRequest;
+import linmumua.doudizhu.assets.PackAssets;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -60,6 +62,26 @@ class HudResourcePackSyncTest {
 
         assertEquals(List.of("reload-start", "generate", "verify:generated.zip", "verify:uploaded.zip"), events);
         assertEquals(List.of(generated, uploaded), verified);
+    }
+
+    @Test
+    void 完整请求贯穿同步链并分别校验两条路径() throws Exception {
+        Path generated = Files.writeString(temporaryDirectory.resolve("request-generated.zip"), "zip");
+        Path uploaded = Files.writeString(temporaryDirectory.resolve("request-uploaded.zip"), "zip");
+        HudResourceRequest request = new HudResourceRequest(37, 83, 157, -200,
+            PackAssets.HOTBAR_DEFAULT_SCALE);
+        List<HudResourceRequest> verified = new ArrayList<>();
+        HudResourcePackSync.run(
+            (io, main) -> CompletableFuture.completedFuture(new HudResourcePackSync.ReloadResult(true, "success")),
+            () -> { },
+            () -> generated,
+            () -> uploaded,
+            (path, actual) -> verified.add(actual),
+            request,
+            Runnable::run,
+            Runnable::run
+        ).get(2, TimeUnit.SECONDS);
+        assertEquals(List.of(request, request), verified);
     }
 
     @Test

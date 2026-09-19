@@ -75,6 +75,8 @@ public final class GameTable {
     private final TimedOutPlayCoordinator timedOutPlayCoordinator;
     private final BotAiCoordinator botAiCoordinator;
     private final RoundSettlementCoordinator roundSettlementCoordinator;
+    private final RoundOpeningCoordinator roundOpeningCoordinator;
+    private RoundOpeningSettings openingSettings;
 
     private GamePhase phase = GamePhase.LOBBY;
     private List<DoudizhuCard> bottomCards = List.of();
@@ -94,6 +96,8 @@ public final class GameTable {
     private final Map<UUID, Integer> farmerBoostChoices = new LinkedHashMap<>();
     private Integer landlordBoostFactor;
     private int bombMultiplier = 1;
+    // 明牌是整局公共倍率，最多为 2；与炸弹倍率分开存储，结算时统一进入核心倍率。
+    private int revealMultiplier = 1;
     private CardPattern currentPattern;
     private List<DoudizhuCard> currentTrickCards = List.of();
     private int botActionEpoch = 0;
@@ -398,6 +402,64 @@ public final class GameTable {
                 return GameTable.this.isBot(playerId);
             }
         });
+        this.roundOpeningCoordinator = new RoundOpeningCoordinator(new RoundOpeningCoordinator.Support() {
+            @Override
+            public boolean canScheduleTasks() {
+                return GameTable.this.canScheduleTasks();
+            }
+
+            @Override
+            public MuzScheduler scheduler() {
+                return plugin.scheduler();
+            }
+
+            @Override
+            public List<UUID> seats() {
+                return List.copyOf(seats);
+            }
+
+            @Override
+            public void setOpeningPhase(GamePhase openingPhase) {
+                phase = openingPhase;
+            }
+
+            @Override
+            public void appendOpeningCard(UUID playerId, DoudizhuCard card) {
+                hands.computeIfAbsent(playerId, ignored -> new ArrayList<>()).add(card);
+            }
+
+            @Override
+            public void assignOpeningBottomCards(List<DoudizhuCard> cards) {
+                bottomCards = List.copyOf(cards);
+            }
+
+            @Override
+            public void sortOpeningHands() {
+                for (List<DoudizhuCard> hand : hands.values()) {
+                    hand.sort(DoudizhuCard.ORDER);
+                }
+            }
+
+            @Override
+            public void refreshPhysicalTable() {
+                GameTable.this.refreshPhysicalTable();
+            }
+
+            @Override
+            public void tickOpeningActionBar() {
+                GameTable.this.tickActionBar();
+            }
+
+            @Override
+            public void onOpeningRevealWindowStarted() {
+                GameTable.this.onOpeningRevealWindowStarted();
+            }
+
+            @Override
+            public void onOpeningRevealWindowFinished() {
+                GameTable.this.onOpeningRevealWindowFinished();
+            }
+        });
     }
 
     public String getName() {
@@ -680,11 +742,9 @@ public final class GameTable {
                 .append(MuzTheme.divider(" · "))
                 .append(MuzTheme.body("新一局已经开始"))
         ));
-        announceAction("叫分顺序", MuzTheme.field("叫分顺序", orderedPlayersComponent(bidOrder)));
+        announceAction("发牌顺序", MuzTheme.field("发牌顺序", orderedPlayersComponent(seats)));
         playRoundMusic();
-        promptBidTurn();
         refreshPhysicalTable();
-        runBotActionIfNeeded();
     }
 
     public void bid(Player player, int points) {
@@ -704,21 +764,30 @@ public final class GameTable {
     }
 
     /**
-     * 叫分阶段选择明牌：这一局把自己的手牌对所有人公开。
-     * 只在自己的叫分回合可用，且一局内只能明一次；明牌不改变叫分流程和倍率。
+     * 明牌窗口内自愿公开手牌；不再绑定叫分回合，整局公共倍率最多只提升一次。
      */
     public void revealHand(Player player) {
         requireAtTable(player);
-        ensurePhase(GamePhase.BIDDING, "只有叫地主阶段可以明牌。");
-        requireCurrentTurn(player);
-        UUID playerId = player.getUniqueId();
-        if (!revealedHandPlayers.add(playerId)) {
-            throw new IllegalStateException("你这一局已经明牌了。");
+        revealHand(player.getUniqueId());
+    }
+
+    /**
+     * 给实体交互层使用的明牌入口。调用方只需传座位 UUID，资格判断仍由牌桌统一完成。
+     */
+    public void revealHand(UUID playerId) {
+        if (!canRevealHand(playerId)) {
+            if (playerId != null && isBot(playerId)) {
+                throw new IllegalStateException(openingSettings().messages().botCannotReveal());
+            }
+            if (playerId != null && revealedHandPlayers.contains(playerId)) {
+                throw new IllegalStateException(openingSettings().messages().alreadyRevealed());
+            }
+            throw new IllegalStateException(openingSettings().messages().revealUnavailable());
         }
-        announceAction(
-            displayName(playerId) + " 明牌",
-            actorUpdate(playerId, MuzTheme.accent("明牌"), "手牌本局公开")
-        );
+        revealedHandPlayers.add(playerId);
+        revealMultiplier = 2;
+        String announcement = openingSettings().messages().revealed().replace("%player%", displayName(playerId));
+        announceAction(announcement, MuzTheme.accent(announcement));
         playEffectAll(PackSounds.mingPai());
         refreshPhysicalTable();
     }
@@ -731,6 +800,113 @@ public final class GameTable {
         return playerId != null && revealedHandPlayers.contains(playerId);
     }
 
+    public double getOpeningFlipDegrees() {
+        return roundOpeningCoordinator == null ? 0.0 : roundOpeningCoordinator.openingFlipDegrees();
+    }
+
+    public int getOpeningLayoutSize(UUID playerId) {
+        if (phase == GamePhase.DEALING) {
+            return 17;
+        }
+        return playerId == null ? 0 : hands.getOrDefault(playerId, List.of()).size();
+    }
+
+    public boolean isOpeningHandLocked() {
+        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
+    }
+
+    public boolean isDealLocked() {
+        return phase == GamePhase.DEALING;
+    }
+
+    public boolean isOpeningRevealWindow() {
+        return phase == GamePhase.REVEALING && roundOpeningCoordinator != null
+            && roundOpeningCoordinator.isRevealWindowOpen();
+    }
+
+    public boolean isRevealWindowOpen() {
+        return isOpeningRevealWindow();
+    }
+
+    public boolean canRevealHand(UUID playerId) {
+        if (!isOpeningRevealWindow() || playerId == null || !contains(playerId)
+            || isBot(playerId) || revealedHandPlayers.contains(playerId)) {
+            return false;
+        }
+        Player player = onlinePlayer(playerId);
+        return player != null && player.isOnline();
+    }
+
+    public int getRevealCount(UUID playerId) {
+        return isHandRevealed(playerId) ? 1 : 0;
+    }
+
+    public int openingRemainingSeconds() {
+        return roundOpeningCoordinator == null ? 0 : roundOpeningCoordinator.openingRemainingSeconds();
+    }
+
+    public String openingRevealLabel() {
+        return roundOpeningCoordinator == null ? "" : roundOpeningCoordinator.openingRevealLabel();
+    }
+
+    public String openingRevealButtonLabel() {
+        return openingSettings().messages().revealButton();
+    }
+
+    public int publicRevealMultiplier() {
+        return revealMultiplier;
+    }
+
+    public OpeningPresentationSnapshot getOpeningPresentationSnapshot() {
+        List<OpeningSeatSnapshot> snapshotSeats = new ArrayList<>(seats.size());
+        for (int index = 0; index < seats.size(); index++) {
+            UUID seat = seats.get(index);
+            snapshotSeats.add(new OpeningSeatSnapshot(
+                index,
+                seat,
+                isBot(seat),
+                getHand(seat).stream().map(DoudizhuCard::id).toList(),
+                isHandRevealed(seat)
+            ));
+        }
+        return new OpeningPresentationSnapshot(
+            phase,
+            getOpeningFlipDegrees(),
+            isOpeningHandLocked(),
+            isOpeningRevealWindow(),
+            openingRemainingSeconds(),
+            openingRevealLabel(),
+            List.copyOf(snapshotSeats)
+        );
+    }
+
+    private RoundOpeningSettings openingSettings() {
+        if (roundOpeningCoordinator != null && roundOpeningCoordinator.settings() != null) {
+            return roundOpeningCoordinator.settings();
+        }
+        return RoundOpeningSettings.from(plugin.yamlConfig());
+    }
+
+    public record OpeningSeatSnapshot(
+        int seatIndex,
+        UUID playerId,
+        boolean bot,
+        List<Integer> handCardIds,
+        boolean visibleToAll
+    ) {
+    }
+
+    public record OpeningPresentationSnapshot(
+        GamePhase phase,
+        double flipDegrees,
+        boolean handLocked,
+        boolean revealWindowOpen,
+        int remainingSeconds,
+        String revealLabel,
+        List<OpeningSeatSnapshot> seats
+    ) {
+    }
+
     public void chooseDouble(Player player, boolean doubled) {
         requireAtTable(player);
         ensurePhase(GamePhase.DOUBLING, "现在还不到加倍的时候。");
@@ -740,6 +916,9 @@ public final class GameTable {
 
     public void toggleSelection(UUID playerId, int cardId) {
         requireAtTable(playerId);
+        if (isOpeningHandLocked()) {
+            throw new IllegalStateException(openingRevealLabel());
+        }
         Set<Integer> selection = selections.computeIfAbsent(playerId, ignored -> new HashSet<>());
         if (selection.contains(cardId)) {
             selection.remove(cardId);
@@ -890,6 +1069,8 @@ public final class GameTable {
 
     private String currentTurnStatusLabel() {
         return switch (phase) {
+            case DEALING -> "当前发牌";
+            case REVEALING -> "当前明牌";
             case BIDDING -> "当前叫分";
             case DOUBLING -> "当前加倍";
             case PLAYING -> "当前出牌";
@@ -985,6 +1166,7 @@ public final class GameTable {
             highestBid,
             landlord,
             bombMultiplier,
+            revealMultiplier,
             boostedFarmerCount(),
             farmerSeatCount(),
             landlordBoostFactor,
@@ -998,6 +1180,7 @@ public final class GameTable {
             highestBid,
             landlord,
             bombMultiplier,
+            revealMultiplier,
             boostedFarmerCount(),
             farmerSeatCount(),
             landlordBoostFactor,
@@ -1045,6 +1228,10 @@ public final class GameTable {
             broadcastLobbyActionBarIfVisible();
             return;
         }
+        if (phase == GamePhase.DEALING || phase == GamePhase.REVEALING) {
+            broadcastOpeningActionBar();
+            return;
+        }
         boolean noResponsePassPending = pendingNoResponsePassTask != null;
         int remaining = remainingCountdownSeconds();
         if (handleExpiredHumanTurn(remaining)) {
@@ -1059,16 +1246,20 @@ public final class GameTable {
     }
 
     private void dealFreshRound() {
+        // 先校验下一局快照；非法配置不能清掉准备状态或把牌桌留在半开局阶段。
+        RoundOpeningSettings nextSettings = RoundOpeningSettings.from(plugin.yamlConfig());
+        if (roundOpeningCoordinator != null) {
+            roundOpeningCoordinator.cancel();
+        }
         prepareFreshRoundState();
         List<DoudizhuCard> deck = DoudizhuDeck.shuffled(random);
-        dealHandsFromDeck(deck);
-        assignBottomCards(deck);
         bidOrder = seedBidOrder();
         tieBreakOrder = List.of();
-        currentTurn = bidOrder.get(0);
-        // 【在叫分阶段就把皮肤请求出去】：出牌 HUD 要到 PLAYING 才显示，而皮肤是异步下载的。
-        // 放在这里，叫分那几秒正好够下载完，进入出牌阶段时缓存已经热了，
-        // 不会再闪一下那个尺寸风格都不一致的兜底图标。
+        currentTurn = null;
+        openingSettings = nextSettings;
+        roundOpeningCoordinator.start(deck, openingSettings);
+        // 【在开局时间线期间预热头像】：出牌 HUD 要到 PLAYING 才显示，而皮肤是异步下载的。
+        // 发牌与明牌窗口正好提供缓存时间，进入出牌阶段时不会再闪一下兜底图标。
         prewarmTrickHudAvatars();
     }
 
@@ -1104,8 +1295,30 @@ public final class GameTable {
         confirmLandlord(playerId, bid, null);
     }
 
-    private void prepareFreshRoundState() {
+    private void onOpeningRevealWindowStarted() {
+        phase = GamePhase.REVEALING;
+        announceAction("明牌窗口", MuzTheme.field("明牌窗口", MuzTheme.accent(openingRevealLabel())));
+        tickActionBar();
+    }
+
+    private void onOpeningRevealWindowFinished() {
+        if (phase != GamePhase.REVEALING) {
+            return;
+        }
         phase = GamePhase.BIDDING;
+        roundStartedAtMillis = System.currentTimeMillis();
+        currentTurn = bidOrder.isEmpty() ? null : bidOrder.getFirst();
+        announceAction("明牌结束", MuzTheme.field("明牌结束", MuzTheme.muted(openingSettings().messages().revealClosed())));
+        promptBidTurn();
+        refreshAndRunBot();
+    }
+
+    private void prepareFreshRoundState() {
+        phase = GamePhase.DEALING;
+        botActionEpoch++;
+        // 无人叫分重发也必须立即隐藏上一轮底牌，不能等新牌发完才覆盖。
+        bottomCards = List.of();
+        currentTurn = null;
         bids.clear();
         tieBreakBids.clear();
         roles.clear();
@@ -1127,20 +1340,8 @@ public final class GameTable {
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
+        revealMultiplier = 1;
         readyPlayers.clear();
-    }
-
-    private void dealHandsFromDeck(List<DoudizhuCard> deck) {
-        for (int index = 0; index < PLAYER_COUNT; index++) {
-            List<DoudizhuCard> hand = new ArrayList<>(deck.subList(index * 17, index * 17 + 17));
-            hand.sort(DoudizhuCard.ORDER);
-            hands.put(seats.get(index), hand);
-        }
-    }
-
-    private void assignBottomCards(List<DoudizhuCard> deck) {
-        bottomCards = new ArrayList<>(deck.subList(51, 54));
-        bottomCards.sort(DoudizhuCard.ORDER);
     }
 
     private List<UUID> seedBidOrder() {
@@ -1242,6 +1443,10 @@ public final class GameTable {
 
     private void resetRound() {
         cancelPendingNoResponsePass();
+        botActionEpoch++;
+        if (roundOpeningCoordinator != null) {
+            roundOpeningCoordinator.cancel();
+        }
         stopMusicAll();
         trickHud.hideAll();
         HotbarHudService hotbarHud = plugin.getHotbarHudService();
@@ -1274,6 +1479,10 @@ public final class GameTable {
 
     private void clearTableStateForForceClose() {
         cancelPendingNoResponsePass();
+        botActionEpoch++;
+        if (roundOpeningCoordinator != null) {
+            roundOpeningCoordinator.cancel();
+        }
         seats.clear();
         readyPlayers.clear();
         totalScores.clear();
@@ -1297,6 +1506,7 @@ public final class GameTable {
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
+        revealMultiplier = 1;
         currentPattern = null;
         currentTrickCards = List.of();
         roundStartedAtMillis = -1L;
@@ -1334,6 +1544,7 @@ public final class GameTable {
         farmerBoostChoices.clear();
         landlordBoostFactor = null;
         bombMultiplier = 1;
+        revealMultiplier = 1;
         currentPattern = null;
         currentTrickCards = List.of();
         roundStartedAtMillis = -1L;
@@ -1561,6 +1772,19 @@ public final class GameTable {
                 } else {
                     player.sendActionBar(actionBar);
                 }
+            }
+        }
+    }
+
+    private void broadcastOpeningActionBar() {
+        Component actionBar = MuzTheme.field(
+            phase == GamePhase.REVEALING ? "明牌窗口" : "开局",
+            MuzTheme.accent(openingRevealLabel())
+        ).decoration(TextDecoration.ITALIC, false);
+        for (UUID playerId : seats) {
+            Player player = onlinePlayer(playerId);
+            if (player != null) {
+                player.sendActionBar(actionBar);
             }
         }
     }
@@ -2086,12 +2310,18 @@ public final class GameTable {
             .count();
     }
 
+    static int coreScoreFor(int highestBid, int revealMultiplier, int bombMultiplier, int springMultiplier) {
+        int publicFactor = Math.clamp(revealMultiplier, 1, 2);
+        return Math.max(1, highestBid) * publicFactor * Math.max(1, bombMultiplier) * Math.max(1, springMultiplier);
+    }
+
     private int liveCoreScore() {
-        return Math.max(1, highestBid) * bombMultiplier;
+        // 明牌是整局公共倍率，最多乘 2；炸弹倍率仍独立保存并单独展示。
+        return coreScoreFor(highestBid, revealMultiplier, bombMultiplier, 1);
     }
 
     private int resolvedCoreScore(boolean landlordWin) {
-        return liveCoreScore() * springMultiplier(landlordWin);
+        return coreScoreFor(highestBid, revealMultiplier, bombMultiplier, springMultiplier(landlordWin));
     }
 
     private int landlordBoostFactor() {
@@ -2140,6 +2370,8 @@ public final class GameTable {
     private Component liveMultiplierComponent() {
         Component line = MuzTheme.warm("底分 " + Math.max(1, highestBid) + " 分")
             .append(MuzTheme.divider(" · "))
+            .append(MuzTheme.hotMetric("明牌", MuzTheme.multiplierToken("x" + revealMultiplier)))
+            .append(MuzTheme.divider(" · "))
             .append(MuzTheme.hotMetric("炸弹", MuzTheme.multiplierToken("x" + bombMultiplier)));
         if (landlord != null) {
             line = line.append(MuzTheme.divider(" · "))
@@ -2159,6 +2391,7 @@ public final class GameTable {
             resolvedCoreScore(settlement.landlordWin()),
             Math.max(1, highestBid),
             bombMultiplier,
+            revealMultiplier,
             boostedFarmerCount(),
             farmerSeatCount(),
             landlordBoostFactor,
@@ -2416,9 +2649,8 @@ public final class GameTable {
     }
 
     private void restartBidPhaseAfterRedeal() {
+        // 重新发牌同样完整经过翻转与明牌窗口；只有窗口结束回调能够启动叫分。
         dealFreshRound();
-        promptBidTurn();
-        refreshAndRunBot();
     }
 
     private void processBidChoice(UUID playerId, int points) {
@@ -2895,7 +3127,7 @@ public final class GameTable {
         return BotAiDecisionCodec.buildDoublingPrompt(
             displayName(botId),
             Objects.equals(botId, landlord),
-            Math.max(1, highestBid) * bombMultiplier,
+            liveCoreScore(),
             hands.getOrDefault(botId, List.of())
         );
     }

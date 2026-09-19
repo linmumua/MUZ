@@ -3,6 +3,7 @@ package linmumua.doudizhu.game;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntFunction;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.model.DoudizhuCard;
 
@@ -140,6 +141,30 @@ final class TrickHudView {
         List<CounterCell> counterCells,
         int counterGapPixels
     ) {
+        return buildMiniMessage(
+            previous, current, next, slotPixels, avatarGapPixels, cards, cardStepPixels,
+            offsetProvider, heightTier, cardDownTier, xOffsetPixels, rowXOffsets,
+            counterCells, counterGapPixels, false);
+    }
+
+    /** 连续覆盖层入口：牌与记牌器统一使用 base tier 0 的码位和独立 continuous 字体。 */
+    static String buildMiniMessage(
+        Avatar previous,
+        Avatar current,
+        Avatar next,
+        int slotPixels,
+        int avatarGapPixels,
+        List<DoudizhuCard> cards,
+        int cardStepPixels,
+        IntFunction<String> offsetProvider,
+        int heightTier,
+        int cardDownTier,
+        int xOffsetPixels,
+        RowXOffsets rowXOffsets,
+        List<CounterCell> counterCells,
+        int counterGapPixels,
+        boolean continuousFont
+    ) {
         RowXOffsets rowX = rowXOffsets == null ? RowXOffsets.NONE : rowXOffsets;
         List<Avatar> slots = List.of(
             previous == null ? Avatar.EMPTY : previous,
@@ -176,7 +201,7 @@ final class TrickHudView {
         if (hasCardRow) {
             int pad = (containerAdvance - cardRowAdvance) / 2 + rowX.card();
             appendOffset(builder, offsetProvider, pad);
-            appendCardRow(builder, ordered, cardStepPixels, offsetProvider, heightTier, cardDownTier);
+            appendCardRow(builder, ordered, cardStepPixels, offsetProvider, heightTier, cardDownTier, continuousFont);
             // 后面还有行要画就退回行首（每行都从同一个原点开始）；否则直接把光标补到容器宽。
             appendOffset(builder, offsetProvider, hasAvatarRow || hasCounterRow
                 ? -(pad + cardRowAdvance)
@@ -233,7 +258,7 @@ final class TrickHudView {
     ) {
         return buildMiniMessage(
             previous, current, next, slotPixels, avatarGapPixels, cards, cardStepPixels,
-            offsetProvider, heightTier, cardDownTier, xOffsetPixels, RowXOffsets.NONE, List.of(), 0);
+            offsetProvider, heightTier, cardDownTier, xOffsetPixels, RowXOffsets.NONE, List.of(), 0, false);
     }
 
     /**
@@ -262,7 +287,8 @@ final class TrickHudView {
         int cardStepPixels,
         IntFunction<String> offsetProvider,
         int heightTier,
-        int cardDownTier
+        int cardDownTier,
+        boolean continuousFont
     ) {
         // 和桌面中央的已出牌区共用同一份牌序，否则同一手牌两处顺序不一样，看着像出错了。
         ordered.sort(DoudizhuCard.DISPLAY_ORDER);
@@ -281,10 +307,13 @@ final class TrickHudView {
         // 后面拼接的玩家名字一起套进去，否则中文会因为这张字体里没有汉字字形而变豆腐块。
         // 下面那句 </font> 在当前结构下其实是冗余的（</white> 会隐式闭合内层 font，
         // 实测确认过），但照样写出来 —— 一旦哪天 <white> 被去掉，没有它字体就会漏给后文。
-        builder.append("<font:").append(PackAssets.cardGlyphFont(heightTier, cardDownTier)).append('>');
+        int glyphDownTier = continuousFont ? 0 : cardDownTier;
+        String baseFont = PackAssets.cardGlyphFont(heightTier, glyphDownTier);
+        builder.append("<font:").append(
+            continuousFont ? HudOverlayLayout.continuousFont(baseFont) : baseFont).append('>');
         int advance = PackAssets.cardGlyphAdvance(heightTier);
         for (int index = 0; index < ordered.size(); index++) {
-            builder.append(PackAssets.cardGlyphChar(ordered.get(index), heightTier, cardDownTier));
+            builder.append(PackAssets.cardGlyphChar(ordered.get(index), heightTier, glyphDownTier));
             if (index < ordered.size() - 1) {
                 // 字形自带这一档的前进量，想让下一张只前进 cardStep，
                 // 就要补上两者之差（叠放时是负数）。

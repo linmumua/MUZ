@@ -117,6 +117,7 @@ class TrickHudSettingsTest {
             configWith(Map.of(
                 "trick-hud.card-height", PackAssets.cardGlyphHeightAt(0),
                 "trick-hud.offset-down", PackAssets.cardGlyphDownOffsetAt(0),
+                "trick-hud.avatar-offset-down", PackAssets.avatarRowDownOffset(0, 6),
                 "trick-hud.offset-x", -37
             )),
             warnings::add
@@ -126,6 +127,10 @@ class TrickHudSettingsTest {
             "card-height 应当选到当前资源包实际生成的档位");
         assertEquals(PackAssets.cardGlyphDownOffsetAt(0), PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier()),
             "offset-down 应当选到当前资源包实际生成的档位");
+        assertEquals(PackAssets.cardGlyphDownOffsetAt(0), settings.cardOffsetDown(),
+            "cardOffsetDown 必须保留原始像素值");
+        assertEquals(PackAssets.avatarRowDownOffset(0, 6), settings.avatarOffsetDown(),
+            "avatarOffsetDown 必须保留原始像素值");
         // offset-x 是像素而不是档位：它靠负空格实现，负数（左移）也必须原样透传。
         assertEquals(-37, settings.offsetX(), "offset-x 必须原样透传，左移是合法用法");
         assertTrue(warnings.isEmpty(), "全是合法值，不该有警告：" + warnings);
@@ -166,19 +171,18 @@ class TrickHudSettingsTest {
             assertTrue(warnings.getFirst().contains("card-height"), "警告要指名是哪一项：" + warnings);
         }
 
-        // offset-down 步长 2：奇数值必须吸到相邻偶数档，且【不警告】。
-        for (int odd : new int[] {1, 3, 27}) {
+        // 连续 raw Y 不再因未命中旧档而告警；旧 tier 仅保留给 fallback 路径。
+        for (int raw : new int[] {37, 83, 157, -37}) {
             warnings.clear();
             TrickHudService.Settings settings = TrickHudService.readSettings(
-                configWith(Map.of("trick-hud.offset-down", odd)), warnings::add);
-            int resolved = PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier());
-            assertEquals(PackAssets.cardGlyphDownOffsetAt(PackAssets.nearestCardGlyphDownOffsetTier(odd)), resolved,
-                "offset-down=" + odd + " 必须吸附到当前资源包最近档位");
-            assertTrue(warnings.stream().noneMatch(w -> w.contains("offset-down")),
-                "范围内的奇数值不该警告，误差只有 1 像素：" + warnings);
+                configWith(Map.of("trick-hud.offset-down", raw)), warnings::add);
+            assertEquals(raw, settings.cardOffsetDown(),
+                "offset-down=" + raw + " 必须原样保留为连续 raw Y");
+            assertTrue(warnings.stream().noneMatch(w -> w.contains("精确档位")),
+                "合法连续 raw offset-down 不应产生旧档 snap 告警：" + warnings);
         }
 
-        for (int badOffset : new int[] {-4, 200}) {
+        for (int badOffset : new int[] {PackAssets.MIN_TRICK_OFFSET - 1, PackAssets.MAX_TRICK_OFFSET + 1}) {
             warnings.clear();
             TrickHudService.readSettings(
                 configWith(Map.of("trick-hud.offset-down", badOffset)), warnings::add);
@@ -435,8 +439,8 @@ class TrickHudSettingsTest {
      * 且看不出原因。这条测试就是钉住「任意整数都能配」这个承诺。
      */
     @Test
-    void 头像行偏移取任意整数时就近吸附且不警告() {
-        // 105 不一定命中当前资源包的头像偏移档位，但仍应按实际集合就近吸附。
+    void 头像行偏移保留raw且合法值不告警() {
+        // 105 不一定命中当前资源包的头像偏移档位：旧 tier 只用于兼容，raw 必须原样保留。
         TrickHudService.Settings settings = TrickHudService.readSettings(
             configWith(Map.of("trick-hud.avatar-offset-down", 105)),
             warnings::add
@@ -447,9 +451,11 @@ class TrickHudSettingsTest {
             PackAssets.avatarDownOffsetAt(PackAssets.nearestAvatarDownOffsetTier(105)), resolved,
             "105 必须吸附到当前资源包最近的头像偏移档位"
         );
+        assertEquals(105, settings.avatarOffsetDown(),
+            "连续契约必须保留配置中的 raw avatar Y，不得静默改写成旧档位");
         assertTrue(
-            warnings.stream().noneMatch(w -> w.contains("avatar-offset-down 超出")),
-            "范围内的值不该刷越界警告，误差只有 1 像素：" + warnings
+            warnings.stream().noneMatch(w -> w.contains("精确档位")),
+            "合法连续 raw avatar Y 不应产生旧档 snap 告警：" + warnings
         );
     }
 
@@ -460,16 +466,16 @@ class TrickHudSettingsTest {
      * 配 500 却只得到 400，差了 100 像素 —— 不说他会一直以为配置没生效。
      */
     @Test
-    void 头像行偏移越界时钳到边界并留警告() {
+    void 头像行偏移越界时仍留警告() {
         TrickHudService.Settings settings = TrickHudService.readSettings(
-            configWith(Map.of("trick-hud.avatar-offset-down", 500)),
+            configWith(Map.of("trick-hud.avatar-offset-down", PackAssets.MAX_TRICK_OFFSET + 1)),
             warnings::add
         );
 
         assertEquals(
-            PackAssets.avatarDownOffsetMax(),
+            PackAssets.avatarDownOffsetAt(PackAssets.avatarDownOffsetTierCount() - 1),
             PackAssets.avatarDownOffsetAt(settings.avatarDownOffsetTier()),
-            "越界必须钳到最大档"
+            "越界时旧 bundle fallback 仍应钳到最大档"
         );
         assertTrue(
             warnings.stream().anyMatch(w -> w.contains("avatar-offset-down") && w.contains("超出")),

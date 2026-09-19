@@ -19,16 +19,24 @@ final class TableStatusViews {
         int highestBid,
         UUID landlord,
         int bombMultiplier,
+        int revealMultiplier,
         int boostedFarmerCount,
         int farmerSeatCount,
         Integer landlordBoostFactor,
         String pairMultiplierSummary
     ) {
+        if (phase == GamePhase.DEALING) {
+            return "发牌中 · 请稍候";
+        }
+        if (phase == GamePhase.REVEALING) {
+            return "明牌窗口 · 自愿明牌（整局最多 ×2）";
+        }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? "等待本局开局" : "等待叫分结果";
         }
         StringBuilder builder = new StringBuilder()
             .append("底分 ").append(Math.max(1, highestBid))
+            .append(" · 明牌 x").append(revealMultiplier)
             .append(" · 炸弹 x").append(bombMultiplier)
             .append(" · 农民加倍 ").append(boostedFarmerCount).append("/").append(farmerSeatCount).append(" 人");
         if (landlordBoostFactor != null) {
@@ -43,17 +51,26 @@ final class TableStatusViews {
         int highestBid,
         UUID landlord,
         int bombMultiplier,
+        int revealMultiplier,
         int boostedFarmerCount,
         int farmerSeatCount,
         Integer landlordBoostFactor,
         String pairMultiplierSummary
     ) {
+        if (phase == GamePhase.DEALING) {
+            return MuzTheme.muted("发牌中 · 请稍候");
+        }
+        if (phase == GamePhase.REVEALING) {
+            return MuzTheme.accent("明牌窗口 · 自愿明牌（整局最多 ×2）");
+        }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? MuzTheme.muted("等待本局开局") : MuzTheme.muted("等待叫分结果");
         }
         Component line = MuzTheme.warm("底分 " + Math.max(1, highestBid))
             .append(MuzTheme.divider(" · "))
-            .append(MuzTheme.hotValue("x" + bombMultiplier))
+            .append(MuzTheme.hotMetric("明牌", "x" + revealMultiplier))
+            .append(MuzTheme.divider(" · "))
+            .append(MuzTheme.hotMetric("炸弹", "x" + bombMultiplier))
             .append(MuzTheme.divider(" · "))
             .append(MuzTheme.hotMetric("农民加倍", boostedFarmerCount + "/" + farmerSeatCount, "人"));
         if (landlordBoostFactor != null) {
@@ -136,6 +153,12 @@ final class TableStatusViews {
         if (phase == GamePhase.LOBBY) {
             return lobbyActionBar;
         }
+        if (phase == GamePhase.DEALING) {
+            return Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
+        }
+        if (phase == GamePhase.REVEALING) {
+            return Component.text("明牌窗口：自愿明牌（整局最多 ×2）。", NamedTextColor.AQUA);
+        }
         if (currentTurn == null) {
             return Component.text("牌桌正在整理下一轮。", NamedTextColor.GRAY);
         }
@@ -146,6 +169,8 @@ final class TableStatusViews {
         }
         String countdown = currentTurnTimeoutSeconds > 0 ? " | " + remainingSeconds + " 秒" : "";
         return switch (phase) {
+            case DEALING -> Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
+            case REVEALING -> Component.text("明牌窗口：自愿明牌（整局最多 ×2）。", NamedTextColor.AQUA);
             case BIDDING -> viewerId.equals(currentTurn)
                 ? Component.text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主") + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
                 : Component.text("当前由 ", NamedTextColor.GRAY)

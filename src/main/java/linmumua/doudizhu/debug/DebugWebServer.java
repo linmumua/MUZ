@@ -63,6 +63,8 @@ public final class DebugWebServer {
     private static final Map<String, String> RESOURCE_WHITELIST = buildResourceWhitelist();
     /** Debug Web 页面专用资源清单；只暴露当前构建 profile 的真实 PNG。 */
     private static final Map<String, PreviewResource> PREVIEW_RESOURCE_WHITELIST = buildPreviewResourceWhitelist();
+    /** 离线可用的固定世界背景；不进入 CraftEngine bundle 或 Minecraft 字体。 */
+    private static final String BACKGROUND_RESOURCE = "debug-world-background.png";
 
     private static Map<String, String> buildResourceWhitelist() {
         // 构建期产物的 classpath 根路径；与 build.gradle.kts 的 outputAssetsRoot 对应
@@ -110,20 +112,30 @@ public final class DebugWebServer {
         addPreviewResource(map, "card:big_joker", "card", textureBase + "cards/big_joker.png",
             classpathBase + "cards/big_joker.png", cardWidth, cardHeight, cardAdvance, 100);
 
-        int avatarScale = 6;
-        int avatarAdvance = linmumua.doudizhu.assets.PlayerHeadRenderer.advanceWidth(avatarScale, false);
-        int avatarHeight = linmumua.doudizhu.assets.PackAssets.AVATAR_ROW_TOTAL_PIXELS * avatarScale;
-        for (int index = 0; index < 10; index++) {
-            String file = "pixel_" + avatarScale + "_" + index + ".png";
-            addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
-                textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
-                avatarAdvance, avatarHeight, avatarAdvance, avatarScale);
-        }
-        for (int index = 0; index < 2; index++) {
-            String file = "crown_" + avatarScale + "_" + index + ".png";
-            addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
-                textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
-                avatarAdvance, avatarHeight, avatarAdvance, avatarScale);
+        // 当前 profile 的头像 scale 可能是稀疏档位（例如 4/6），必须逐档登记真实 PNG；
+        // 不允许用 6 档资源冒充左右 4 档头像，前端会按 geometry 直接消费这些 id。
+        // 预览头像使用已有完整机器人示例图；图片自身包含完整外观，不叠加 pixel/crown 字形，明确不冒充玩家皮肤。
+        addPreviewResource(map, "avatar:sample_farmer", "avatar", textureBase + "bot_avatar_farmer.png",
+            classpathBase + "bot_avatar_farmer.png", 18, 18, 18, 1);
+        addPreviewResource(map, "avatar:sample_landlord", "avatar", textureBase + "bot_avatar_landlord.png",
+            classpathBase + "bot_avatar_landlord.png", 18, 18, 18, 1);
+
+        for (int avatarScale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
+            int avatarAdvance = linmumua.doudizhu.assets.PlayerHeadRenderer.advanceWidth(avatarScale, false);
+            int avatarHeight = linmumua.doudizhu.assets.PackAssets.AVATAR_ROW_TOTAL_PIXELS * avatarScale;
+            for (int index = 0; index < 10; index++) {
+                String file = "pixel_" + avatarScale + "_" + index + ".png";
+                addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
+                    textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
+                    avatarAdvance, avatarHeight, avatarAdvance, avatarScale);
+            }
+            for (int index = 0; index < 2; index++) {
+                String file = "crown_" + avatarScale + "_" + index + ".png";
+                addPreviewResource(map, "avatar:" + file.substring(0, file.length() - 4), "avatar",
+                    textureBase + "avatar/" + file, classpathBase + "avatar/" + file,
+                    avatarScale, PackAssets.AVATAR_CROWN_PIXELS * avatarScale,
+                    avatarScale, avatarScale);
+            }
         }
 
         int counterScale = PackAssets.COUNTER_DEFAULT_SCALE;
@@ -181,11 +193,14 @@ public final class DebugWebServer {
     }
 
     private static void addAvatarNames(java.util.List<String> names) {
-        for (int row = 0; row < 10; row++) {
-            names.add("font/avatar/pixel_6_" + row + ".png");
+        // 与 PackAssets.AVATAR_PIXEL_SCALE_TIERS 同源，覆盖当前 profile 的每个真实头像档位。
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
+            for (int row = 0; row < 10; row++) {
+                names.add("font/avatar/pixel_" + scale + "_" + row + ".png");
+            }
+            names.add("font/avatar/crown_" + scale + "_0.png");
+            names.add("font/avatar/crown_" + scale + "_1.png");
         }
-        names.add("font/avatar/crown_6_0.png");
-        names.add("font/avatar/crown_6_1.png");
     }
 
     private static void addCounterNames(java.util.List<String> names) {
@@ -204,6 +219,9 @@ public final class DebugWebServer {
     private static java.util.List<String> previewTextureNames() {
         java.util.List<String> names = new java.util.ArrayList<>();
         names.add("font/bot_avatar.png");
+        // Debug Web 预览使用的完整机器人示例头像；不代表玩家皮肤，也不生成新 PNG。
+        names.add("font/bot_avatar_farmer.png");
+        names.add("font/bot_avatar_landlord.png");
         addCardNames(names);
         addAvatarNames(names);
         addCounterNames(names);
@@ -223,6 +241,7 @@ public final class DebugWebServer {
     private final Runnable onStop;
     private final DebugHudConfigController controller;
     private final HudWebApplyCoordinator applyCoordinator;
+    private final boolean ownsCoordinator;
     private final String token;
 
     private HttpServer httpServer;
@@ -238,11 +257,25 @@ public final class DebugWebServer {
      * @param onStop  停止回调；用于退出 Debug Web 接管状态并恢复 bundle 固定字形
      */
     public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop) {
+        this(plugin, onStart, onStop, new DebugHudConfigController(plugin), null, true);
+    }
+
+    /** 使用插件级共享 controller/coordinator；恢复服务与 Web 请求共用同一份租约。 */
+    public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop,
+                          DebugHudConfigController controller, HudWebApplyCoordinator coordinator) {
+        this(plugin, onStart, onStop, controller, coordinator, false);
+    }
+
+    private DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop,
+                           DebugHudConfigController controller, HudWebApplyCoordinator coordinator,
+                           boolean ownsCoordinator) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.onStart = onStart;
         this.onStop = onStop;
-        this.controller = new DebugHudConfigController(plugin);
-        this.applyCoordinator = new HudWebApplyCoordinator(plugin, controller);
+        this.controller = Objects.requireNonNull(controller, "controller");
+        this.applyCoordinator = coordinator == null
+            ? new HudWebApplyCoordinator(plugin, controller) : coordinator;
+        this.ownsCoordinator = ownsCoordinator;
         this.token = newToken();
     }
 
@@ -269,6 +302,7 @@ public final class DebugWebServer {
             httpServer.createContext("/api/resource/", this::handleResource);
             httpServer.createContext("/api/preview-resources", this::handlePreviewResources);
             httpServer.createContext("/api/preview-resource/", this::handlePreviewResource);
+            httpServer.createContext("/api/preview-background", this::handlePreviewBackground);
             httpServer.createContext("/api/state", this::handleState);
             // 守护线程：随 JVM 退出自动终止，不阻塞 shutdown
             executor = Executors.newFixedThreadPool(2, r -> {
@@ -315,10 +349,12 @@ public final class DebugWebServer {
         }
     }
 
-    /** 停止 HTTP 服务并释放 HUD 异步应用执行器。 */
+    /** 停止 HTTP 服务；共享 coordinator 由插件生命周期统一关闭。 */
     public void close() {
         stop();
-        applyCoordinator.close();
+        if (ownsCoordinator) {
+            applyCoordinator.close();
+        }
     }
 
     /** 是否正在运行。 */
@@ -472,15 +508,30 @@ public final class DebugWebServer {
         }
     }
 
-    /**
-     * /api/resource/{resourceName}（GET）：只读白名单内的构建期 PNG 资源。
-     *
-     * <p>URL 路径格式为 {@code /api/resource/muz:font/hotbar_egg.png}，
-     * 前缀 {@code /api/resource/} 之后的整段作为白名单键查找。
-     * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的当前 profile 固定条目；
-     * 用于前端 hotbar 各缩放档的真实图片预览。
-     * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
-     */
+    /** /api/preview-background（GET）：固定同源离线背景，不读取任意文件。 */
+    private void handlePreviewBackground(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        byte[] data;
+        try (InputStream stream = getClass().getClassLoader().getResourceAsStream(BACKGROUND_RESOURCE)) {
+            if (stream == null) {
+                sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("预览背景资源不可用：" + BACKGROUND_RESOURCE)));
+                return;
+            }
+            data = stream.readAllBytes();
+        }
+        addSecurityHeaders(exchange.getResponseHeaders());
+        exchange.getResponseHeaders().set("Content-Type", "image/png");
+        // 背景固定 URL 不带版本号，禁止 immutable 长缓存滞留旧截图；前端每次可获取最新内嵌背景。
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.sendResponseHeaders(200, data.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(data);
+        }
+    }
+
     private void handlePreviewResources(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "GET");
@@ -539,6 +590,15 @@ public final class DebugWebServer {
         sendJson(exchange, 200, apiPayload(true, snapshot, List.of(), List.of()));
     }
 
+    /**
+     * /api/resource/{resourceName}（GET）：只读白名单内的构建期 PNG 资源。
+     *
+     * <p>URL 路径格式为 {@code /api/resource/muz:font/hotbar_egg.png}，
+     * 前缀 {@code /api/resource/} 之后的整段作为白名单键查找。
+     * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的当前 profile 固定条目；
+     * 用于前端 hotbar 各缩放档的真实图片预览。
+     * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
+     */
     private void handleResource(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "GET");
@@ -653,9 +713,10 @@ public final class DebugWebServer {
     private record PreviewResource(String id, String family, String texture, String classpath,
                                    int width, int height, int advance, int scale) {
         private Map<String, Object> manifest() {
+            // 统一使用固定 texture 白名单路由；旧 /api/preview-resource/{id} 仍保留兼容。
             return Map.of("family", family, "id", id, "texture", texture,
                 "width", width, "height", height, "advance", advance,
-                "scale", scale, "status", "available", "url", "/api/preview-resource/" + id);
+                "scale", scale, "status", "available", "url", "/api/resource/" + texture);
         }
     }
 
@@ -717,7 +778,7 @@ public final class DebugWebServer {
             + ".header-btn{padding:6px 10px;background:#3e473d;color:#f4f1e8;border:2px solid #111;border-right-color:#87906f;border-bottom-color:#87906f;cursor:pointer;font-size:11px;font-weight:700}.header-btn:hover{background:#56624f}.header-btn:focus-visible{outline:2px solid #f1c75b;outline-offset:2px}"
             + ".preview-panel .preview{min-height:0;position:absolute;inset:0;padding:0;border:0;max-width:none;background:radial-gradient(ellipse at 50% 30%,#7898a1 0,#41545e 42%,#202b31 75%,#101419 100%);overflow:hidden}"
             + ".preview-panel .screen{left:50%;top:50%;margin:0;transform:translate(-50%,-50%) translate(var(--view-pan-x,0px),var(--view-pan-y,0px)) scale(var(--screen-zoom,1));transform-origin:center center;--screen-zoom:1;--view-pan-x:0px;--view-pan-y:0px;background:linear-gradient(#7ea4a9 0 46%,#506b69 46% 52%,#35453f 52% 100%);overflow:hidden;outline:4px solid #080909;box-shadow:0 0 0 2px #67736a,8px 8px 0 #080909;touch-action:none}"
-            + ".preview-panel .screen:before{content:'';position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(#ffffff12 1px,transparent 1px),linear-gradient(90deg,#ffffff12 1px,transparent 1px);background-size:16px 16px;mix-blend-mode:screen}.preview-panel .screen:after{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 48%,#0008 100%);z-index:18}"
+            + ".preview-panel .screen:before{content:'';position:absolute;inset:0;box-sizing:border-box;border:2px solid #f2c75c;pointer-events:none;background-image:linear-gradient(#ffffff12 1px,transparent 1px),linear-gradient(90deg,#ffffff12 1px,transparent 1px);background-size:16px 16px;mix-blend-mode:screen}.preview-panel .screen:after{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 48%,#0008 100%);z-index:18}"
             + ".mc-crosshair{position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);z-index:19;pointer-events:none}.mc-crosshair:before,.mc-crosshair:after{content:'';position:absolute;background:#fff;box-shadow:1px 1px #111}.mc-crosshair:before{left:6px;top:0;width:2px;height:14px}.mc-crosshair:after{left:0;top:6px;width:14px;height:2px}"
             + ".mc-bossbar{position:absolute;left:50%;top:12px;transform:translateX(-50%);width:52%;min-width:220px;z-index:17;color:#fff;text-align:center;font-size:11px;text-shadow:1px 1px #111;pointer-events:none}.mc-bossbar .boss-track{height:8px;margin-top:4px;background:#17191bcc;border:2px solid #080909;box-shadow:inset 0 0 0 1px #515651}.mc-bossbar .boss-fill{height:100%;width:76%;background:linear-gradient(#d96262,#8b2727);box-shadow:inset 0 1px #ffb0a0}.mc-actionbar{position:absolute;left:50%;bottom:42px;transform:translateX(-50%);z-index:17;padding:4px 10px;background:#1119;color:#fff;font-size:11px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}.mc-coordinate{position:fixed;z-index:40;display:none;min-width:150px;padding:7px 9px;background:#111e;color:#fff;border:2px solid #d5a63b;box-shadow:3px 3px #080909;font-size:11px;line-height:1.45;pointer-events:none}.mc-coordinate.show{display:block}.mc-world-label{position:absolute;left:12px;bottom:12px;z-index:17;color:#f1c75b;font-size:10px;text-shadow:1px 1px #111;pointer-events:none}.mc-screen-legend{position:absolute;left:50%;top:calc(50% + 190px);transform:translateX(-50%);z-index:17;color:#d8d7ce;font-size:10px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}"
             // 窄屏：900px 以下降为单列堆叠，字段网格缩窄但保持三列；
@@ -784,9 +845,9 @@ public final class DebugWebServer {
             + "document.getElementById('saveBtn').onclick=async()=>{if(busy)return;let patch;try{patch=currentPatch()}catch(e){setPrompt(e.message);return}if(!Object.keys(patch).length){setDirtyPrompt();return}setBusy(true);setPrompt('正在保存并应用，请稍候。');try{let j=await post('/api/save',{values:patch});state=j.snapshot;dirty.clear();renderForm();"
             // 保存成功消息：先显示 appliedKeys，再附上服务端返回的 messages（包含 CE 校验/上传/客户端状态）。
             // msg 与 dragHint 保持一致，都使用同一段文本。
-            + "let text='已保存并应用：'+((j.appliedKeys||[]).join(', ')||'无改动');let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+='。'+srvMsgs.join('；');"
+            + "snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);let text='已保存并应用：'+((j.appliedKeys||[]).join(', ')||'无改动')+'。四层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+='。'+srvMsgs.join('；');"
             + "msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
-            + "document.getElementById('reloadBtn').onclick=async()=>{if(busy)return;setBusy(true);setPrompt('正在重新读取配置，请稍候。');try{let j=await post('/api/reload',{});state=j.snapshot;dirty.clear();renderForm();let text='已重新读取配置。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+=srvMsgs.join('；');msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
+            + "document.getElementById('reloadBtn').onclick=async()=>{if(busy)return;setBusy(true);setPrompt('正在重新读取配置，请稍候。');try{let j=await post('/api/reload',{});state=j.snapshot;snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);dirty.clear();renderForm();let text='已重新读取配置；四层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+=srvMsgs.join('；');msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
             + "document.getElementById('undoBtn').onclick=()=>{if(busy)return;dirty.clear();renderForm();const text='已撤销未保存改动。';msg.textContent=text;dragHint.textContent=text};"
             + "document.getElementById('topSaveBtn').onclick=()=>document.getElementById('saveBtn').click();document.getElementById('topReloadBtn').onclick=()=>document.getElementById('reloadBtn').click();"
             + "document.getElementById('panelToggle').onclick=()=>{const panel=document.getElementById('editorPanel'),open=panel.classList.toggle('collapsed');document.getElementById('panelToggle').setAttribute('aria-expanded',open?'false':'true')};"
@@ -844,7 +905,7 @@ public final class DebugWebServer {
             + "const counterFrameHeight=Number(cntTier.frameHeight);"
             + "const counterDigitHeight=Number(cntTier.digitHeight);"
             + "const counterLabelAscent=Number(cntTier.labelAscent);"
-            + "const snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);"
+            + "let snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);"
             + "const counterFrameTopDelta=Number(cntTier.frameTopDelta);"
             + "const counterDigitInset=Number(cntTier.digitInset);"
             + "let counterRowWidth=0;if(counterCells.length){counterRowWidth=counterCells.length*counterAdvance+(counterCells.length-1)*counterGap}"
@@ -884,10 +945,10 @@ public final class DebugWebServer {
             + "function updateCoordPanel(){const keys=layerXYKeys(activeLayer),vals=collectAll(),box=staticBoxes(vals).boxes[activeLayer];if(coordX)coordX.value=keys?Number(vals[keys[0]]||0):'';if(coordY)coordY.value=keys&&keys[1]?Number(vals[keys[1]]||0):'';if(coordW)coordW.textContent=box?Math.round(box.w):'-';if(coordH)coordH.textContent=box?Math.round(box.h):'-'}"
             + "function controls(k){const q=CSS.escape(k);return form.querySelectorAll(\"[data-key='\"+q+\"']\")}"
             + "function writeValue(k,value){controls(k).forEach(el=>{if(el.type==='checkbox')el.checked=!!value;else el.value=value})}"
-            + "function setField(key,val){const el=control(key);if(!el)return false;const f=fieldSpec(key);let next=Math.round(val);"
-            + "if(f&&f.min!=null)next=Math.max(f.min,next);if(f&&f.max!=null)next=Math.min(f.max,next);"
-            // 档位型字段（select）只能取资源包实际生成的档，吸附到最近的合法选项，
-            // 否则会写出一个后端必然拒绝的值。
+            + "function continuousYKey(key){return key==='trick-hud.offset-down'||key==='trick-hud.avatar-offset-down'||key==='trick-hud.counter.offset-down'||key==='hotbar-hud.offset-y'}"
+            + "function setField(key,val){const el=control(key);if(!el)return false;const f=fieldSpec(key);let next=continuousYKey(key)?Number(val):Math.round(val);"
+            + "if(!continuousYKey(key)){if(f&&f.min!=null)next=Math.max(f.min,next);if(f&&f.max!=null)next=Math.min(f.max,next)}"
+            // 档位型字段（select）只能取资源包实际生成的档，吸附到最近的合法选项；连续 Y 不进入此分支。
             + "if(f&&f.control==='select'&&f.options&&f.options.length){let best=Number(f.options[0]);"
             + "f.options.forEach(o=>{if(Math.abs(Number(o)-next)<Math.abs(best-next))best=Number(o)});next=best}"
             + "writeValue(key,next);if(dragging||resizing){updateDirty(key);return true}changed({target:el});return true}"
@@ -920,13 +981,13 @@ public final class DebugWebServer {
                 staticDomReady=true;
             }
             function setStaticBox(el,b){el.hidden=!b;el.style.transform='';if(!b)return;el.style.left=cssPx(b.x)+'px';el.style.top=cssPx(b.y)+'px';el.style.width=cssPx(b.w)+'px';el.style.height=cssPx(b.h)+'px';el.dataset.mcLeft=Math.round(b.x);el.dataset.mcTop=Math.round(b.y);el.dataset.mcWidth=Math.round(b.w);el.dataset.mcHeight=Math.round(b.h)}
-            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset,w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor((v.width-r.hbAdv)/2)+x,y:v.height-r.hbH+h,w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
+            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset,w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor(v.width/2)-Math.floor(r.hbAdv/2)+x,y:v.height-r.hbH+(r.hbBaseAscent-(r.hbBaseAscent-h)),w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
             function staticCards(layer,r){const c=staticContent(layer);for(let i=0;i<r.n;i++){let el=c.querySelector('.cardbox[data-card-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cardbox';el.dataset.cardIndex=i;c.append(el)}const label=String(r.cards[i].label||r.cards[i].rank||'');el.hidden=false;el.dataset.cardRank=label;el.textContent=label;el.style.left=cssPx(i*r.step)+'px';el.style.top='0';el.style.width=cssPx(r.cardW)+'px';el.style.height=cssPx(r.cardHeight)+'px';el.style.lineHeight=cssPx(r.cardHeight)+'px'}c.querySelectorAll('.cardbox').forEach(el=>{el.hidden=Number(el.dataset.cardIndex)>=r.n})}
             function staticAvatars(layer,r,vals){const c=staticContent(layer),outline=vals['trick-hud.avatar-outline.enabled']?String(vals['trick-hud.avatar-outline.color']):'transparent';for(let i=0;i<3;i++){let slot=c.querySelector('.avslot[data-index="'+i+'"]');if(!slot){slot=document.createElement('div');slot.className='avslot';slot.dataset.index=i;slot.append(document.createElement('div'));c.append(slot)}const data=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true},face=slot.firstElementChild,sw=Number(data.slotWidth||r.avatarSlot),fw=Number(data.contentAdvance||sw),fh=Number(data.rowHeight||r.avatarHeight);slot.style.left=cssPx(i*(r.avatarSlot+r.avGap))+'px';slot.style.top='0';slot.style.width=cssPx(r.avatarSlot)+'px';slot.style.height=cssPx(r.avatarHeight)+'px';face.className='avbox'+(data.crowned?' crowned':'')+(data.empty?' empty':'');face.style.left=cssPx((sw-fw)/2)+'px';face.style.top=cssPx(r.avatarHeight-fh)+'px';face.style.width=cssPx(fw)+'px';face.style.height=cssPx(fh)+'px';face.style.outlineColor=outline}}
             function staticCounter(layer,r,vals){const c=staticContent(layer);r.counterCells.forEach((cell,i)=>{let el=c.querySelector('.cnt[data-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cnt';el.dataset.index=i;el.append(document.createElement('div'),document.createElement('div'),document.createElement('div'));el.children[0].className='cnt-label';el.children[1].className='cnt-frame';el.children[2].className='cnt-digit';c.append(el)}const hidden=!!cell.exhausted&&!!vals['trick-hud.counter.hide-exhausted'],x=i*(r.counterAdvance+r.counterGap),digitWidth=r.counterCellWidth-2*r.counterDigitInset;el.hidden=false;el.className='cnt'+(cell.exhausted?' exhausted':'');el.style.left=cssPx(x)+'px';el.style.top='0';el.style.width=cssPx(r.counterCellWidth)+'px';el.style.height=cssPx(r.counterCellHeight)+'px';el.children[0].textContent=String(cell.label);el.children[0].style.display=hidden?'none':'';el.children[1].style.display=hidden?'none':'';el.children[2].textContent=String(cell.playedCount);el.children[2].style.display=hidden?'none':'';el.children[0].style.height=cssPx(r.counterLabelHeight)+'px';el.children[0].style.lineHeight=cssPx(r.counterLabelHeight)+'px';el.children[1].style.left='0';el.children[1].style.top=cssPx(r.counterFrameTopDelta)+'px';el.children[1].style.width=cssPx(r.counterCellWidth)+'px';el.children[1].style.height=cssPx(r.counterFrameHeight)+'px';el.children[2].style.left=cssPx(r.counterDigitInset)+'px';el.children[2].style.top=cssPx(r.counterFrameTopDelta+r.counterDigitInset)+'px';el.children[2].style.width=cssPx(digitWidth)+'px';el.children[2].style.height=cssPx(r.counterDigitHeight)+'px';el.children[2].style.lineHeight=cssPx(r.counterDigitHeight)+'px'});c.querySelectorAll('.cnt').forEach(el=>{el.hidden=Number(el.dataset.index)>=r.counterCells.length})}
             function staticHotbar(layer,r){const c=staticContent(layer);c.replaceChildren();(r.hbIcons||[]).forEach(icon=>{const hit=document.createElement('span');hit.className='hb-icon-hit';hit.dataset.index=icon.index;hit.style.left=cssPx(icon.index*icon.step)+'px';hit.style.top='0';hit.style.width=cssPx(icon.width)+'px';hit.style.height=cssPx(icon.height)+'px';const img=document.createElement('img');img.className='hb-icon-img';img.alt='Hotbar 道具图标';img.src='/api/resource/'+esc(icon.texture);img.style.width=cssPx(icon.width)+'px';img.style.height=cssPx(icon.height)+'px';const err=document.createElement('span');err.className='hb-icon-error';err.textContent='资源缺失';img.onerror=()=>{img.style.display='none';err.style.display='flex'};img.onload=()=>{img.style.display='block';err.style.display='none'};hit.append(img,err);c.append(hit)});let selected=c.querySelector('.hb-select');if(!selected){selected=document.createElement('img');selected.className='hb-select';c.append(selected)}let selectErr=c.querySelector('.hb-select-error');if(!selectErr){selectErr=document.createElement('span');selectErr.className='hb-select-error';selectErr.textContent='选中框缺失';c.append(selectErr)}const selectTexture=r.hbSelectTexture||'';selected.src='/api/resource/'+esc(selectTexture);selected.onerror=()=>{selected.style.display='none';selectErr.style.display='flex'};selected.onload=()=>{selected.style.display='block';selectErr.style.display='none'};selected.style.left=cssPx(r.hbSelStartX+hotbarSelectedSlot*r.hbSlotStep)+'px';selected.style.top=cssPx(r.hbSelStartY)+'px';selected.style.width=cssPx(r.hbSelW)+'px';selected.style.height=cssPx(r.hbSelH)+'px';let note=c.querySelector('.hb-slot-indicator');if(!note){note=document.createElement('span');note.className='hb-slot-indicator';c.append(note)}note.textContent='道具 '+hotbarSelectedSlot+'（滚轮切换）'}
             function hideCoordinate(){const box=document.getElementById('mcCoordinate');if(box)box.classList.remove('show')}
-            function showCoordinate(ev,layer){const box=document.getElementById('mcCoordinate');if(!box)return;const el=layer||staticLayer(activeLayer),kind=el&&el.dataset.drag||activeLayer,b=el&&!el.hidden?{x:Number(el.dataset.mcLeft||0),y:Number(el.dataset.mcTop||0),w:Number(el.dataset.mcWidth||0),h:Number(el.dataset.mcHeight||0)}:null,rect=screen.getBoundingClientRect(),s=cssScale(),z=screenZoom(),px=Math.round((ev.clientX-rect.left)/(z*s)),py=Math.round((ev.clientY-rect.top)/(z*s)),keys=DRAG_KEYS[kind],vals=collectAll(),name=el&&el.dataset.drag||'画布';box.innerHTML='<b>'+esc(name)+'</b><br>左 '+(b?b.x:'-')+' · 右 '+(b?b.x+b.w:'-')+'<br>上 '+(b?b.y:'-')+' · 下 '+(b?b.y+b.h:'-')+'<br>宽 '+(b?b.w:'-')+' · 高 '+(b?b.h:'-')+'<br>配置 offset：'+(keys?Math.round(Number(vals[keys[0]]||0)):'-')+'，'+(keys?Math.round(Number(vals[keys[1]]||0)):'-')+'<br>指针 '+px+', '+py;box.style.left=Math.min(window.innerWidth-box.offsetWidth-8,Math.max(8,ev.clientX+12))+'px';box.style.top=Math.min(window.innerHeight-box.offsetHeight-8,Math.max(8,ev.clientY+12))+'px';box.classList.add('show')}
+            function showCoordinate(ev,layer){const box=document.getElementById('mcCoordinate');if(!box)return;const el=layer||staticLayer(activeLayer),kind=el&&el.dataset.drag||activeLayer,b=el&&!el.hidden?{x:Number(el.dataset.mcLeft||0),y:Number(el.dataset.mcTop||0),w:Number(el.dataset.mcWidth||0),h:Number(el.dataset.mcHeight||0)}:null,rect=screen.getBoundingClientRect(),s=cssScale(),z=screenZoom(),px=Math.round((ev.clientX-rect.left)/(z*s)),py=Math.round((ev.clientY-rect.top)/(z*s)),keys=DRAG_KEYS[kind],vals=collectAll(),name=el&&el.dataset.drag||'画布';box.innerHTML='左 '+(b?b.x:'-')+' · 右 '+(b?b.x+b.w:'-')+'<br>上 '+(b?b.y:'-')+' · 下 '+(b?b.y+b.h:'-')+'<br>宽 '+(b?b.w:'-')+' · 高 '+(b?b.h:'-')+'<br>配置 offset：'+(keys?Math.round(Number(vals[keys[0]]||0)):'-')+'，'+(keys?Math.round(Number(vals[keys[1]]||0)):'-')+'<br>指针 '+px+', '+py;box.style.left=Math.min(window.innerWidth-box.offsetWidth-8,Math.max(8,ev.clientX+12))+'px';box.style.top=Math.min(window.innerHeight-box.offsetHeight-8,Math.max(8,ev.clientY+12))+'px';box.classList.add('show')}
             function bindStaticEvents(){if(staticEventsReady)return;staticEventsReady=true;screen.addEventListener('pointerdown',e=>{const handle=e.target.closest('.resize-handle'),layer=e.target.closest('.layer[data-drag]');if(handle){startStaticResize(e,handle);return}if(layer){startStaticDrag(e,layer);return}if(!busy&&e.button===0&&e.shiftKey){e.preventDefault();panning={sx:e.clientX,sy:e.clientY,x:viewPanX,y:viewPanY,pointerId:e.pointerId,__static:true};try{screen.setPointerCapture(e.pointerId)}catch(_){}dragHint.textContent='平移视图中：Shift+拖动'}});screen.addEventListener('pointermove',moveStaticPointer);screen.addEventListener('pointerup',finishStaticPointer);screen.addEventListener('pointercancel',finishStaticPointer);screen.addEventListener('lostpointercapture',finishStaticPointer);window.addEventListener('pointerup',finishStaticPointer);window.addEventListener('pointercancel',finishStaticPointer);window.addEventListener('blur',finishStaticPointer);screen.addEventListener('contextmenu',e=>{e.preventDefault();showCoordinate(e,e.target.closest('.layer[data-drag]'))});screen.addEventListener('wheel',e=>{if(!e.target.closest('.hb-icon-hit'))return;e.preventDefault();const count=(rowGeom(collectAll()).hbIcons||[]).length||3;hotbarSelectedSlot=(hotbarSelectedSlot+(e.deltaY>0?1:-1)+count)%count;scheduleRender()},{passive:false})}
             function startStaticDrag(e,el){if(busy||dragging||resizing||panning||e.button!==0||e.pointerType==='mouse'&&!(e.buttons&1)||e.target.closest('.resize-handle')||['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)||e.target.isContentEditable)return;const kind=el.dataset.drag,keys=DRAG_KEYS[kind],b=staticBoxes(collectAll()).boxes[kind];if(!keys||!b)return;e.preventDefault();selectLayer(kind);dragging={kind,keys,sx:e.clientX,sy:e.clientY,bx:Number(readValue(keys[0])||0),by:keys[1]?Number(readValue(keys[1])||0):0,baseLeft:b.x,baseTop:b.y,width:b.w,height:b.h,pointerId:e.pointerId,axis:null,hasMoved:false,el,__static:true};el.classList.add('drag');try{el.setPointerCapture(e.pointerId)}catch(_){} }
             function moveStaticPointer(e){const active=dragging||resizing||panning;if(!active||busy||e.pointerId!==active.pointerId)return;e.preventDefault();if(dragging){if(e.pointerType==='mouse'&&!(e.buttons&1)){finishStaticPointer();return}const d=dragging,s=cssScale()*screenZoom(),v=viewport();let dx=(e.clientX-d.sx)/s,dy=(e.clientY-d.sy)/s;if(Math.abs(dx)<.5&&Math.abs(dy)<.5&&!d.hasMoved)return;d.hasMoved=true;if(!d.keys[1])dy=0;if(dragCfg.altAxisLock&&e.altKey&&d.axis===null&&(Math.abs(dx)>=2||Math.abs(dy)>=2))d.axis=Math.abs(dx)>=Math.abs(dy)?'x':'y';if(d.axis==='x')dy=0;if(d.axis==='y')dx=0;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy);if(dragCfg.snapEnabled){const tx=(v.width-d.width)/2-d.baseLeft,ty=(v.height-d.height)/2-d.baseTop;if(d.axis!=='y'&&Math.abs(dx-tx)<=dragCfg.snapThreshold)dx=tx;if(d.keys[1]&&d.axis!=='x'&&Math.abs(dy-ty)<=dragCfg.snapThreshold)dy=ty;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy)}setField(d.keys[0],d.bx+dx);if(d.keys[1])setField(d.keys[1],d.by+dy);d.el.style.transform='translate('+cssPx(Number(readValue(d.keys[0]))-d.bx)+'px,'+cssPx((d.keys[1]?Number(readValue(d.keys[1])):d.by)-d.by)+'px)';dragHint.textContent='拖动中：'+d.keys[0]+'='+Math.round(Number(readValue(d.keys[0])))+(d.keys[1]?('，'+d.keys[1]+'='+Math.round(Number(readValue(d.keys[1])))):'');updateCoordPanel()}else if(resizing){moveStaticResize(e)}else{viewPanX=panning.x+(e.clientX-panning.sx)/(cssScale()*screenZoom());viewPanY=panning.y+(e.clientY-panning.sy)/(cssScale()*screenZoom());applyScreenTransform()}}

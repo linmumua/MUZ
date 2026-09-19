@@ -1,6 +1,7 @@
 package linmumua.doudizhu.debug;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.HudResourceRequest;
 import linmumua.doudizhu.compat.CraftEngineHudResourceBridge;
 import linmumua.doudizhu.compat.HudResourcePackBridge;
 import org.bukkit.plugin.Plugin;
@@ -9,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -19,10 +21,10 @@ import java.util.concurrent.ScheduledExecutorService;
 /**
  * Debug Web HUD 的串行应用协调器。
  *
- * <p>保存顺序固定为：主线程确认 CraftEngine 可用并解析覆盖层目录，异步写 config.yml 与
- * 当前唯一的 hotbar CE 覆盖层，主线程启动 CraftEngine 真实 reload Future，随后异步生成
- * 并校验实际资源包，最后切回主线程应用 Trick HUD/Hotbar HUD 运行态并发布 Snapshot。
- * Trick HUD 当前没有独立的运行期 CE 字形资源，因此这里不会臆造 Trick HUD 资源。
+     * <p>保存顺序固定为：主线程确认 CraftEngine 可用并解析覆盖层目录，异步写 config.yml 与
+     * 四层连续 HUD CE 覆盖层，主线程启动 CraftEngine 真实 reload Future，随后异步生成并校验
+     * 实际资源包，最后切回主线程原子标记完整 request 已验证、应用 Trick HUD/Hotbar HUD 运行态并发布 Snapshot。
+
  *
  * <p>HTTP 等待 Future 与 CraftEngine 原始 Future 明确分离：120 秒只让本次 Web 结果超时，
  * 不 cancel 原始 Future，也不释放共享租约。原始重载、生成、校验和迟到的应用链真正结束后
@@ -33,7 +35,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
 
     private final DoudizhuPlugin plugin;
     private final DebugHudConfigController controller;
-    private final HotbarDebugOverlayWriter overlayWriter;
+    private final HudOverlayWriter overlayWriter;
     private final HudResourcePackBridge injectedBridge;
     private final ExecutorService executor;
     private final ScheduledExecutorService timeoutExecutor;
@@ -51,7 +53,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
     HudWebApplyCoordinator(DoudizhuPlugin plugin, DebugHudConfigController controller,
                            HudResourcePackBridge bridge, ExecutorService executor,
                            ScheduledExecutorService timeoutExecutor, HudWebApplyLease lease) {
-        this(plugin, controller, bridge, executor, timeoutExecutor, lease, null);
+        this(plugin, controller, bridge, executor, timeoutExecutor, lease, null,
+            RAW_RESULT_TIMEOUT_SECONDS);
     }
 
     /** 测试可注入主线程执行器；生产构造仍统一切 Bukkit 主线程。 */
@@ -59,9 +62,18 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                            HudResourcePackBridge bridge, ExecutorService executor,
                            ScheduledExecutorService timeoutExecutor, HudWebApplyLease lease,
                            Executor mainExecutor) {
+        this(plugin, controller, bridge, executor, timeoutExecutor, lease, mainExecutor,
+            RAW_RESULT_TIMEOUT_SECONDS);
+    }
+
+    /** 仅测试使用：缩短 raw 结果租约，验证超时后迟到结果不会应用。 */
+    HudWebApplyCoordinator(DoudizhuPlugin plugin, DebugHudConfigController controller,
+                           HudResourcePackBridge bridge, ExecutorService executor,
+                           ScheduledExecutorService timeoutExecutor, HudWebApplyLease lease,
+                           Executor mainExecutor, long timeoutSeconds) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.controller = Objects.requireNonNull(controller, "controller");
-        this.overlayWriter = new HotbarDebugOverlayWriter(plugin);
+        this.overlayWriter = new HudOverlayWriter(plugin);
         this.injectedBridge = bridge;
         this.executor = executor == null ? Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "muz-debug-web-apply");
@@ -84,8 +96,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             String leaseKey = plugin.getDataFolder().toPath().toAbsolutePath().normalize().toString();
             sharedLease = HudWebApplyLease.forKey(leaseKey);
         }
-        this.taskGate = new HudWebApplyTaskGate(sharedLease, this.timeoutExecutor,
-            RAW_RESULT_TIMEOUT_SECONDS);
+        this.taskGate = new HudWebApplyTaskGate(sharedLease, this.timeoutExecutor, timeoutSeconds);
     }
 
     /** 判断保存 patch 是否需要进入资源写入/重载流程；空 patch 只返回当前快照。 */
@@ -140,6 +151,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
 
     private CompletableFuture<ApplyResult> savePipeline(DebugHudConfigController.Patch patch,
                                                           HudWebApplyTaskGate.Task<ApplyResult> task) {
+        java.util.concurrent.atomic.AtomicReference<SaveTransaction> transactionRef =
+            new java.util.concurrent.atomic.AtomicReference<>();
         return resolveOnMainThread(task).thenCompose(resolved -> {
             // 关闭/超时可能发生在前一个主线程阶段完成之后；提交 supplyAsync 前必须再次检查。
             if (!isTaskActive(task)) {
@@ -148,12 +161,19 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             return CompletableFuture.supplyAsync(() -> {
                 try {
                     SaveTransaction transaction = captureTransaction(resolved.configPath(), resolved.root());
+                    transactionRef.set(transaction);
                     DebugHudConfigController.DiskSaveResult disk = taskGate.runIfActive(
                         task,
                         () -> controller.savePatchToDisk(patch),
                         () -> null
                     );
-                    return new DiskStage(transaction, disk);
+                    Boolean writtenConfigExists = Files.isRegularFile(resolved.configPath());
+                    byte[] writtenConfigBytes = writtenConfigExists
+                        ? Files.readAllBytes(resolved.configPath()) : new byte[0];
+                    SaveTransaction committed = transaction.withExpectedConfigState(
+                        writtenConfigExists, writtenConfigBytes);
+                    transactionRef.set(committed);
+                    return new DiskStage(committed, disk);
                 } catch (java.io.IOException exception) {
                     throw new java.util.concurrent.CompletionException(exception);
                 }
@@ -163,22 +183,23 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                 }
                 DebugHudConfigController.DiskSaveResult disk = stage.disk();
                 if (!disk.ok()) {
-                    return CompletableFuture.completedFuture(ApplyResult.failed(
-                        controller.snapshot(), disk.messages()));
+                    String detail = disk.messages().isEmpty()
+                        ? "保存 config.yml 失败。" : String.join("；", disk.messages());
+                    return rollbackAndFailure(task, stage.transaction(), detail + " 已回滚可安全回滚的 HUD 配置与全部 HUD 覆盖层；检测到并发修改时保留其它配置。");
                 }
                 SaveTransaction transaction = stage.transaction();
-                // 当前 HUD 没有独立的 Trick HUD CE 字形资源；每次保存统一写当前 hotbar overlay。
-                return overlayWriter.writeAsync(resolved.root(), disk.offsetY(), disk.hotbarScale(), executor,
+                HudResourceRequest request = disk.resources();
+                return overlayWriter.writeAsync(resolved.root(), request, executor,
                         () -> isTaskActive(task))
                     .thenCompose(written -> {
                         if (!isTaskActive(task)) {
-                            return rollbackAndFailure(transaction, "任务已失效，已回滚配置与 hotbar 覆盖层。");
+                            return rollbackAndFailure(task, transaction, "任务已失效，已回滚配置与 hotbar 覆盖层。");
                         }
                         if (!written) {
-                            return rollbackAndFailure(transaction,
+                            return rollbackAndFailure(task, transaction,
                                 "写出当前 hotbar 调试覆盖层失败，已回滚配置，未触发 CraftEngine 重载。");
                         }
-                        return resourceAndApply(resolved.bridge(), disk.offsetY(), disk.hotbarScale(),
+                        return resourceAndApply(resolved.bridge(), request,
                             disk.appliedKeys(), disk.messages(), task)
                             .handle((result, failure) -> {
                                 if (failure == null && result != null && result.ok()) {
@@ -187,85 +208,155 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                                 String detail = failure == null
                                     ? (result == null ? "资源同步返回空结果。" : String.join("；", result.messages()))
                                     : "CraftEngine 资源同步失败：" + failure.getMessage();
-                                return rollbackAndFailure(transaction, detail + " 已回滚配置与 hotbar 覆盖层。");
+                                return rollbackAndFailure(task, transaction, detail + " 已回滚配置与 hotbar 覆盖层。");
                             }).thenCompose(future -> future);
                     });
             });
-        }).exceptionally(this::failedFromThrowable);
+        }).exceptionallyCompose(failure -> {
+            SaveTransaction transaction = transactionRef.get();
+            if (transaction == null) {
+                return CompletableFuture.completedFuture(failedFromThrowable(failure));
+            }
+            return rollbackAndFailure(task, transaction,
+                "HUD 保存流程异常：" + rootCauseMessage(failure) + " 已回滚配置与全部 HUD 覆盖层。");
+        });
     }
 
     private SaveTransaction captureTransaction(Path configPath, Path overlayRoot) throws java.io.IOException {
         boolean configExists = Files.isRegularFile(configPath);
         byte[] configBytes = configExists ? Files.readAllBytes(configPath) : new byte[0];
-        return new SaveTransaction(configPath, configExists, configBytes,
-            overlayRoot, overlayWriter.capture(overlayRoot));
+        Map<String, Object> configRoot;
+        HudResourceRequest previousRequest = plugin.getHudOverlayRuntimeState() == null
+            ? null : plugin.getHudOverlayRuntimeState().verifiedRequest();
+        synchronized (plugin.hudWebConfigLock()) {
+            configRoot = deepCopyRoot(plugin.yamlConfig().rawRoot());
+        }
+        return new SaveTransaction(configPath, configExists, configBytes, configRoot, previousRequest,
+            overlayRoot, overlayWriter.capture(overlayRoot), null, null);
     }
 
-    private CompletableFuture<ApplyResult> rollbackAndFailure(SaveTransaction transaction, String detail) {
-        return CompletableFuture.supplyAsync(() -> {
+    private static void restoreConfigBytes(Path path, byte[] bytes) throws java.io.IOException {
+        Files.createDirectories(path.getParent());
+        Path temp = Files.createTempFile(path.getParent(), "config.yml.rollback.", ".tmp");
+        try {
+            Files.write(temp, bytes);
             try {
-                if (transaction.configExists()) {
-                    Files.createDirectories(transaction.configPath().getParent());
-                    Path temp = Files.createTempFile(transaction.configPath().getParent(), "config.yml.rollback.", ".tmp");
-                    try {
-                        Files.write(temp, transaction.configBytes());
-                        try {
-                            Files.move(temp, transaction.configPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                        } catch (java.nio.file.AtomicMoveNotSupportedException exception) {
-                            Files.move(temp, transaction.configPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(temp, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException exception) {
+                Files.move(temp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private CompletableFuture<ApplyResult> rollbackAndFailure(
+        HudWebApplyTaskGate.Task<ApplyResult> task, SaveTransaction transaction, String detail) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                Boolean expectedExists = transaction.expectedConfigExists();
+                byte[] expected = transaction.expectedConfigBytes();
+                if (expectedExists != null) {
+                    boolean currentExists = Files.isRegularFile(transaction.configPath());
+                    byte[] current = currentExists ? Files.readAllBytes(transaction.configPath()) : new byte[0];
+                    if (expectedExists == currentExists
+                        && (!currentExists || java.util.Arrays.equals(expected, current))) {
+                        if (transaction.configExists()) {
+                            restoreConfigBytes(transaction.configPath(), transaction.configBytes());
+                        } else {
+                            Files.deleteIfExists(transaction.configPath());
                         }
-                    } finally {
-                        Files.deleteIfExists(temp);
+                        controller.restoreWebFieldsInMemory(transaction.configRoot());
+                    } else {
+                        plugin.getLogger().warning("HUD 失败回滚检测到 config.yml 已被其它入口修改，保留非 Web 配置并跳过整文件覆盖。");
                     }
                 } else {
-                    Files.deleteIfExists(transaction.configPath());
+                    // 磁盘重载未写 config.yml；失败时不回写旧整棵 root，避免抹掉并发配置变更。
+                    plugin.getLogger().info("HUD 磁盘重载失败，未回写 config.yml，仅恢复自有 overlay 并清除 ready。");
                 }
                 overlayWriter.restore(transaction.overlayRoot(), transaction.overlayState());
-                controller.reloadFromDiskForWeb();
-                return ApplyResult.failed(controller.snapshot(), List.of(detail));
             } catch (Exception rollbackFailure) {
-                String message = detail + " 但补偿失败：" + rollbackFailure.getMessage();
-                plugin.getLogger().warning(message);
-                return ApplyResult.failed(controller.snapshot(), List.of(message));
+                throw new java.util.concurrent.CompletionException(rollbackFailure);
             }
-        }, executor);
+        }, executor).thenCompose(ignored -> {
+            // 失活后的磁盘补偿仍须完成，但停服后不能再依赖一个可能永远不执行的主线程任务。
+            if (!isTaskActive(task)) {
+                return CompletableFuture.completedFuture(inactiveResult("任务已失效，迟到回滚结果未应用。"));
+            }
+            return runOnMain(() -> taskGate.runIfActiveAtomically(
+            task,
+            () -> {
+                // 失败可能发生在 CraftEngine reload/generate/ZIP 校验之后，磁盘回滚不等于
+                // CE 内存内容已恢复。旧 request 不能重新标记 ready，否则运行态会继续渲染
+                // 与客户端/CE 实际内容不一致的字形；必须等下一次完整校验成功后再 ready。
+                plugin.getHudOverlayRuntimeState().clear();
+                plugin.setHotbarOverlayReady(false);
+                plugin.applyHudRuntimeStateFromWeb();
+                return ApplyResult.failed(controller.snapshot(), List.of(detail));
+            },
+            () -> inactiveResult("任务已失效，迟到回滚结果未应用。")
+            ));
+        }).exceptionally(failure -> {
+            String message = detail + " 但补偿失败：" + rootCauseMessage(failure);
+            plugin.getLogger().warning(message);
+            return ApplyResult.failed(controller.snapshot(), List.of(message));
+        });
     }
 
     private CompletableFuture<ApplyResult> reloadPipeline(HudWebApplyTaskGate.Task<ApplyResult> task) {
+        java.util.concurrent.atomic.AtomicReference<SaveTransaction> transactionRef =
+            new java.util.concurrent.atomic.AtomicReference<>();
         return resolveOnMainThread(task).thenCompose(resolved -> {
             if (!isTaskActive(task)) {
                 return CompletableFuture.completedFuture(inactiveResult("未重载配置。"));
             }
             return CompletableFuture.supplyAsync(() -> {
-                if (!isTaskActive(task)) {
-                    return null;
-                }
-                // 保留 reloadFromDiskForWeb() 这个旧调用入口；scale 在同一配置锁边界内读取。
-                int offsetY = controller.reloadFromDiskForWeb();
-                int hotbarScale = controller.hotbarScaleForWeb();
-                return new RuntimeValues(offsetY, hotbarScale);
-            }, executor)
-                .thenCompose(values -> {
-                    if (values == null || !isTaskActive(task)) {
-                        return CompletableFuture.completedFuture(inactiveResult("未写入 hotbar 覆盖层。"));
+                try {
+                    SaveTransaction transaction = captureTransaction(resolved.configPath(), resolved.root());
+                    transactionRef.set(transaction);
+                    if (!isTaskActive(task)) {
+                        return new ReloadStage(transaction, null);
                     }
-                    return overlayWriter.writeAsync(resolved.root(), values.offsetY(), values.hotbarScale(), executor,
-                            () -> isTaskActive(task))
-                        .thenCompose(written -> {
-                            if (!isTaskActive(task)) {
-                                return CompletableFuture.completedFuture(inactiveResult(
-                                    "未写入 hotbar 覆盖层，也未启动 CraftEngine 重载。"));
+                    HudResourceRequest request = controller.reloadResourcesFromDiskForWeb();
+                    return new ReloadStage(transaction, request);
+                } catch (java.io.IOException exception) {
+                    throw new java.util.concurrent.CompletionException(exception);
+                }
+            }, executor).thenCompose(stage -> {
+                if (stage == null || stage.request() == null || !isTaskActive(task)) {
+                    return CompletableFuture.completedFuture(inactiveResult("未写入连续 HUD 覆盖层。"));
+                }
+                HudResourceRequest request = stage.request();
+                return overlayWriter.writeAsync(resolved.root(), request, executor,
+                        () -> isTaskActive(task)).thenCompose(written -> {
+                    if (!isTaskActive(task)) {
+                        return rollbackAndFailure(task, stage.transaction(), "任务已失效，已恢复运行态配置与全部 HUD 覆盖层。");
+                    }
+                    if (!written) {
+                        return rollbackAndFailure(task, stage.transaction(), "写出连续 HUD 覆盖层失败，未触发 CraftEngine 重载。");
+                    }
+                    return resourceAndApply(resolved.bridge(), request, List.of(),
+                        List.of("已从磁盘重新读取 HUD 配置。"), task)
+                        .handle((result, failure) -> {
+                            if (failure == null && result != null && result.ok()) {
+                                return CompletableFuture.completedFuture(result);
                             }
-                            if (!written) {
-                                return CompletableFuture.completedFuture(ApplyResult.failed(controller.snapshot(),
-                                    List.of("写出当前 hotbar 调试覆盖层失败，未触发 CraftEngine 重载。")));
-                            }
-                            return resourceAndApply(resolved.bridge(), values.offsetY(), values.hotbarScale(),
-                                List.of(), List.of("已从磁盘重新读取 HUD 配置。"), task);
-                        });
+                            String detail = failure == null
+                                ? (result == null ? "资源同步返回空结果。" : String.join("；", result.messages()))
+                                : "CraftEngine 资源同步失败：" + failure.getMessage();
+                            return rollbackAndFailure(task, stage.transaction(), detail + " 已恢复运行态配置与全部 HUD 覆盖层。");
+                        }).thenCompose(future -> future);
                 });
-        }).exceptionally(this::failedFromThrowable);
+            });
+        }).exceptionallyCompose(failure -> {
+            SaveTransaction transaction = transactionRef.get();
+            if (transaction == null) {
+                return CompletableFuture.completedFuture(failedFromThrowable(failure));
+            }
+            return rollbackAndFailure(task, transaction,
+                "HUD 磁盘重载流程异常：" + rootCauseMessage(failure) + " 已恢复配置与全部 HUD 覆盖层。");
+        });
     }
 
     private CompletableFuture<Resolved> resolveOnMainThread(HudWebApplyTaskGate.Task<ApplyResult> task) {
@@ -309,37 +400,43 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
         }
     }
 
-    private CompletableFuture<ApplyResult> resourceAndApply(HudResourcePackBridge selected, int offsetY,
-                                                              int hotbarScale, List<String> appliedKeys,
+    private CompletableFuture<ApplyResult> resourceAndApply(HudResourcePackBridge selected,
+                                                              HudResourceRequest request,
+                                                              List<String> appliedKeys,
                                                               List<String> messages,
                                                               HudWebApplyTaskGate.Task<ApplyResult> task) {
         CompletableFuture<CompletableFuture<Void>> started = runOnMain(() -> {
             if (!isTaskActive(task)) {
                 throw new IllegalStateException("HUD 资源任务已失效，未启动 CraftEngine 重载。");
             }
-            // 本次 overlay 尚未完成真实重载与 ZIP 校验，先撤销旧的 ready 声明；失败时绝不虚报成功。
+            // 四层 overlay 尚未完成真实重载、生成和校验，先清除统一 ready；失败时绝不虚报成功。
+            plugin.getHudOverlayRuntimeState().clear();
             plugin.setHotbarOverlayReady(false);
-            return selected.reloadGenerateAndVerify(offsetY, hotbarScale, executor, mainExecutor);
+            return selected.reloadGenerateAndVerify(request, executor, mainExecutor);
         });
         return started.thenCompose(resource -> {
             if (resource == null) {
                 return failedFuture(new IllegalStateException("CraftEngine 资源任务返回空 Future。"));
             }
             return resource;
-        }).thenCompose(ignored -> applyOnMain(hotbarScale, appliedKeys, messages, task));
+        }).thenCompose(ignored -> selected.loadVerifiedHotbarFontMetrics(request, executor))
+            .thenCompose(metrics -> applyOnMain(request, metrics, appliedKeys, messages, task));
     }
 
-    private CompletableFuture<ApplyResult> applyOnMain(int hotbarScale, List<String> appliedKeys,
+    private CompletableFuture<ApplyResult> applyOnMain(HudResourceRequest request,
+                                                        linmumua.doudizhu.assets.HotbarFontMetrics metrics,
+                                                        List<String> appliedKeys,
                                                         List<String> messages,
                                                         HudWebApplyTaskGate.Task<ApplyResult> task) {
         return runOnMain(() -> taskGate.runIfActiveAtomically(
             task,
             () -> {
-                // 到这里才表示真实 CE reload/generate/ZIP 校验全链路成功；无客户端回执仍不宣称客户端已应用。
-                plugin.setHotbarOverlayReady(true, hotbarScale);
+                // 到这里才表示四层 CE reload/generate/ZIP 校验和字体快照加载已结束；无客户端回执仍不宣称客户端已应用。
+                plugin.getHudOverlayRuntimeState().markVerified(request, metrics);
+                plugin.setHotbarOverlayReady(true, request.hotbarScale());
                 plugin.applyHudRuntimeStateFromWeb();
                 List<String> resultMessages = new ArrayList<>(messages);
-                resultMessages.add("服务端资源包内容已校验；CraftEngine 自动上传结果未确认，客户端待重新下载。");
+                resultMessages.add("服务端四层资源包内容已校验；CraftEngine 自动上传结果未确认，客户端待重新下载。");
                 return ApplyResult.success(controller.snapshot(), appliedKeys, resultMessages);
             },
             () -> inactiveResult("未应用 HUD 运行态，也未发布旧 Snapshot。")
@@ -408,6 +505,17 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
         return ApplyResult.failed(controller.snapshot(), List.of(detail));
     }
 
+    private static String rootCauseMessage(Throwable failure) {
+        Throwable cause = failure;
+        while ((cause instanceof java.util.concurrent.CompletionException
+            || cause instanceof java.util.concurrent.ExecutionException)
+            && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+    }
+
     private ApplyResult inactiveResult(String detail) {
         return ApplyResult.failed(controller.snapshot(), List.of("Debug Web HUD " + detail));
     }
@@ -420,6 +528,22 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
         CompletableFuture<T> failed = new CompletableFuture<>();
         failed.completeExceptionally(throwable);
         return failed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> deepCopyRoot(Map<String, Object> source) {
+        java.util.LinkedHashMap<String, Object> copy = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof Map<?, ?> map) {
+                copy.put(entry.getKey(), deepCopyRoot((Map<String, Object>) map));
+            } else if (value instanceof List<?> list) {
+                copy.put(entry.getKey(), new ArrayList<>(list));
+            } else {
+                copy.put(entry.getKey(), value);
+            }
+        }
+        return copy;
     }
 
     private void shutdownIfClosed() {
@@ -439,6 +563,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             }
             closed = true;
             taskGate.close();
+            plugin.getHudOverlayRuntimeState().clear();
+            plugin.setHotbarOverlayReady(false);
             // 不释放当前租约：CraftEngine 原始 Future 可能仍在生成/校验，迟到回调必须被挡住。
             // raw Future 完成后 shutdownIfClosed 才会释放执行器；未启动本实例任务时可立即停止。
             // 这里必须检查本实例的 task，而不是共享 lease：其它 Web 实例的任务不能阻止本实例收尾。
@@ -453,22 +579,45 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
 
     private record Resolved(Path root, Path configPath, HudResourcePackBridge bridge) {}
 
-    private record RuntimeValues(int offsetY, int hotbarScale) {}
-
     private record SaveTransaction(Path configPath, boolean configExists, byte[] configBytes,
-                                   Path overlayRoot,
-                                   HotbarDebugOverlayWriter.OverlayFileState overlayState) {
+                                   Map<String, Object> configRoot, HudResourceRequest previousRequest,
+                                   Path overlayRoot, HudOverlayWriter.OverlayState overlayState,
+                                   Boolean expectedConfigExists, byte[] expectedConfigBytes) {
         private SaveTransaction {
             configBytes = configBytes.clone();
+            configRoot = deepCopyRoot(configRoot);
+            expectedConfigBytes = expectedConfigBytes == null ? null : expectedConfigBytes.clone();
+        }
+
+        private SaveTransaction withExpectedConfigState(Boolean exists, byte[] bytes) {
+            return new SaveTransaction(configPath, configExists, configBytes, configRoot, previousRequest,
+                overlayRoot, overlayState, exists, bytes);
         }
 
         @Override
         public byte[] configBytes() {
             return configBytes.clone();
         }
+
+        @Override
+        public Boolean expectedConfigExists() {
+            return expectedConfigExists;
+        }
+
+        @Override
+        public byte[] expectedConfigBytes() {
+            return expectedConfigBytes == null ? null : expectedConfigBytes.clone();
+        }
+
+        @Override
+        public Map<String, Object> configRoot() {
+            return deepCopyRoot(configRoot);
+        }
     }
 
     private record DiskStage(SaveTransaction transaction, DebugHudConfigController.DiskSaveResult disk) {}
+
+    private record ReloadStage(SaveTransaction transaction, HudResourceRequest request) {}
 
     public record ApplyResult(boolean ok, DebugHudConfigController.Snapshot snapshot,
                               List<String> appliedKeys, List<String> messages) {

@@ -1,5 +1,7 @@
 package linmumua.doudizhu.compat;
 
+import linmumua.doudizhu.assets.HudResourceRequest;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +33,24 @@ final class HudResourcePackSync {
     ) {
         return run(reload, generate, generatedPack, uploadPack, verifier, offsetY, 100,
             ioExecutor, mainExecutor);
+    }
+
+    /** 四层连续 HUD 请求入口；重载、生成、路径一致性与异步时序仍复用同一核心链。 */
+    static CompletableFuture<Void> run(
+        ReloadOperation reload,
+        GenerateOperation generate,
+        PathSupplier generatedPack,
+        PathSupplier uploadPack,
+        RequestVerifier verifier,
+        HudResourceRequest request,
+        Executor ioExecutor,
+        Executor mainExecutor
+    ) {
+        Objects.requireNonNull(verifier, "verifier");
+        Objects.requireNonNull(request, "request");
+        Verifier adapter = (path, ignoredOffsetY) -> verifier.verify(path, request);
+        return run(reload, generate, generatedPack, uploadPack, adapter,
+            request.hotbarOffsetY(), request.hotbarScale(), ioExecutor, mainExecutor);
     }
 
     static CompletableFuture<Void> run(
@@ -92,6 +112,23 @@ final class HudResourcePackSync {
     static void verifyGeneratedAndUploaded(Path generated, Path upload, Verifier verifier, int offsetY)
         throws IOException {
         verifyGeneratedAndUploaded(generated, upload, verifier, offsetY, 100);
+    }
+
+    static void verifyGeneratedAndUploaded(Path generated, Path upload,
+                                           RequestVerifier verifier, HudResourceRequest request)
+        throws IOException {
+        Objects.requireNonNull(verifier, "verifier");
+        Objects.requireNonNull(request, "request");
+        Path generatedFile = requireRegularFile(generated, "CraftEngine 生成资源包");
+        Path uploadFile = requireRegularFile(upload, "CraftEngine 上传资源包");
+        verifier.verify(generatedFile, request);
+        if (!samePath(generatedFile, uploadFile)) {
+            if (Files.mismatch(generatedFile, uploadFile) != -1L) {
+                throw new IOException("生成资源包与上传资源包内容不一致："
+                    + generatedFile + " != " + uploadFile);
+            }
+            verifier.verify(uploadFile, request);
+        }
     }
 
     static void verifyGeneratedAndUploaded(Path generated, Path upload, Verifier verifier, int offsetY,
@@ -160,6 +197,11 @@ final class HudResourcePackSync {
         default void verify(Path packPath, int offsetY, int hotbarScale) throws IOException {
             verify(packPath, offsetY);
         }
+    }
+
+    @FunctionalInterface
+    interface RequestVerifier {
+        void verify(Path packPath, HudResourceRequest request) throws IOException;
     }
 
     record ReloadResult(boolean success, String detail) {

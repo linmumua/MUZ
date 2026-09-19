@@ -78,6 +78,62 @@ class TableStatusViewsActionBarTest {
     }
 
     @Test
+    void dealingPhaseNeverFallsThroughToTurnPrompt() {
+        Component line = TableStatusViews.persistentActionBar(
+            GamePhase.DEALING,
+            VIEWER,
+            TURN,
+            false,
+            1,
+            0,
+            0,
+            id -> Component.text("普通身份"),
+            id -> Component.text("当前出牌 · NativeProbe"),
+            Component.empty(),
+            20
+        );
+
+        assertEquals("正在发牌，请稍候。", PLAIN.serialize(line));
+    }
+
+    @Test
+    void revealingPhaseOnlyAdvertisesRevealWindow() {
+        Component line = TableStatusViews.persistentActionBar(
+            GamePhase.REVEALING,
+            VIEWER,
+            TURN,
+            false,
+            1,
+            0,
+            0,
+            id -> Component.text("普通身份"),
+            id -> Component.text("当前出牌 · NativeProbe"),
+            Component.empty(),
+            20
+        );
+
+        String plain = PLAIN.serialize(line);
+        assertEquals("明牌窗口：自愿明牌（整局最多 ×2）。", plain);
+        assertFalse(plain.contains("底牌"));
+        assertFalse(plain.contains("已选"));
+    }
+
+    @Test
+    void publicRevealMultiplierIsExplainedInLiveAndSettlementViews() {
+        String text = TableStatusViews.multiplierStatusText(
+            GamePhase.PLAYING, 3, TURN, 4, 2, 0, 2, 1, "x24");
+        String rich = PLAIN.serialize(TableStatusViews.multiplierStatusComponent(
+            GamePhase.PLAYING, 3, TURN, 4, 2, 0, 2, 1, "x24"));
+        String summary = PLAIN.serialize(new RoundSettlementView(
+            true, 24, 3, 4, 2, 0, 2, 1, false, "", "x24").summary(Component.text("胜者")));
+        assertTrue(text.contains("明牌 x2"));
+        assertTrue(rich.contains("明牌") && rich.contains("x2"));
+        assertTrue(summary.contains("明牌") && summary.contains("x2"));
+        assertTrue(summary.contains("x24"), "明牌来源和实际结算核心倍率必须一起可见");
+        assertFalse(text.contains("2 次"), "公共倍率不能描述成每人两次明牌");
+    }
+
+    @Test
     void botThinkingKeepsTextIdentityAndSkipsPlayerHeadRenderer() {
         Component line = TableStatusViews.persistentActionBar(
             GamePhase.PLAYING,

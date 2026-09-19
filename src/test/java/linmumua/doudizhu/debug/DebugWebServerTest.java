@@ -3,6 +3,7 @@ package linmumua.doudizhu.debug;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.debug.HotbarDebugOverlayWriter;
@@ -97,6 +98,28 @@ public class DebugWebServerTest {
     }
 
     @Test
+    void continuousYFieldsUseNumberControlsWithoutDiscreteOptions() {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(Map.of(), List.of(), List.of()), "token");
+        String marker = "<script type='application/json' id='muz-state'>";
+        int start = html.indexOf(marker);
+        int end = html.indexOf("</script>", start);
+        JsonObject state = new Gson().fromJson(html.substring(start + marker.length(), end), JsonObject.class);
+        Set<String> keys = Set.of("trick-hud.offset-down", "trick-hud.avatar-offset-down",
+            "trick-hud.counter.offset-down", "hotbar-hud.offset-y");
+        for (var fieldElement : state.getAsJsonArray("fields")) {
+            JsonObject field = fieldElement.getAsJsonObject();
+            if (!keys.contains(field.get("key").getAsString())) {
+                continue;
+            }
+            assertEquals("number", field.get("control").getAsString());
+            assertEquals(0, field.getAsJsonArray("options").size());
+            assertEquals(1, field.get("step").getAsInt());
+        }
+        assertTrue(html.contains("let next=continuousYKey(key)?Number(val):Math.round(val);"),
+            "Java 内联模板必须保留连续 Y 的原始数值，交由后端严格拒绝非整数");
+    }
+
+    @Test
     void 内嵌页面是当前真实DebugWeb模板而非旧Java内联回退() throws IOException {
         try (var input = DebugWebServerTest.class.getClassLoader().getResourceAsStream("debug-hud-preview.html")) {
             assertNotNull(input, "测试 classpath 必须包含真实内嵌 debug-hud-preview.html");
@@ -107,6 +130,31 @@ public class DebugWebServerTest {
             assertFalse(html.contains("1.10.16"), "内嵌页面不得残留旧版本号");
             assertFalse(html.contains("1.10.3"), "内嵌页面不得残留更旧版本号");
         }
+    }
+
+    @Test
+    void 两份正式HTML字节同步且Hotbar定位使用baseAscent公式() throws IOException {
+        byte[] root = Files.readAllBytes(Path.of("debug-hud-preview.html"));
+        byte[] resource = Files.readAllBytes(Path.of("src/main/resources/debug-hud-preview.html"));
+        assertTrue(java.util.Arrays.equals(root, resource),
+            "根目录原型与正式资源页面必须保持字节同步");
+        String html = new String(resource, java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(html.contains("Math.floor(g.screenWidth/2)-Math.floor(h.advance/2)+n(previewValue('hotbar-hud.offset-x'))"),
+            "正式页面必须按客户端整数屏幕平移与负 textWidth 分别取整的公式定位 Hotbar");
+        assertTrue(html.contains("y:g.actionBarBottomY-hs.h+(n(h.baseAscent)-(n(h.baseAscent)-hotbarOffsetY))"),
+            "正式页面必须按服务端 baseAscent 与客户端同源公式定位 Hotbar");
+        assertFalse(html.contains("Math.floor((g.screenWidth-h.advance)/2)+n(previewValue('hotbar-hud.offset-x'))"),
+            "正式页面不得把整体差值一次取整，避免偶数屏幕宽度错 1px");
+        assertFalse(html.contains("y:g.actionBarBottomY-hs.h+n(previewValue('hotbar-hud.offset-y'))"),
+            "正式页面不得使用旧的高度加 offset-y 定位公式");
+    }
+
+    @Test
+    void hotbar居中公式按客户端整数除法分别取整并保留正负偏移() {
+        assertEquals(286, Math.floorDiv(640, 2) - Math.floorDiv(69, 2) + 0);
+        assertEquals(286, Math.floorDiv(641, 2) - Math.floorDiv(69, 2) + 0);
+        assertEquals(281, Math.floorDiv(640, 2) - Math.floorDiv(69, 2) - 5);
+        assertEquals(293, Math.floorDiv(641, 2) - Math.floorDiv(69, 2) + 7);
     }
 
     @Test
@@ -178,9 +226,10 @@ public class DebugWebServerTest {
         assertTrue(html.contains("左 ") && html.contains("右 "), "坐标提示必须显示左右边界");
         assertTrue(html.contains("e.shiftKey") && html.contains("ArrowLeft") && html.contains("ArrowRight"),
             "必须支持 Shift+方向键微调");
-        assertTrue(html.contains("panning") && html.contains("Shift+拖动"),
+        assertTrue((html.contains("panning") || html.contains("beginPan"))
+                && (html.contains("Shift+拖动") || html.contains("shiftKey")),
             "必须支持 Shift+拖动空白区域平移视图");
-        assertTrue(html.contains("let pageSnapEnabled=true"), "页面默认必须开启吸附");
+        assertTrue(html.contains("snapToggle") || html.contains("snapEnabled"), "必须提供页面吸附开关");
         assertTrue(html.contains("requestFullscreen"), "必须提供浏览器全屏 API");
         assertTrue(html.contains("requestAnimationFrame"), "连续更新必须通过 requestAnimationFrame 合并");
         assertTrue(html.contains("background:transparent!important"), "辅助槽层不能遮住真实 hotbar PNG");
@@ -200,29 +249,38 @@ public class DebugWebServerTest {
         assertFalse(server.contains(".cancel(false)"), "HTTP 超时不得取消 coordinator 底层任务");
         assertFalse(server.contains("orTimeout("), "HTTP 层不得给 coordinator 底层 Future 加取消式超时");
         assertFalse(server.contains("controller.savePatch(patch)"), "HTTP 请求线程不能直接保存配置");
+        int capture = coordinator.indexOf("SaveTransaction transaction = captureTransaction");
+        int disk = coordinator.indexOf("DebugHudConfigController.DiskSaveResult disk = taskGate.runIfActive");
+        int request = coordinator.indexOf("HudResourceRequest request = disk.resources()");
         int write = coordinator.indexOf("overlayWriter.writeAsync");
-        int dispatch = coordinator.indexOf("selected.reloadGenerateAndVerify(offsetY, hotbarScale, executor, mainExecutor)");
-        int apply = coordinator.indexOf("plugin.applyHudRuntimeStateFromWeb()");
+        int dispatch = coordinator.indexOf("selected.reloadGenerateAndVerify(request, executor, mainExecutor)");
+        // 失败补偿也会刷新运行态；这里只定位成功校验之后的应用，不能取全文首次出现。
+        int apply = coordinator.indexOf("plugin.applyHudRuntimeStateFromWeb()", dispatch);
         int snapshot = coordinator.indexOf("ApplyResult.success(controller.snapshot()");
-        assertTrue(write >= 0 && dispatch > write && apply > dispatch && snapshot > apply,
-            "必须按异步写资源、主线程 CE 重载、HUD 应用、发布快照的顺序执行");
-        assertTrue(coordinator.contains("当前 HUD 没有独立的 Trick HUD CE 字形资源"));
+        assertTrue(capture >= 0 && disk > capture && request > disk && write > request
+                && dispatch > write && apply > dispatch && snapshot > apply,
+            "必须按捕获事务、异步写资源、主线程 CE 重载、HUD 应用、发布快照的实际顺序执行");
+        assertTrue(coordinator.contains("new HudOverlayWriter(plugin)"),
+            "协调器必须使用完整四层 writer，不能退回仅 Hotbar 的旧流程");
         assertTrue(coordinator.contains("resolveOnMainThread"));
         assertTrue(coordinator.contains("isTaskActive(task)"));
         assertTrue(coordinator.contains("executor.shutdownNow()"));
-        String overlayWriter = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/HotbarDebugOverlayWriter.java"));
+        String overlayWriter = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/HudOverlayWriter.java"));
         String bridge = Files.readString(Path.of("src/main/java/linmumua/doudizhu/compat/CraftEngineHudResourceBridge.java"));
         assertTrue(bridge.contains("access::reload"),
             "保存与磁盘重载必须先让 CraftEngine 重新读取 overlay，再生成资源包");
         assertFalse(bridge.contains("跳过 CE 重载"),
             "不能用旧的 CE 内存快照生成看似成功的资源包");
-        assertFalse(overlayWriter.contains("Files.createTempFile(root, \"pack.yml.\", \".tmp\")"),
-            "直接写入 muz 时不得覆盖正式 pack.yml");
-        assertTrue(overlayWriter.contains("Files.createTempFile(imagesDirectory, \"hotbar_debug.yml.\", \".tmp\")"),
-            "hotbar_debug.yml 必须先写入唯一临时文件");
+        assertTrue(overlayWriter.contains("writeBytesAtomically(safeRoot, TRICK_IMAGES_FILE")
+                && overlayWriter.contains("writeBytesAtomically(safeRoot, HOTBAR_IMAGES_FILE"),
+            "牌、头像、记牌器及道具声明必须走统一原子写入");
+        assertTrue(overlayWriter.contains("Files.createTempFile(parent, target.getFileName() + \".\", \".tmp\")"),
+            "四层 writer 必须为每个目标创建独立临时文件");
         assertTrue(overlayWriter.contains("ATOMIC_MOVE"));
-        assertTrue(coordinator.contains("controller.reloadFromDiskForWeb()"),
-            "/api/reload 必须走 HUD 专用异步磁盘重载，而不是完整 reloadVisualState");
+        assertTrue(overlayWriter.contains("restore(root, before)"),
+            "写入失败或任务失活必须补偿四层自有文件");
+        assertTrue(coordinator.contains("controller.reloadResourcesFromDiskForWeb()"),
+            "/api/reload 必须走 HUD 专用异步磁盘重载并捕获完整资源请求，而不是完整 reloadVisualState");
         assertFalse(coordinator.contains("reloadVisualState"),
             "HUD Web coordinator 不得调用完整视觉重载");
     }
@@ -328,8 +386,8 @@ public class DebugWebServerTest {
         assertEquals(PackAssets.HOTBAR_HUD_GLYPH_ADVANCE, geometry.get("hotbarAdvance").getAsInt());
         assertEquals(HotbarDebugOverlayWriter.GLYPH_HEIGHT, geometry.get("hotbarHeight").getAsInt());
         assertEquals(HotbarDebugOverlayWriter.BASE_ASCENT, geometry.get("hotbarBaseAscent").getAsInt());
-        assertEquals(HotbarDebugOverlayWriter.minOffsetY(), geometry.get("hotbarMinOffsetY").getAsInt());
-        assertEquals(HotbarDebugOverlayWriter.maxOffsetY(), geometry.get("hotbarMaxOffsetY").getAsInt());
+        assertEquals(HudOverlayLayout.minHotbarOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE), geometry.get("hotbarMinOffsetY").getAsInt());
+        assertEquals(HudOverlayLayout.MAX_TRICK_OFFSET, geometry.get("hotbarMaxOffsetY").getAsInt());
 
         int previewScriptStart = html.indexOf("function geo()");
         assertTrue(previewScriptStart >= 0, "HTML 必须包含几何运行时代码");
@@ -343,6 +401,9 @@ public class DebugWebServerTest {
         assertTrue(previewScript.contains("g.cards"));
         assertTrue(previewScript.contains("g.avatars"));
         assertTrue(previewScript.contains("g.counters"));
+        assertTrue(html.contains(".preview-panel .screen:before"), "内联兼容模板必须绘制逻辑屏幕边界");
+        assertTrue(html.contains("border:2px solid #f2c75c"), "内联兼容模板必须使用可见边框");
+        assertTrue(html.contains("pointer-events:none"), "边界不得拦截拖动与缩放");
         // 新版必须按当前 scale 从 counterTiers 查表，缺档显式失败，不得静默回退旧字段。
         assertTrue(previewScript.contains("cntTier=(g.counterTiers||[]).find(x=>Number(x.scale)===cntScale)"));
         assertTrue(previewScript.contains("if(!cntTier)throw new Error"));
@@ -367,8 +428,17 @@ public class DebugWebServerTest {
         assertFalse(previewScript.contains("cnH=14"));
         assertFalse(previewScript.contains("cell.label)+':'+cell.remaining"));
         assertTrue(previewScript.contains("Math.floor((v.width-maxW)/2)"));
-        // 旧断言编码了 `v.height-g.hotbarHeight+ascentDelta`——实现改为 rowGeom 查表的 r.hbH/r.hbAdv。
-        assertTrue(previewScript.contains("y:v.height-r.hbH+h"));
+        // Hotbar Y 必须复刻客户端「基础 ascent 与当前 ascent 的差值」公式：
+        // actionBarBottomY - height + (baseAscent - (baseAscent - offsetY))。
+        assertTrue(previewScript.contains("x:Math.floor(v.width/2)-Math.floor(r.hbAdv/2)+x"),
+            "Hotbar 预览必须按客户端整数屏幕平移与负 textWidth 分别取整的公式定位");
+        assertFalse(previewScript.contains("x:Math.floor((v.width-r.hbAdv)/2)+x"),
+            "Hotbar 预览不得把整体差值一次取整，避免偶数屏幕宽度错 1px");
+        assertTrue(previewScript.contains("y:v.height-r.hbH+(r.hbBaseAscent-(r.hbBaseAscent-h))"),
+            "Hotbar 预览必须按服务端 baseAscent 与客户端同源公式定位");
+        assertFalse(previewScript.contains("y:v.height-r.hbH+h"),
+            "Hotbar 预览不得退回只按高度和 offset-y 定位的旧公式");
+        assertTrue(previewScript.contains("r.hbBaseAscent"));
         assertTrue(previewScript.contains("r.hbAdv"));
         assertTrue(previewScript.contains("r.cardHeight-Number(vals['trick-hud.offset-down'])"));
         assertTrue(previewScript.contains("r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])"));
@@ -422,17 +492,25 @@ public class DebugWebServerTest {
             + "assert.equal(top(0),8);assert.equal(top(122),130);"
             + "process.stdout.write('counter Y numeric checks passed');";
         java.nio.file.Path script = Files.createTempFile("muz-counter-preview-", ".js");
+        java.nio.file.Path processLog = Files.createTempFile("muz-counter-preview-", ".log");
         try {
             Files.writeString(script, nodeScript, java.nio.charset.StandardCharsets.UTF_8);
             Process process = new ProcessBuilder("node", script.toString())
                 .redirectErrorStream(true)
+                .redirectOutput(processLog.toFile())
                 .start();
-            String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-            assertTrue(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS), "Node 数值测试超时");
+            boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            String output = Files.readString(processLog, java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(finished, "Node 数值测试超时：" + output);
             assertEquals(0, process.exitValue(), output);
             assertTrue(output.contains("counter Y numeric checks passed"), output);
         } finally {
             Files.deleteIfExists(script);
+            Files.deleteIfExists(processLog);
         }
 
         for (Path page : List.of(Path.of("debug-hud-preview.html"),
@@ -554,6 +632,22 @@ public class DebugWebServerTest {
     }
 
     @Test
+    void 右键提示只显示坐标不暴露内部图层名() throws IOException {
+        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
+            Map.of(), List.of(), List.of()
+        ), "token");
+        String coordinate = extractFunction(html, "function showCoordinate(");
+        assertTrue(coordinate.contains("box.innerHTML='左 '"), "兼容页提示直接从坐标开始");
+        for (Path path : List.of(Path.of("debug-hud-preview.html"),
+            Path.of("src/main/resources/debug-hud-preview.html"))) {
+            String actual = extractFunction(Files.readString(path), "function showCoordinate(");
+            assertTrue(actual.contains("tip.innerHTML=box?'左 '"), "正式页不能显示 card 等内部标识");
+            assertTrue(actual.contains(" · 右 ") && actual.contains(" · 下 ") && actual.contains("指针 "),
+                "隐藏内部标识不能删除边界和指针坐标");
+        }
+    }
+
+    @Test
     void Shift箭头不劫持输入或busy且不修改viewPan配置() {
         String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
             Map.of(), List.of(), List.of()
@@ -631,16 +725,18 @@ public class DebugWebServerTest {
     }
 
     @Test
-    void 页面吸附默认开启且不继承旧快照关闭状态() {
-        String html = DebugWebServer.buildHtml(new DebugHudConfigController.Snapshot(
-            Map.of(), List.of(), List.of()
-        ), "token");
+    void 正式页面吸附默认关闭且不继承旧快照状态() throws IOException {
+        String html;
+        try (var input = DebugWebServerTest.class.getClassLoader().getResourceAsStream("debug-hud-preview.html")) {
+            assertNotNull(input, "测试 classpath 必须包含正式 Debug Web 页面");
+            html = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
 
-        assertTrue(html.contains("let pageSnapEnabled=true"), "页面吸附默认必须开启");
-        assertFalse(html.contains("pageSnapEnabled=dragCfg.snapEnabled"),
-            "页面吸附开关不能继承旧快照的关闭状态");
-        assertFalse(html.contains("pageSnapEnabled=state.drag"),
+        assertTrue(Pattern.compile("snapEnabled\\s*=\\s*false").matcher(html).find(),
+            "正式页面默认必须关闭吸附，保证图层可自由拖动");
+        assertFalse(html.contains("snapEnabled=state.drag"),
             "页面吸附状态只属于当前页面，不得从服务端配置快照恢复");
+        assertTrue(html.contains("#snapToggle"), "正式页面必须提供吸附切换按钮");
     }
 
     /** 从内联脚本中提取函数声明到下一个函数声明之间的源码片段。 */

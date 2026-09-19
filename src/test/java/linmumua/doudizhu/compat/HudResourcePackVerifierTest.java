@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,15 +14,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import javax.imageio.ImageIO;
+import linmumua.doudizhu.assets.HudOverlayLayout;
+import linmumua.doudizhu.assets.HudResourceRequest;
 import java.util.zip.ZipOutputStream;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.debug.HotbarDebugOverlayWriter;
+import linmumua.doudizhu.debug.HudOverlayWriter;
+import org.yaml.snakeyaml.Yaml;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -134,6 +144,25 @@ class HudResourcePackVerifierTest {
 
             assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y), "pack_format=" + format + " 应通过");
         }
+    }
+
+    @Test
+    void 现代minMaxFormat声明通过() throws IOException {
+        Path pack = writePack(temporaryDirectory.resolve("modern-pack-format.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of(),
+            "{\"pack\":{\"min_format\":[88,0],\"max_format\":[88,0]}}");
+
+        assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
+    }
+
+    @Test
+    void 缺少完整现代Format范围被拒绝() throws IOException {
+        Path pack = writePack(temporaryDirectory.resolve("invalid-modern-pack-format.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), hotbarFontJson(), Map.of(),
+            "{\"pack\":{\"min_format\":[89,0],\"max_format\":[90,0]}}");
+
+        IOException failure = assertThrows(IOException.class, () -> verifier().verify(pack, OFFSET_Y));
+        assertTrue(failure.getMessage().contains("min_format/max_format 不受支持"), failure.getMessage());
     }
 
     @Test
@@ -352,6 +381,410 @@ class HudResourcePackVerifierTest {
         assertTrue(failure.getMessage().contains("集合不一致"), failure.getMessage());
     }
 
+    @Test
+    void 连续请求正偏移37_83_157通过() throws IOException {
+        for (int offset : new int[]{37, 83, 157}) {
+            HudResourceRequest request = request(offset, offset, offset, offset, PackAssets.HOTBAR_DEFAULT_SCALE);
+            Path pack = writeContinuousPack(temporaryDirectory.resolve("continuous-" + offset + ".zip"), request,
+                ContinuousMutation.NONE);
+            assertDoesNotThrow(() -> verifier().verify(pack, request));
+        }
+    }
+
+    @Test
+    void 根目录连续字体可通过且重复路径被拒绝() throws IOException {
+        HudResourceRequest request = request(37, 37, 37, -200, PackAssets.HOTBAR_DEFAULT_SCALE);
+        Path source = writeContinuousPack(temporaryDirectory.resolve("continuous-root-source.zip"), request,
+            ContinuousMutation.NONE);
+        String overlayPath = "continuous/assets/minecraft/font/muz_counter_continuous.json";
+        String rootPath = "assets/minecraft/font/muz_counter_continuous.json";
+        Path root = rewriteZip(temporaryDirectory.resolve("continuous-root.zip"), source,
+            Map.of(overlayPath, rootPath), Map.of());
+        assertDoesNotThrow(() -> verifier().verify(root, request));
+
+        Path duplicate = rewriteZip(temporaryDirectory.resolve("continuous-root-duplicate.zip"), source,
+            Map.of(), Map.of(rootPath, readZipEntry(source, overlayPath)));
+        IOException failure = assertThrows(IOException.class, () -> verifier().verify(duplicate, request));
+        assertTrue(failure.getMessage().contains("同时存在") || failure.getMessage().contains("重复"),
+            failure.getMessage());
+    }
+
+    @Test
+    void 根目录合并Hotbar基础与连续字形通过() throws IOException {
+        // 现场 61191 = EF07，是鸡蛋连续字形，不是基础 YAML 中的 EF04。
+        assertEquals(61191, PackAssets.hotbarTier(100).debugCodepoint());
+        for (int offset : new int[]{37, -200, HudOverlayLayout.minHotbarOffsetY(100)}) {
+            HudResourceRequest request = request(37, 83, 157, offset, 100);
+            Path source = writeContinuousPack(temporaryDirectory.resolve("merged-source-" + offset + ".zip"),
+                request, ContinuousMutation.NONE);
+            Path merged = mergeRootHotbar(source, "valid-" + offset, "none");
+            assertDoesNotThrow(() -> verifier().verify(merged, request));
+        }
+    }
+
+    @Test
+    void 根目录合并Hotbar不能放行篡改缺失重复及未知映射() throws IOException {
+        HudResourceRequest request = request(37, 83, 157, -200, 100);
+        Path source = writeContinuousPack(temporaryDirectory.resolve("merged-invalid-source.zip"),
+            request, ContinuousMutation.NONE);
+        for (String mutation : List.of("base-ascent", "debug-ascent", "debug-height", "debug-file",
+            "unknown", "duplicate", "missing-base", "missing-debug", "both")) {
+            Path merged = mergeRootHotbar(source, mutation, mutation);
+            assertThrows(IOException.class, () -> verifier().verify(merged, request), mutation);
+        }
+    }
+
+    private Path mergeRootHotbar(Path source, String name, String mutation) throws IOException {
+        var base = com.google.gson.JsonParser.parseString(new String(readZipEntry(source, HOTBAR_FONT),
+            StandardCharsets.UTF_8)).getAsJsonObject();
+        var debug = com.google.gson.JsonParser.parseString(new String(readZipEntry(source, "continuous/" + HOTBAR_FONT),
+            StandardCharsets.UTF_8)).getAsJsonObject().getAsJsonArray("providers");
+        var providers = base.getAsJsonArray("providers");
+        if (mutation.equals("base-ascent")) providers.get(0).getAsJsonObject().addProperty("ascent", 123);
+        if (mutation.equals("missing-base")) providers.remove(0);
+        if (mutation.equals("debug-ascent")) debug.get(0).getAsJsonObject().addProperty("ascent", 123);
+        if (mutation.equals("debug-height")) debug.get(0).getAsJsonObject().addProperty("height", 123);
+        if (mutation.equals("debug-file")) debug.get(0).getAsJsonObject().addProperty("file", "muz:font/wrong.png");
+        if (mutation.equals("unknown")) {
+            var chars = new com.google.gson.JsonArray();
+            chars.add(String.valueOf((char) 0xEF00));
+            debug.get(0).getAsJsonObject().add("chars", chars);
+        }
+        if (mutation.equals("missing-debug")) debug.remove(0);
+        providers.addAll(debug);
+        if (mutation.equals("duplicate")) providers.add(debug.get(0).deepCopy());
+        Path target = temporaryDirectory.resolve("merged-hotbar-" + name + ".zip");
+        try (ZipFile input = new ZipFile(source.toFile());
+             ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(target))) {
+            var entries = input.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (entry.getName().equals("continuous/" + HOTBAR_FONT) && !mutation.equals("both")) continue;
+                byte[] bytes = entry.getName().equals(HOTBAR_FONT)
+                    ? base.toString().getBytes(StandardCharsets.UTF_8)
+                    : input.getInputStream(entry).readAllBytes();
+                addStored(output, entry.getName(), bytes);
+            }
+        }
+        return target;
+    }
+
+    @Test
+    void 连续请求负偏移与hotbar边界通过() throws IOException {
+        for (int offset : new int[]{-1, -128}) {
+            HudResourceRequest request = request(offset, offset, offset, -200, PackAssets.HOTBAR_DEFAULT_SCALE);
+            Path pack = writeContinuousPack(temporaryDirectory.resolve("continuous-negative-" + offset + ".zip"), request,
+                ContinuousMutation.NONE);
+            assertDoesNotThrow(() -> verifier().verify(pack, request));
+        }
+        HudResourceRequest hotbar = request(0, 0, 0,
+            HudOverlayLayout.minHotbarOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE), PackAssets.HOTBAR_DEFAULT_SCALE);
+        Path hotbarPack = writeContinuousPack(temporaryDirectory.resolve("continuous-hotbar-negative.zip"), hotbar,
+            ContinuousMutation.NONE);
+        assertDoesNotThrow(() -> verifier().verify(hotbarPack, hotbar));
+    }
+
+    @Test
+    void 连续请求错代与provider篡改被拒绝() throws IOException {
+        HudResourceRequest first = request(37, 37, 37, -200, PackAssets.HOTBAR_DEFAULT_SCALE);
+        HudResourceRequest second = request(83, 83, 83, -200, PackAssets.HOTBAR_DEFAULT_SCALE);
+        Path stale = writeContinuousPack(temporaryDirectory.resolve("continuous-stale.zip"), first,
+            ContinuousMutation.NONE);
+        assertThrows(IOException.class, () -> verifier().verify(stale, second));
+        HudResourceRequest mutationRequest = request(-128, -128, -128,
+            HudOverlayLayout.minHotbarOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE), PackAssets.HOTBAR_DEFAULT_SCALE);
+        for (ContinuousMutation mutation : new ContinuousMutation[]{ContinuousMutation.ASCENT,
+            ContinuousMutation.HEIGHT, ContinuousMutation.PADDING, ContinuousMutation.PNG,
+            ContinuousMutation.DROP_LAYER}) {
+            Path pack = writeContinuousPack(temporaryDirectory.resolve("continuous-" + mutation + ".zip"),
+                mutationRequest, mutation);
+            assertThrows(IOException.class, () -> verifier().verify(pack, mutationRequest), mutation.name());
+        }
+    }
+
+    private HudResourceRequest request(int card, int avatar, int counter, int hotbar, int scale) {
+        return new HudResourceRequest(card, avatar, counter, hotbar, scale);
+    }
+
+    private Path writeContinuousPack(Path target, HudResourceRequest request, ContinuousMutation mutation)
+        throws IOException {
+        List<HudOverlayLayout.Glyph> glyphs = HudOverlayLayout.glyphs(request);
+        Map<String, HudOverlayLayout.Glyph> glyphById = new LinkedHashMap<>();
+        for (HudOverlayLayout.Glyph glyph : glyphs) {
+            glyphById.put(glyph.id(), glyph);
+        }
+        Map<String, List<WriterImage>> overlayImages = new LinkedHashMap<>();
+        collectWriterImages(HudOverlayWriter.buildImagesYaml(HudOverlayLayout.trickGlyphs(request)), overlayImages);
+        collectWriterImages(HudOverlayWriter.buildImagesYaml(HudOverlayLayout.hotbarGlyphs(request)), overlayImages);
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(target))) {
+            Set<String> added = new java.util.HashSet<>();
+            addStored(zip, PACK_META,
+                "{\"pack\":{\"pack_format\":88},\"overlays\":{\"entries\":[{\"directory\":\"continuous\"}]}}"
+                    .getBytes(StandardCharsets.UTF_8));
+            added.add(PACK_META);
+            addBundleBaselineResources(zip, added);
+            for (HudOverlayLayout.Glyph glyph : glyphs) {
+                String basePath = texturePath(glyph.baseTexture());
+                if (added.add(basePath)) {
+                    addStored(zip, basePath, readResource("craftengine/muz/resourcepack/" + basePath));
+                }
+            }
+            for (Map.Entry<String, List<WriterImage>> entry : overlayImages.entrySet()) {
+                StringBuilder json = new StringBuilder("{\"providers\":[");
+                boolean first = true;
+                for (WriterImage image : entry.getValue()) {
+                    if (mutation == ContinuousMutation.DROP_LAYER
+                        && image.id().equals("muz:" + glyphs.get(0).id())) {
+                        continue;
+                    }
+                    if (!first) {
+                        json.append(',');
+                    }
+                    first = false;
+                    int height = image.height();
+                    int ascent = image.ascent();
+                    if (mutation == ContinuousMutation.HEIGHT
+                        && image.id().equals("muz:" + glyphs.get(0).id())) {
+                        height++;
+                    }
+                    if (mutation == ContinuousMutation.ASCENT
+                        && image.id().equals("muz:" + glyphs.get(0).id())) {
+                        ascent++;
+                    }
+                    appendProvider(json, height, ascent, image.file(), image.codepoint());
+                }
+                addStored(zip, "continuous/" + fontPath(entry.getKey()), json.append("]}").toString()
+                    .getBytes(StandardCharsets.UTF_8));
+            }
+            for (WriterImage image : flatten(overlayImages)) {
+                HudOverlayLayout.Glyph glyph = glyphForWriterImage(glyphById, image.id());
+                if (glyph == null || glyph.texture().equals(glyph.baseTexture())) {
+                    continue;
+                }
+                String path = texturePath(glyph.texture());
+                byte[] png = readResource("craftengine/muz/resourcepack/" + texturePath(glyph.baseTexture()));
+                if (glyph.paddingRasterRows() > 0) {
+                    png = paddedPng(png, glyph.paddingRasterRows());
+                }
+                if (mutation == ContinuousMutation.PADDING
+                    && glyph.id().equals(glyphs.get(0).id())) {
+                    png = readResource("craftengine/muz/resourcepack/" + texturePath(glyph.baseTexture()));
+                } else if (mutation == ContinuousMutation.PNG
+                    && glyph.id().equals(glyphs.get(0).id())) {
+                    png = mutatePngPixel(png);
+                }
+                addStored(zip, "continuous/" + path, png);
+            }
+        }
+        return target;
+    }
+
+    private void addBundleBaselineResources(ZipOutputStream zip, Set<String> added) throws IOException {
+        Map<String, List<WriterImage>> baseline = new LinkedHashMap<>();
+        for (String path : bundleImageYamlPaths()) {
+            collectWriterImages(new String(readResource(path), StandardCharsets.UTF_8), baseline);
+        }
+        for (String font : baseline.keySet()) {
+            String path = fontPath(font);
+            if (added.add(path)) {
+                addStored(zip, path, buildFontJson(baseline.get(font)).getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            for (String file : COUNTER_FILES) {
+                String path = counterTexturePath(scale, file);
+                if (added.add(path)) {
+                    addStored(zip, path, readResource("craftengine/muz/resourcepack/" + path));
+                }
+            }
+        }
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
+                String path = hotbarTexturePath(scale, index);
+                if (added.add(path)) {
+                    addStored(zip, path, readResource("craftengine/muz/resourcepack/" + path));
+                }
+            }
+            String path = hotbarSelectTexturePath(scale);
+            if (added.add(path)) {
+                addStored(zip, path, readResource("craftengine/muz/resourcepack/" + path));
+            }
+        }
+        for (String path : gadgetResourcePaths()) {
+            if (added.add(path)) {
+                addStored(zip, path, readResource("craftengine/muz/resourcepack/" + path));
+            }
+        }
+    }
+
+    private List<String> bundleImageYamlPaths() {
+        List<String> paths = new ArrayList<>();
+        for (int tier = 0; tier < PackAssets.cardGlyphHeightTierCount(); tier++) {
+            paths.add("craftengine/muz/configuration/images/card_h"
+                + PackAssets.cardGlyphHeightAt(tier) + ".yml");
+        }
+        for (int scale : PackAssets.AVATAR_PIXEL_SCALE_TIERS) {
+            paths.add("craftengine/muz/configuration/images/avatar_px_s" + scale + ".yml");
+        }
+        paths.add("craftengine/muz/configuration/images/avatar_crown.yml");
+        paths.add("craftengine/muz/configuration/images/bot_avatar.yml");
+        for (int scale : PackAssets.COUNTER_SCALE_TIERS) {
+            paths.add("craftengine/muz/configuration/images/"
+                + (scale == PackAssets.COUNTER_DEFAULT_SCALE ? "counter" : "counter_s" + scale) + ".yml");
+        }
+        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
+            paths.add("craftengine/muz/configuration/images/"
+                + (scale == PackAssets.HOTBAR_DEFAULT_SCALE ? "hotbar_hud" : "hotbar_hud_s" + scale) + ".yml");
+        }
+        return paths;
+    }
+
+    private void collectWriterImages(String yaml, Map<String, List<WriterImage>> target) throws IOException {
+        Object loaded = new Yaml().load(yaml);
+        if (!(loaded instanceof Map<?, ?> root) || !(root.get("images") instanceof Map<?, ?> images)) {
+            throw new IOException("测试 YAML 缺少 images 映射");
+        }
+        for (Map.Entry<?, ?> item : images.entrySet()) {
+            if (!(item.getKey() instanceof String id) || !(item.getValue() instanceof Map<?, ?> fields)) {
+                throw new IOException("测试 YAML image 条目格式无效");
+            }
+            String font = stringValue(fields, "font");
+            String file = stringValue(fields, "file");
+            int height = numberValue(fields, "height");
+            int ascent = numberValue(fields, "ascent");
+            int codepoint = parseFixtureCodepoint(stringValue(fields, "char"));
+            WriterImage image = new WriterImage(id, font, file, height, ascent, codepoint);
+            target.computeIfAbsent(font, ignored -> new ArrayList<>()).add(image);
+        }
+    }
+
+    private String buildFontJson(List<WriterImage> images) {
+        StringBuilder json = new StringBuilder("{\"providers\":[");
+        for (int index = 0; index < images.size(); index++) {
+            if (index > 0) {
+                json.append(',');
+            }
+            WriterImage image = images.get(index);
+            appendProvider(json, image.height(), image.ascent(), image.file(), image.codepoint());
+        }
+        return json.append("]}").toString();
+    }
+
+    private HudOverlayLayout.Glyph glyphForWriterImage(Map<String, HudOverlayLayout.Glyph> glyphById,
+                                                        String namespacedId) {
+        String id = stripNamespace(namespacedId);
+        if (id.equals("trick_hud_continuous_bot_avatar")) {
+            id = "bot_avatar";
+        } else if (id.equals("trick_hud_continuous_bot_avatar_landlord")) {
+            id = "bot_avatar_landlord";
+        } else if (id.equals("trick_hud_continuous_bot_avatar_farmer")) {
+            id = "bot_avatar_farmer";
+        }
+        return glyphById.get(id);
+    }
+
+    private List<WriterImage> flatten(Map<String, List<WriterImage>> grouped) {
+        List<WriterImage> result = new ArrayList<>();
+        for (List<WriterImage> images : grouped.values()) {
+            result.addAll(images);
+        }
+        return result;
+    }
+
+    private String stringValue(Map<?, ?> fields, String key) throws IOException {
+        Object value = fields.get(key);
+        if (!(value instanceof String string) || string.isBlank()) {
+            throw new IOException("测试 YAML 缺少字符串字段：" + key);
+        }
+        return string;
+    }
+
+    private int numberValue(Map<?, ?> fields, String key) throws IOException {
+        Object value = fields.get(key);
+        if (!(value instanceof Number number) || number.doubleValue() != number.longValue()) {
+            throw new IOException("测试 YAML 缺少整数字段：" + key);
+        }
+        return number.intValue();
+    }
+
+    private int parseFixtureCodepoint(String value) throws IOException {
+        String text = value.trim();
+        try {
+            if (text.startsWith("\\u") && text.length() == 6) {
+                return Integer.parseInt(text.substring(2), 16);
+            }
+            if (text.codePointCount(0, text.length()) == 1) {
+                return text.codePointAt(0);
+            }
+        } catch (RuntimeException exception) {
+            throw new IOException("测试 YAML char 无效：" + value, exception);
+        }
+        throw new IOException("测试 YAML char 必须是单一码点：" + value);
+    }
+
+    private String stripNamespace(String id) {
+        int separator = id.indexOf(':');
+        return separator >= 0 ? id.substring(separator + 1) : id;
+    }
+
+    private String texturePath(String resource) {
+        int separator = resource.indexOf(':');
+        return "assets/" + resource.substring(0, separator) + "/textures/" + resource.substring(separator + 1);
+    }
+
+    private String fontPath(String resource) {
+        int separator = resource.indexOf(':');
+        return "assets/" + resource.substring(0, separator) + "/font/" + resource.substring(separator + 1) + ".json";
+    }
+
+    private void appendProvider(StringBuilder json, int height, int ascent, String file, int codepoint) {
+        json.append("{\"type\":\"bitmap\",\"height\":").append(height)
+            .append(",\"ascent\":").append(ascent).append(",\"file\":\"").append(file)
+            .append("\",\"chars\":[\"").append(String.format("\\u%04x", codepoint)).append("\"]}");
+    }
+
+    private byte[] paddedPng(byte[] original, int rows) throws IOException {
+        BufferedImage source = ImageIO.read(new ByteArrayInputStream(original));
+        BufferedImage padded = new BufferedImage(source.getWidth(), source.getHeight() + rows,
+            BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < source.getHeight(); y++) {
+            for (int x = 0; x < source.getWidth(); x++) {
+                padded.setRGB(x, y, source.getRGB(x, y));
+            }
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!ImageIO.write(padded, "png", output)) {
+            throw new IOException("测试环境不支持 PNG 编码");
+        }
+        return output.toByteArray();
+    }
+
+    private byte[] mutatePngPixel(byte[] original) throws IOException {
+        BufferedImage image = ImageIO.read(new ByteArrayInputStream(original));
+        if (image == null || image.getWidth() == 0 || image.getHeight() == 0) {
+            throw new IOException("测试 PNG 无法解码或尺寸为空");
+        }
+        int x = image.getWidth() / 2;
+        int y = image.getHeight() / 2;
+        boolean changed = false;
+        for (int scanY = 0; scanY < image.getHeight() && !changed; scanY++) {
+            for (int scanX = 0; scanX < image.getWidth(); scanX++) {
+                if (((image.getRGB(scanX, scanY) >>> 24) & 0xFF) != 0) {
+                    x = scanX;
+                    y = scanY;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        image.setRGB(x, y, image.getRGB(x, y) ^ (changed ? 0x00010101 : 0x01000000));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "png", output)) {
+            throw new IOException("测试环境不支持 PNG 编码");
+        }
+        return output.toByteArray();
+    }
+
     private HudResourcePackVerifier verifier() {
         return new HudResourcePackVerifier(resources());
     }
@@ -549,6 +982,40 @@ class HudResourcePackVerifierTest {
             bytes = readResource("craftengine/muz/resourcepack/" + path);
         }
         addStored(zip, path, bytes);
+    }
+
+    private Path rewriteZip(Path target, Path source, Map<String, String> renames,
+                            Map<String, byte[]> additions) throws IOException {
+        Set<String> added = new HashSet<>();
+        try (ZipFile input = new ZipFile(source.toFile());
+             ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(target))) {
+            var entries = input.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String destination = renames.getOrDefault(entry.getName(), entry.getName());
+                if (!added.add(destination)) {
+                    throw new IOException("测试 ZIP 目标条目重复：" + destination);
+                }
+                addStored(output, destination, input.getInputStream(entry).readAllBytes());
+            }
+            for (Map.Entry<String, byte[]> addition : additions.entrySet()) {
+                if (!added.add(addition.getKey())) {
+                    throw new IOException("测试 ZIP 新增条目重复：" + addition.getKey());
+                }
+                addStored(output, addition.getKey(), addition.getValue());
+            }
+        }
+        return target;
+    }
+
+    private byte[] readZipEntry(Path source, String path) throws IOException {
+        try (ZipFile zip = new ZipFile(source.toFile())) {
+            ZipEntry entry = zip.getEntry(path);
+            if (entry == null) {
+                throw new IOException("测试 ZIP 缺少条目：" + path);
+            }
+            return zip.getInputStream(entry).readAllBytes();
+        }
     }
 
     private void addStored(ZipOutputStream zip, String path, byte[] bytes) throws IOException {
@@ -841,6 +1308,18 @@ class HudResourcePackVerifierTest {
         WRONG_ASCENT,
         DUPLICATE_CHAR,
         MISSING_CHAR
+    }
+
+    private enum ContinuousMutation {
+        NONE,
+        ASCENT,
+        HEIGHT,
+        PADDING,
+        PNG,
+        DROP_LAYER
+    }
+
+    private record WriterImage(String id, String font, String file, int height, int ascent, int codepoint) {
     }
 
     private record RawEntry(String name, byte[] bytes, long uncompressedSize, long compressedSize) {

@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import linmumua.doudizhu.assets.HudOverlayLayout;
+import linmumua.doudizhu.assets.HudResourceRequest;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.debug.HotbarDebugOverlayWriter;
 import org.yaml.snakeyaml.LoaderOptions;
@@ -126,6 +128,35 @@ public final class HudResourcePackVerifier {
             throw new IOException("hotbar scale=" + hotbarScale + " 不是当前资源包已生成的档位");
         }
         verifyInternal(packPath, offsetY, hotbarScale, true);
+    }
+
+    /**
+     * 验证四层连续 HUD 资源。该入口只接受一次性请求，实际期望值由
+     * {@link HudOverlayLayout} 计算，随后直接读取 CraftEngine 生成的 ZIP 中央目录与文件。
+     * 不把 writer 生成的 YAML 当成客户端资源验证证据。
+     */
+    public void verify(Path packPath, HudResourceRequest request) throws IOException {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(packPath, "packPath");
+        if (!Files.isRegularFile(packPath)) {
+            throw new IOException("资源包不存在或不是普通文件：" + packPath);
+        }
+        List<HudOverlayLayout.Glyph> glyphs;
+        try {
+            glyphs = HudOverlayLayout.glyphs(request);
+        } catch (RuntimeException exception) {
+            throw new IOException("连续 HUD 请求无效：" + exception.getMessage(), exception);
+        }
+        if (glyphs.isEmpty()) {
+            throw new IOException("连续 HUD 没有预期字形");
+        }
+        try {
+            verifyContinuousZip(packPath, request, glyphs);
+        } catch (IOException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new IOException("连续 HUD 资源结构无效：" + exception.getMessage(), exception);
+        }
     }
 
     private void verifyInternal(Path packPath, int offsetY, Integer overlayScale,
@@ -335,6 +366,327 @@ public final class HudResourcePackVerifier {
         }
     }
 
+    private void verifyContinuousZip(Path packPath, HudResourceRequest request,
+                                      List<HudOverlayLayout.Glyph> glyphs) throws IOException {
+        Map<String, HudOverlayLayout.Glyph> expected = new LinkedHashMap<>();
+        Map<String, HudOverlayLayout.Glyph> expectedTextures = new LinkedHashMap<>();
+        for (HudOverlayLayout.Glyph glyph : glyphs) {
+            if (glyph == null || glyph.font() == null || glyph.texture() == null
+                || glyph.baseTexture() == null) {
+                throw new IOException("连续 HUD 字形元数据不完整");
+            }
+            String key = mappingKey(glyph.font(), glyph.codepoint());
+            if (expected.putIfAbsent(key, glyph) != null) {
+                throw new IOException("连续 HUD 存在重复 font/char：" + key);
+            }
+            // 无 padding 时 overlay provider 直接复用 bundle 根目录 PNG，不会在 overlay
+            // 目录再次写出贴图；只有连续目录中的动态 PNG 才属于 overlay 文件集合。
+            if (!glyph.texture().equals(glyph.baseTexture())) {
+                String texturePath = textureZipPath(glyph.texture(), glyph.id());
+                HudOverlayLayout.Glyph previous = expectedTextures.putIfAbsent(texturePath, glyph);
+                if (previous != null && !sameGlyphGeometry(previous, glyph)) {
+                    throw new IOException("连续 HUD 贴图路径对应多个几何声明：" + texturePath);
+                }
+            }
+        }
+
+        try (ZipFile zip = new ZipFile(packPath.toFile())) {
+            if (zip.size() > MAX_ZIP_ENTRIES) {
+                throw new IOException("资源包条目数量超过限制，无法验证：" + zip.size());
+            }
+            Map<String, EntryMetadata> entries = new LinkedHashMap<>();
+            Set<String> names = new LinkedHashSet<>();
+            var enumeration = zip.entries();
+            while (enumeration.hasMoreElements()) {
+                ZipEntry entry = enumeration.nextElement();
+                String name = entry.getName();
+                validateEntryName(name);
+                if (!names.add(name)) {
+                    throw new IOException("资源包存在重复条目，无法验证：" + name);
+                }
+                if (LEGACY_HOTBAR.equals(name) || LEGACY_HOTBAR_SELECTION.equals(name)) {
+                    throw new IOException("资源包仍覆盖原版全局 hotbar 贴图，拒绝验证：" + name);
+                }
+                if (!entry.isDirectory()) {
+                    entries.put(name, new EntryMetadata(entry.getSize(), entry.getCompressedSize(),
+                        entry.getCrc(), entry.getMethod()));
+                }
+            }
+            ZipIndex index = new ZipIndex(packPath, entries, names);
+            Budget budget = new Budget();
+            byte[] metadata = readEntry(zip, index, PACK_META, MAX_JSON_BYTES, budget);
+            index.selected.put(PACK_META, metadata);
+            index.overlayPrefixes.addAll(overlayPrefixes(metadata));
+            if (index.overlayPrefixes.isEmpty()) {
+                throw new IOException("资源包缺少连续 HUD overlay 声明");
+            }
+            verifyPackMetadata(index);
+
+            // 连续 overlay 不能取代既有 bundle 契约：先独立校验根字体、真实 bundle PNG、
+            // 道具模型与资源包格式，再校验本次请求的四层 overlay。
+            ExpectedDeclarations baseline = loadExpectedDeclarations(
+                request.hotbarOffsetY(), request.hotbarScale());
+            for (String required : requiredEntries(baseline.bundle)) {
+                if (PACK_META.equals(required)) {
+                    continue;
+                }
+                index.selected.put(required,
+                    readEntry(zip, index, required,
+                        required.endsWith(".json") ? MAX_JSON_BYTES : MAX_PNG_BYTES, budget));
+            }
+            Set<String> expectedFontPaths = new LinkedHashSet<>();
+            Set<String> expectedRootFontPaths = new LinkedHashSet<>();
+            for (HudOverlayLayout.Glyph glyph : glyphs) {
+                String path = fontJsonPath(glyph.font(), glyph.id());
+                expectedFontPaths.add(path);
+                expectedRootFontPaths.add(path);
+                String basePath = textureZipPath(glyph.baseTexture(), glyph.id());
+                byte[] base = readEntry(zip, index, basePath, MAX_PNG_BYTES, budget);
+                verifyBinaryAgainstBundle(base, basePath);
+                verifyPngLength(base, basePath);
+                BufferedImage baseImage = readPng(base, basePath);
+                if (baseImage.getWidth() != glyph.originalWidth()
+                    || baseImage.getHeight() != glyph.originalHeight()) {
+                    throw new IOException("连续 HUD 基准 PNG 尺寸不一致：" + basePath);
+                }
+            }
+
+            Map<String, String> actualPaths = new LinkedHashMap<>();
+            Set<String> baselineFontPaths = new HashSet<>(rootFontJsonPaths(baseline.bundle).values());
+            Map<String, ImageDeclaration> rootContinuous = new LinkedHashMap<>();
+            for (String logical : expectedFontPaths) {
+                String actual = selectContinuousPath(logical, names, index.overlayPrefixes,
+                    actualPaths, baselineFontPaths.contains(logical));
+                if (actual.equals(logical) && baselineFontPaths.contains(logical)) {
+                    // CE 可将基础与 Debug 码位合并进根 Hotbar 字体；仅加入本次布局的精确声明。
+                    // 与 HudOverlayLayout / 构建期码位契约对齐，不能放行整个字体或任意额外码位。
+                    for (HudOverlayLayout.Glyph glyph : glyphs) {
+                        if (fontJsonPath(glyph.font(), glyph.id()).equals(logical)) {
+                            rootContinuous.put(glyph.id(), new ImageDeclaration(glyph.id(), glyph.font(),
+                                glyph.texture(), glyph.height(), glyph.ascent(), glyph.codepoint(), actual));
+                        }
+                    }
+                }
+            }
+            // 根 bundle 校验只允许跳过本次请求明确生成的独立连续字体，不能泛化放行旧分页。
+            verifyFontJson(index, baseline.bundle, rootContinuous, expectedRootFontPaths);
+            verifyCounterPngs(index);
+            verifyHotbarPng(index);
+            verifySelectPng(index);
+            verifyGadgetModelsAndItems(index);
+
+            Set<String> actualKeys = new HashSet<>();
+            Set<String> actualFontPaths = new LinkedHashSet<>();
+            Set<String> actualTexturePaths = new LinkedHashSet<>();
+            Set<String> expectedTexturePaths = expectedTextures.keySet();
+            for (String logical : expectedFontPaths) {
+                String actual = selectContinuousPath(logical, names, index.overlayPrefixes,
+                    actualPaths, baselineFontPaths.contains(logical));
+                actualFontPaths.add(logical);
+                byte[] bytes = readEntry(zip, index, actual, MAX_JSON_BYTES, budget);
+                verifyContinuousFontJson(bytes, logical, actual, expected, actualKeys,
+                    actual.equals(logical) ? baseline.bundle : Map.of());
+            }
+            for (String logical : expectedTexturePaths) {
+                String actual = selectContinuousPath(logical, names, index.overlayPrefixes, actualPaths, false);
+                actualTexturePaths.add(logical);
+                byte[] bytes = readEntry(zip, index, actual, MAX_PNG_BYTES, budget);
+                verifyContinuousTexture(bytes, logical, actual, expectedTextures);
+            }
+
+            // 声明前缀中的其它 MUZ HUD 文件不能悄悄混入；本次期望文件已在上面按逻辑路径唯一读取。
+            for (String prefix : index.overlayPrefixes) {
+                for (String name : names) {
+                    if (!name.startsWith(prefix) || name.endsWith("/")) {
+                        continue;
+                    }
+                    String relative = name.substring(prefix.length());
+                    if (isContinuousFontPath(relative) || isContinuousTexturePath(relative)) {
+                        if (!expectedFontPaths.contains(relative) && !expectedTexturePaths.contains(relative)) {
+                            throw new IOException("连续 HUD 出现当前请求未声明的资源：" + name);
+                        }
+                    }
+                }
+            }
+            if (!actualFontPaths.equals(expectedFontPaths)) {
+                throw new IOException("连续 HUD 字体文件集合不一致，缺失=" + expectedFontPaths);
+            }
+            Set<String> expectedKeys = expected.keySet();
+            if (!actualKeys.equals(expectedKeys)) {
+                Set<String> missing = new LinkedHashSet<>(expectedKeys);
+                missing.removeAll(actualKeys);
+                Set<String> extra = new LinkedHashSet<>(actualKeys);
+                extra.removeAll(expectedKeys);
+                throw new IOException("连续 HUD provider 集合不一致，缺失=" + missing + "，多余=" + extra);
+            }
+            if (!actualTexturePaths.equals(expectedTexturePaths)) {
+                throw new IOException("连续 HUD PNG 集合不一致，缺失=" + expectedTexturePaths);
+            }
+        } catch (ContinuousVerificationException exception) {
+            throw (IOException) exception.getCause();
+        } catch (ZipException exception) {
+            throw new IOException("资源包 ZIP 受损或使用了不支持的保护形式，无法验证："
+                + exception.getMessage(), exception);
+        }
+    }
+
+    private byte[] readEntryUnchecked(ZipFile zip, ZipIndex index, String name, long limit, Budget budget) {
+        try {
+            return readEntry(zip, index, name, limit, budget);
+        } catch (IOException exception) {
+            throw new ContinuousVerificationException(exception);
+        }
+    }
+
+    private boolean sameGlyphGeometry(HudOverlayLayout.Glyph first, HudOverlayLayout.Glyph second) {
+        return first.originalWidth() == second.originalWidth()
+            && first.originalHeight() == second.originalHeight()
+            && first.height() == second.height()
+            && first.ascent() == second.ascent()
+            && first.paddingRasterRows() == second.paddingRasterRows()
+            && first.advance() == second.advance();
+    }
+
+    private boolean isContinuousFontPath(String path) {
+        if (!path.startsWith(FONT_ROOT) || !path.endsWith(".json")) {
+            return false;
+        }
+        String name = path.substring(FONT_ROOT.length(), path.length() - ".json".length());
+        // 任何 overlay 中的 MUZ 字体都纳入集合比较：旧 base font 或未知分页必须被当作多余映射拒绝。
+        return name.startsWith("muz_");
+    }
+
+    private boolean isContinuousTexturePath(String path) {
+        return path.startsWith("assets/muz/textures/font/continuous/")
+            || path.startsWith("assets/muz/textures/font/") && (isHotbarTexturePath(path)
+            || isHotbarSelectTexturePath(path));
+    }
+
+    private void verifyContinuousFontJson(byte[] bytes, String relative, String source,
+                                          Map<String, HudOverlayLayout.Glyph> expected,
+                                          Set<String> actualKeys,
+                                          Map<String, ImageDeclaration> verifiedBundle) throws IOException {
+        Set<String> bundleKeys = new HashSet<>();
+        for (ImageDeclaration declaration : verifiedBundle.values()) {
+            bundleKeys.add(mappingKey(declaration.font, declaration.codepoint));
+        }
+        JsonObject root = parseJsonObject(bytes, source);
+        JsonArray providers = root.getAsJsonArray("providers");
+        if (providers == null || providers.isEmpty()) {
+            throw new IOException("连续 HUD 字体 JSON 缺少 providers：" + source);
+        }
+        String font = fontIdFromAssetPath(relative, source);
+        for (JsonElement element : providers) {
+            if (!element.isJsonObject()) {
+                throw new IOException("连续 HUD provider 不是对象：" + source);
+            }
+            JsonObject provider = element.getAsJsonObject();
+            if (!"bitmap".equals(stringJson(provider, "type", source))) {
+                throw new IOException("连续 HUD 含不支持的 provider 类型：" + source);
+            }
+            String file = stringJson(provider, "file", source);
+            int height = intJson(provider, "height", source);
+            int ascent = intJson(provider, "ascent", source);
+            JsonArray chars = provider.getAsJsonArray("chars");
+            if (chars == null || chars.isEmpty()) {
+                throw new IOException("连续 HUD provider 缺少 chars：" + source);
+            }
+            for (JsonElement charElement : chars) {
+                if (!charElement.isJsonPrimitive() || !charElement.getAsJsonPrimitive().isString()) {
+                    throw new IOException("连续 HUD chars 含非字符串：" + source);
+                }
+                String text = charElement.getAsString();
+                for (int index = 0; index < text.length();) {
+                    int codepoint = text.codePointAt(index);
+                    index += Character.charCount(codepoint);
+                    String key = mappingKey(font, codepoint);
+                    // 合并根字体中的基础码位已经完整核验，不计入连续 provider 集合。
+                    if (bundleKeys.contains(key)) {
+                        continue;
+                    }
+                    HudOverlayLayout.Glyph glyph = expected.get(key);
+                    if (glyph == null || !glyph.texture().equals(file)
+                        || glyph.height() != height || glyph.ascent() != ascent) {
+                        throw new IOException("连续 HUD provider 与布局不一致：" + source);
+                    }
+                    if (!actualKeys.add(key)) {
+                        throw new IOException("连续 HUD 存在重复 font/char：" + key);
+                    }
+                }
+            }
+        }
+    }
+
+    private void verifyContinuousTexture(byte[] bytes, String relative, String source,
+                                         Map<String, HudOverlayLayout.Glyph> expected) throws IOException {
+        HudOverlayLayout.Glyph glyph = null;
+        String zipPath = relative;
+        for (Map.Entry<String, HudOverlayLayout.Glyph> entry : expected.entrySet()) {
+            if (entry.getKey().equals(zipPath)) {
+                glyph = entry.getValue();
+                break;
+            }
+        }
+        if (glyph == null) {
+            throw new IOException("连续 HUD 出现未知 PNG：" + source);
+        }
+        verifyPngLength(bytes, source);
+        BufferedImage image = readPng(bytes, source);
+        // rasterWidth() 是客户端按 provider height 推导的显示宽度，不是 PNG 栅格宽度；
+        // writer 只在底部补行，PNG 宽度必须保持真实 bundle 原图宽度。
+        if (image.getWidth() != glyph.originalWidth() || image.getHeight() != glyph.rasterHeight()
+            || image.getWidth() > 256 || image.getHeight() > 256) {
+            throw new IOException("连续 HUD PNG 几何不一致：" + source);
+        }
+        byte[] original = readBundleResource(glyph.baseTexture(), glyph.id());
+        BufferedImage base = readPng(original, glyph.id());
+        if (glyph.paddingRasterRows() == 0) {
+            if (!Arrays.equals(bytes, original)) {
+                throw new IOException("无 padding 的连续 HUD PNG 必须与 bundle 原图完全一致：" + source);
+            }
+            return;
+        }
+        if (base.getWidth() != glyph.originalWidth() || base.getHeight() != glyph.originalHeight()
+            || image.getWidth() != base.getWidth()
+            || image.getHeight() <= base.getHeight()) {
+            throw new IOException("连续 HUD padding PNG 原图比例不一致：" + source);
+        }
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int actual = image.getRGB(x, y);
+                if (y < base.getHeight()) {
+                    if (actual != base.getRGB(x, y)) {
+                        throw new IOException("连续 HUD padding PNG 原图像素被改写：" + source);
+                    }
+                } else if (((actual >>> 24) & 0xFF) != 0) {
+                    throw new IOException("连续 HUD padding PNG 新增区域必须全透明：" + source);
+                }
+            }
+        }
+    }
+
+    private byte[] readBundleResource(String texture, String source) throws IOException {
+        String bundlePath = BUNDLE_RESOURCE_ROOT + textureZipPath(texture, source);
+        InputStream stream;
+        try {
+            stream = resourceLoader.apply(bundlePath);
+        } catch (RuntimeException exception) {
+            throw new IOException("加载内置资源失败：" + bundlePath, exception);
+        }
+        if (stream == null) {
+            throw new IOException("内置资源缺失：" + bundlePath);
+        }
+        try (stream) {
+            return readBounded(stream, -1, MAX_PNG_BYTES, bundlePath);
+        }
+    }
+
+    private static final class ContinuousVerificationException extends RuntimeException {
+        private ContinuousVerificationException(IOException cause) {
+            super(cause);
+        }
+    }
+
     private void verifyOverlayEntries(ZipIndex zip, Map<String, ImageDeclaration> expected,
                                       boolean requireOverlay) throws IOException {
         if (zip.overlayPrefixes.isEmpty()) {
@@ -411,6 +763,42 @@ public final class HudResourcePackVerifier {
             }
         }
         return null;
+    }
+
+    private String selectContinuousPath(String logicalPath, Set<String> names, Set<String> prefixes,
+                                        Map<String, String> selected, boolean baselineRootPath) throws IOException {
+        String previous = selected.get(logicalPath);
+        if (previous != null) {
+            return previous;
+        }
+        List<String> overlayCandidates = new ArrayList<>();
+        for (String prefix : prefixes) {
+            String candidate = prefix + logicalPath;
+            if (names.contains(candidate)) {
+                overlayCandidates.add(candidate);
+            }
+        }
+        if (baselineRootPath && !overlayCandidates.isEmpty()) {
+            if (overlayCandidates.size() != 1) {
+                throw new IOException("连续 HUD 缺少唯一 overlay 字体资源："
+                    + logicalPath + " -> " + overlayCandidates);
+            }
+            selected.put(logicalPath, overlayCandidates.get(0));
+            return overlayCandidates.get(0);
+        }
+        List<String> candidates = new ArrayList<>(overlayCandidates);
+        if (names.contains(logicalPath)) {
+            candidates.add(logicalPath);
+        }
+        if (candidates.isEmpty()) {
+            throw new IOException("连续 HUD 缺少资源：" + logicalPath);
+        }
+        if (candidates.size() != 1) {
+            throw new IOException("连续 HUD 资源同时存在于根目录和 overlay，拒绝验证："
+                + logicalPath + " -> " + candidates);
+        }
+        selected.put(logicalPath, candidates.get(0));
+        return candidates.get(0);
     }
 
     private Set<String> verifyOverlayFontJson(byte[] bytes, String relative, String source,
@@ -734,10 +1122,19 @@ public final class HudResourcePackVerifier {
             if (!(entry.getKey() instanceof String id) || !(entry.getValue() instanceof Map<?, ?> fields)) {
                 throw new IOException("YAML images 条目格式无效：" + source);
             }
+            requireNamespacedImageId(id, source);
             ImageDeclaration declaration = imageDeclaration(id, fields, source);
             if (target.putIfAbsent(id, declaration) != null) {
                 throw new IOException("HUD 字形条目重复定义：" + id);
             }
+        }
+    }
+
+    private void requireNamespacedImageId(String id, String source) throws IOException {
+        int separator = id.indexOf(':');
+        if (separator <= 0 || separator != id.lastIndexOf(':') || separator == id.length() - 1
+            || id.startsWith("/") || id.endsWith("/") || id.contains("..") || id.contains("\\\\")) {
+            throw new IOException("YAML image id 必须是安全的 namespace:path 形式：" + id + "（" + source + "）");
         }
     }
 
@@ -804,6 +1201,12 @@ public final class HudResourcePackVerifier {
 
     private void verifyFontJson(ZipIndex zip, Map<String, ImageDeclaration> bundle,
                                 Map<String, ImageDeclaration> overlay) throws IOException {
+        verifyFontJson(zip, bundle, overlay, Set.of());
+    }
+
+    private void verifyFontJson(ZipIndex zip, Map<String, ImageDeclaration> bundle,
+                                Map<String, ImageDeclaration> overlay,
+                                Set<String> continuousFontPathsToIgnore) throws IOException {
         Map<String, ImageDeclaration> expectedByKey = new HashMap<>();
         Map<String, ImageDeclaration> allowed = mergeDeclarations(bundle, overlay);
         for (ImageDeclaration declaration : allowed.values()) {
@@ -817,11 +1220,11 @@ public final class HudResourcePackVerifier {
         Set<String> expectedPaths = new HashSet<>(fontPaths.values());
         for (String name : zip.names) {
             if (name.startsWith(FONT_ROOT + "muz_counter") && name.endsWith(".json")
-                && !expectedPaths.contains(name)) {
+                && !expectedPaths.contains(name) && !continuousFontPathsToIgnore.contains(name)) {
                 throw new IOException("资源包包含当前 profile 未生成的记牌器字体分页，可能覆盖新码位：" + name);
             }
             if (name.startsWith(FONT_ROOT + "muz_hotbar") && name.endsWith(".json")
-                && !expectedPaths.contains(name)) {
+                && !expectedPaths.contains(name) && !continuousFontPathsToIgnore.contains(name)) {
                 throw new IOException("资源包包含当前 profile 未生成的 hotbar 字体分页：" + name);
             }
         }
@@ -1310,6 +1713,56 @@ public final class HudResourcePackVerifier {
         }
     }
 
+    private List<Double> numericFormats(JsonElement value, String key) throws IOException {
+        List<Double> formats = new ArrayList<>();
+        if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
+            formats.add(value.getAsDouble());
+            return formats;
+        }
+        if (!value.isJsonArray() || value.getAsJsonArray().isEmpty()) {
+            throw new IOException("pack.mcmeta 缺少有效 pack." + key);
+        }
+        for (JsonElement item : value.getAsJsonArray()) {
+            if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isNumber()) {
+                throw new IOException("pack.mcmeta 缺少有效 pack." + key);
+            }
+            formats.add(item.getAsDouble());
+        }
+        return formats;
+    }
+
+    private List<Integer> formatTuple(JsonElement value, String key) throws IOException {
+        if (value == null || !value.isJsonArray() || value.getAsJsonArray().size() != 2) {
+            throw new IOException("pack.mcmeta 缺少有效 pack." + key);
+        }
+        List<Integer> tuple = new ArrayList<>();
+        for (JsonElement item : value.getAsJsonArray()) {
+            if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isNumber()
+                || item.getAsInt() < 0 || item.getAsDouble() != item.getAsInt()) {
+                throw new IOException("pack.mcmeta 缺少有效 pack." + key);
+            }
+            tuple.add(item.getAsInt());
+        }
+        while (tuple.size() < 2) {
+            tuple.add(0);
+        }
+        return tuple;
+    }
+
+    private int compareFormat(List<Integer> left, List<Integer> right) {
+        int major = Integer.compare(left.get(0), right.get(0));
+        return major != 0 ? major : Integer.compare(left.get(1), right.get(1));
+    }
+
+    private boolean isSupportedPackFormat(double format) {
+        for (int allowed : PackAssets.SUPPORTED_RESOURCE_PACK_FORMATS) {
+            if (format == allowed) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String stringValue(JsonObject object, String key) {
         JsonElement value = object.get(key);
         return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
@@ -1324,35 +1777,33 @@ public final class HudResourcePackVerifier {
                 throw new IOException("pack.mcmeta 缺少有效 pack 对象");
             }
             JsonObject pack = packValue.getAsJsonObject();
+            boolean supported;
             JsonElement packFormatValue = pack.get("pack_format");
-            if (packFormatValue == null) {
-                throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
-            }
-            List<Double> packFormats = new ArrayList<>();
-            if (packFormatValue.isJsonPrimitive() && packFormatValue.getAsJsonPrimitive().isNumber()) {
-                packFormats.add(packFormatValue.getAsDouble());
-            } else if (packFormatValue.isJsonArray()) {
-                for (JsonElement item : packFormatValue.getAsJsonArray()) {
-                    if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isNumber()) {
-                        throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
-                    }
-                    packFormats.add(item.getAsDouble());
+            if (packFormatValue != null) {
+                // 旧格式：pack_format 可以是单个数字，也可以是兼容多个客户端的数字数组。
+                List<Double> packFormats = numericFormats(packFormatValue, "pack_format");
+                supported = packFormats.stream().anyMatch(this::isSupportedPackFormat);
+                if (!supported) {
+                    throw new IOException("pack.mcmeta pack_format 不受支持：" + packFormats);
                 }
             } else {
-                throw new IOException("pack.mcmeta 缺少有效 pack.pack_format");
-            }
-            // 接受项目全部目标可能产出的 pack_format（75/84/88），来源见 PackAssets 常量。
-            // CraftEngine 合并包可能以数组声明兼容的多个格式，数组中至少一个格式必须属于项目目标。
-            boolean supported = packFormats.stream().anyMatch(format -> {
+                // 新格式：Minecraft/CraftEngine 可能只写 min_format/max_format，不能再强制要求旧字段。
+                List<Integer> minFormat = formatTuple(pack.get("min_format"), "min_format");
+                List<Integer> maxFormat = formatTuple(pack.get("max_format"), "max_format");
+                if (minFormat.isEmpty() || maxFormat.isEmpty() || compareFormat(minFormat, maxFormat) > 0) {
+                    throw new IOException("pack.mcmeta 缺少有效 pack.pack_format 或 min_format/max_format");
+                }
+                supported = false;
                 for (int allowed : PackAssets.SUPPORTED_RESOURCE_PACK_FORMATS) {
-                    if (format == allowed) {
-                        return true;
+                    if (allowed >= minFormat.get(0) && allowed <= maxFormat.get(0)) {
+                        supported = true;
+                        break;
                     }
                 }
-                return false;
-            });
-            if (!supported) {
-                throw new IOException("pack.mcmeta pack_format 不受支持：" + packFormats);
+                if (!supported) {
+                    throw new IOException("pack.mcmeta min_format/max_format 不受支持："
+                        + minFormat + ".." + maxFormat);
+                }
             }
             if (!root.has("overlays")) {
                 return;

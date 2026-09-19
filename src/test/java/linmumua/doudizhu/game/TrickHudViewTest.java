@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.IntFunction;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import net.kyori.adventure.text.Component;
@@ -137,6 +138,22 @@ class TrickHudViewTest {
                 + "，套基名会让这一档整手牌变豆腐块（而浅档正常，默认配置测不出来）");
         assertFalse(line.contains("<font:" + PackAssets.CARD_GLYPH_FONT + ">"),
             "深档不该出现基名 " + PackAssets.CARD_GLYPH_FONT + "，那是第 0 张字体的名字");
+    }
+
+    @Test
+    void 连续覆盖层使用基准码位和真实continuous字体标签() {
+        List<DoudizhuCard> cards = List.of(card(CardRank.THREE));
+        String line = TrickHudView.buildMiniMessage(
+            TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY, TrickHudView.Avatar.EMPTY,
+            0, GAP, cards, STEP, OFFSETS, 0, 1, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(), 0, true);
+        String baseFont = PackAssets.cardGlyphFont(0, 0);
+        assertTrue(line.contains("<font:" + HudOverlayLayout.continuousFont(baseFont) + ">"),
+            "连续牌行必须使用真实 continuous 字体标签");
+        assertTrue(line.contains(PackAssets.cardGlyphChar(cards.getFirst(), 0, 0)),
+            "连续牌行必须使用 base tier 0 的牌面码位");
+        assertFalse(line.contains("<font:" + PackAssets.cardGlyphFont(0, 1) + ">"),
+            "连续牌行不得继续使用旧 Y 档字体");
     }
 
     @Test

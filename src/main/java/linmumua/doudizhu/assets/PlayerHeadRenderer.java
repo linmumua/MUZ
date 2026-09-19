@@ -255,14 +255,23 @@ public final class PlayerHeadRenderer {
      */
     public static String crownMiniMessage(
         int faceWidthPixels, int scale, int downOffsetTier, IntFunction<String> offsetProvider) {
+        return crownMiniMessage(faceWidthPixels, scale, downOffsetTier, offsetProvider, false);
+    }
+
+    /** 连续覆盖层版本：使用基准码位，但切换到独立 continuous 字体。 */
+    public static String crownMiniMessage(
+        int faceWidthPixels, int scale, int downOffsetTier, IntFunction<String> offsetProvider,
+        boolean continuousFont) {
         int crownColumns = CROWN_SHAPE[0].length();
         // 王冠 8 列、脸可能 10 列（描边后），居中要留出左边那半。单位是【像素格】不是像素。
         int leadingCells = (faceWidthPixels - crownColumns) / 2;
         StringBuilder builder = new StringBuilder();
-        builder.append("<font:").append(PackAssets.avatarCrownFont(downOffsetTier)).append('>');
+        String baseFont = PackAssets.avatarCrownFont(continuousFont ? 0 : downOffsetTier);
+        builder.append("<font:").append(continuousFont ? HudOverlayLayout.continuousFont(baseFont) : baseFont).append('>');
+        int glyphTier = continuousFont ? 0 : downOffsetTier;
         int pending = 0;
         for (int row = 0; row < CROWN_SHAPE.length; row++) {
-            String glyph = PackAssets.avatarCrownChar(scale, row, downOffsetTier);
+            String glyph = PackAssets.avatarCrownChar(scale, row, glyphTier);
             String pattern = CROWN_SHAPE[row];
             // 每行都从行首起算：先跳过居中留白，再逐列画。
             pending += leadingCells * scale;
@@ -355,7 +364,13 @@ public final class PlayerHeadRenderer {
      * @return 头像的 MiniMessage 文本；皮肤还没就绪或不可用时返回 {@code null}
      */
     public String miniMessageFor(Player player, int scale, int downOffsetTier, boolean crowned) {
-        return miniMessageFor(skinUrlOf(player), scale, downOffsetTier, crowned);
+        return miniMessageFor(player, scale, downOffsetTier, crowned, false);
+    }
+
+    /** 受控连续字体入口：头像使用 base tier 0 字形，Y 由连续覆盖层资源提供。 */
+    public String miniMessageFor(
+        Player player, int scale, int downOffsetTier, boolean crowned, boolean continuousFont) {
+        return miniMessageFor(skinUrlOf(player), scale, downOffsetTier, crowned, continuousFont);
     }
 
     /**
@@ -372,11 +387,18 @@ public final class PlayerHeadRenderer {
      */
     public String miniMessageForBot(
         Collection<UUID> tableBotIds, UUID botId, int scale, int downOffsetTier, boolean crowned) {
+        return miniMessageForBot(tableBotIds, botId, scale, downOffsetTier, crowned, false);
+    }
+
+    /** 受控连续字体入口：bot 与真人共用同一头像缓存及字体切换路径。 */
+    public String miniMessageForBot(
+        Collection<UUID> tableBotIds, UUID botId, int scale, int downOffsetTier, boolean crowned,
+        boolean continuousFont) {
         int variant = botSkinVariant(tableBotIds, botId);
         if (variant < 0) {
             return null;
         }
-        return miniMessageFor(BOT_SKIN_URLS.get(variant), scale, downOffsetTier, crowned);
+        return miniMessageFor(BOT_SKIN_URLS.get(variant), scale, downOffsetTier, crowned, continuousFont);
     }
 
     /**
@@ -385,7 +407,8 @@ public final class PlayerHeadRenderer {
      * <p>缓存 key 是 {@code scale|tier|outline|url}，所以机器人那几个固定 URL 天然命中缓存 ——
      * 同一张皮肤在同一组配置下只渲染一次。
      */
-    private String miniMessageFor(URL skinUrl, int scale, int downOffsetTier, boolean crowned) {
+    private String miniMessageFor(
+        URL skinUrl, int scale, int downOffsetTier, boolean crowned, boolean continuousFont) {
         if (PackAssets.avatarPixelScaleTierOf(scale) < 0) {
             return null;
         }
@@ -401,7 +424,12 @@ public final class PlayerHeadRenderer {
         // 【crowned 必须进 key】：地主和农民常常用同一张皮肤（同一个 URL），
         // 少了这一维，先渲染的那个会把另一个也带上或带掉王冠。
         int outlineArgb = plugin.getTrickHudAvatarOutlineArgb();
-        String key = scale + "|" + downOffsetTier + "|" + outlineArgb + "|" + crowned + "|" + skinUrl;
+        // 缓存键显式包含字体模式；连续覆盖层与旧 bundle 即使共用同一 raw 请求，也不能串用缓存。
+        String fontMode = continuousFont
+            ? HudOverlayLayout.continuousFont(PackAssets.avatarPixelFont(0))
+            : PackAssets.avatarPixelFont(downOffsetTier);
+        String key = scale + "|" + downOffsetTier + "|" + continuousFont + "|" + fontMode
+            + "|" + outlineArgb + "|" + crowned + "|" + skinUrl;
         String cached = cache.get(key);
         if (cached != null) {
             return cached;
@@ -428,7 +456,7 @@ public final class PlayerHeadRenderer {
                         head = withOutline(head, outlineArgb);
                     }
                     cache.put(key, renderMiniMessage(
-                        head, scale, offsetService::offset, downOffsetTier, crowned));
+                        head, scale, offsetService::offset, downOffsetTier, crowned, continuousFont));
                     failedUntil.remove(key);
                 } catch (Exception exception) {
                     failedUntil.put(key, System.currentTimeMillis() + FAILURE_BACKOFF_MILLIS);
@@ -480,6 +508,13 @@ public final class PlayerHeadRenderer {
      */
     public static String renderMiniMessage(
         int[][] head, int scale, IntFunction<String> offsetProvider, int downOffsetTier, boolean crowned) {
+        return renderMiniMessage(head, scale, offsetProvider, downOffsetTier, crowned, false);
+    }
+
+    /** 受控连续字体版本：码位取 tier 0，字体切到独立 continuous 字体。 */
+    public static String renderMiniMessage(
+        int[][] head, int scale, IntFunction<String> offsetProvider, int downOffsetTier, boolean crowned,
+        boolean continuousFont) {
         // 行数取实际矩阵边长而不是 AVATAR_HEAD_PIXELS：加了描边就是 10x10。
         int rows = head.length;
         // 【列距是 scale，不是 scale + 1】：字形前进 scale + GLYPH_TRAILING_SPACING，
@@ -489,19 +524,21 @@ public final class PlayerHeadRenderer {
         // 【王冠先画】：它是独立字形家族、独立字体，画完净位移为零，脸从原位继续。
         // 放在头像 <font> 标签外面，因为两族在不同字体上，一个标签包不住。
         if (crowned) {
-            builder.append(crownMiniMessage(rows, scale, downOffsetTier, offsetProvider));
+            builder.append(crownMiniMessage(rows, scale, downOffsetTier, offsetProvider, continuousFont));
         }
         // 方块字形挂在自己的字体上，必须套标签才有字形。字体名【随档位变】——
         // 头像族有 201 档、40 档/张，深档在 muz_avatar_2..6 上，写死基名会让深档变豆腐块。
         // 整个头像包一次：8x8 放大后有上百个方块，逐个包标签会把这段文本撑到离谱。
-        builder.append("<font:").append(PackAssets.avatarPixelFont(downOffsetTier)).append('>');
+        int glyphTier = continuousFont ? 0 : downOffsetTier;
+        String baseFont = PackAssets.avatarPixelFont(glyphTier);
+        builder.append("<font:").append(continuousFont ? HudOverlayLayout.continuousFont(baseFont) : baseFont).append('>');
         // 待输出的水平偏移，攒着不立刻写。攒的意义是把三种偏移合成一段再输出：
         // 字间距抵消（-1）、透明像素占位（+scale）、换行回退（-rowWidth）。
         // 一段 CE 偏移片段光是 <font:minecraft:default></font> 这层包装就要 31 个字符，
         // 相邻两段合并能省下整整一层，实测整张 10x10 头像的文本从 5931 降到 5643。
         int pending = 0;
         for (int row = 0; row < rows; row++) {
-            String glyph = PackAssets.avatarPixelChar(scale, row, downOffsetTier);
+            String glyph = PackAssets.avatarPixelChar(scale, row, glyphTier);
             for (int col = 0; col < rows; col++) {
                 int argb = head[row][col];
                 if (((argb >>> 24) & 0xFF) < ALPHA_THRESHOLD) {

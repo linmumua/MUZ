@@ -1,5 +1,6 @@
 package linmumua.doudizhu.debug;
 
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.TrickHudPreview;
@@ -94,13 +95,34 @@ public class DebugHudConfigControllerTest {
     }
 
     @Test
-    void rejectsNumberThatIsNotAResourceTier() {
-        DebugHudConfigController.ValidationException exception = assertThrows(
-            DebugHudConfigController.ValidationException.class,
-            () -> DebugHudConfigController.parsePatch("{\"trick-hud.counter.offset-down\":51}")
-        );
+    void continuousTrickOffsetsAreNumberFieldsAndKeepArbitraryIntegers() {
+        for (String key : List.of(
+            "trick-hud.offset-down",
+            "trick-hud.avatar-offset-down",
+            "trick-hud.counter.offset-down")) {
+            DebugHudConfigController.FieldSpec field = DebugHudConfigController.fields().get(key);
+            assertEquals("number", field.control(), key + " 必须是普通 number 控件");
+            assertTrue(field.options().isEmpty(), key + " 不得暴露旧离散档位");
+        }
 
-        assertTrue(exception.getMessage().contains("合法档位"));
+        DebugHudConfigController.Patch patch = DebugHudConfigController.parsePatch(
+            "{\"trick-hud.offset-down\":37,\"trick-hud.avatar-offset-down\":83,\"trick-hud.counter.offset-down\":-17}");
+        assertEquals(37, patch.values().get("trick-hud.offset-down"));
+        assertEquals(83, patch.values().get("trick-hud.avatar-offset-down"));
+        assertEquals(-17, patch.values().get("trick-hud.counter.offset-down"));
+    }
+
+    @Test
+    void continuousOffsetsRejectFractionalAndOverflowNumbers() {
+        for (String json : List.of(
+            "{\"trick-hud.offset-down\":37.5}",
+            "{\"trick-hud.avatar-offset-down\":999999999999999999999}",
+            "{\"trick-hud.counter.offset-down\":-128.1}")) {
+            DebugHudConfigController.ValidationException exception = assertThrows(
+                DebugHudConfigController.ValidationException.class,
+                () -> DebugHudConfigController.parsePatch(json));
+            assertTrue(exception.getMessage().contains("整数") || exception.getMessage().contains("32 位"));
+        }
     }
 
     @Test
@@ -118,7 +140,7 @@ public class DebugHudConfigControllerTest {
     @Test
     void rejectsOffsetOutsideSelectedHotbarScaleBounds() {
         final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
-        final int invalidOffset = linmumua.doudizhu.debug.HotbarDebugOverlayWriter.minOffsetY(scale) - 1;
+        final int invalidOffset = HudOverlayLayout.minHotbarOffsetY(scale) - 1;
         final DebugHudConfigController.Patch invalidPatch = new DebugHudConfigController.Patch(
             java.util.Map.of("hotbar-hud.offset-y", invalidOffset));
 
@@ -133,11 +155,14 @@ public class DebugHudConfigControllerTest {
     @Test
     void acceptsOffsetWithinSelectedHotbarScaleBounds() {
         final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
-        final int offset = Math.max(linmumua.doudizhu.debug.HotbarDebugOverlayWriter.minOffsetY(scale), -113);
+        final int min = HudOverlayLayout.minHotbarOffsetY(scale);
         final DebugHudConfigController.Patch patch = DebugHudConfigController.parsePatch(
-            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + offset + "}");
-
+            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + min + "}");
         DebugHudConfigController.validateHotbarPatch(scale, 0, patch);
+
+        final DebugHudConfigController.Patch upperPatch = DebugHudConfigController.parsePatch(
+            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + HudOverlayLayout.MAX_TRICK_OFFSET + "}");
+        DebugHudConfigController.validateHotbarPatch(scale, 0, upperPatch);
     }
 
     @Test

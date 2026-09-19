@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.model.CardRank;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,19 @@ class TrickHudCounterCellsTest {
             PackAssets.counterFrameChar(false, 0)), "第二层必须是通用矩形框");
         assertTrue(cells.get(0).layers().get(2).contains(
             PackAssets.counterDigitChar(4, 0)), "第三层必须是数字");
+    }
+
+    @Test
+    void 连续记牌器使用基准零档码位和真实连续字体() throws Exception {
+        List<TrickHudView.CounterCell> cells = counterCellsContinuous(fullDeck(), fullDeck(), false);
+        String text = cells.getFirst().text();
+        assertTrue(text.contains("<font:" + HudOverlayLayout.continuousFont(
+            PackAssets.counterGlyphFont(PackAssets.DEFAULT_HUD_SCALE, 0)) + ">"),
+            "连续记牌器必须使用真实 continuous 字体标签");
+        assertTrue(text.contains(PackAssets.counterRankChar(CardRank.values()[0], 0)),
+            "连续记牌器必须使用 base tier 0 标签码位");
+        assertFalse(text.contains(PackAssets.counterRankChar(CardRank.values()[0], 1)),
+            "连续记牌器不得继续使用旧 Y 档码位");
     }
 
     /**
@@ -212,6 +226,22 @@ class TrickHudCounterCellsTest {
         method.setAccessible(true);
         return (List<TrickHudView.CounterCell>) method.invoke(
             service, playedCounts, remainingCounts, hideWhenExhausted, 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<TrickHudView.CounterCell> counterCellsContinuous(
+        Map<CardRank, Integer> playedCounts,
+        Map<CardRank, Integer> remainingCounts,
+        boolean hideWhenExhausted
+    ) throws Exception {
+        TrickHudService service =
+            (TrickHudService) unsafe().allocateInstance(TrickHudService.class);
+        Method method = TrickHudService.class.getDeclaredMethod(
+            "counterCells", Map.class, Map.class, boolean.class, int.class, int.class, boolean.class);
+        method.setAccessible(true);
+        return (List<TrickHudView.CounterCell>) method.invoke(
+            service, playedCounts, remainingCounts, hideWhenExhausted,
+            PackAssets.DEFAULT_HUD_SCALE, 1, true);
     }
 
     private static Map<CardRank, Integer> fullDeck() {

@@ -1,16 +1,16 @@
 package linmumua.doudizhu.debug;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.HudOverlayLayout;
+import linmumua.doudizhu.assets.HudResourceRequest;
 import linmumua.doudizhu.assets.PackAssets;
-import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.BooleanSupplier;
 
 /**
  * 把 {@code hotbar-hud.offset-y} 写成一份 CraftEngine「调试覆盖层」资源，
@@ -51,12 +51,12 @@ public final class HotbarDebugOverlayWriter {
 
     /**
      * bundle 内烘焙的基准 ascent，与 build.gradle.kts 生成 {@code hotbar_hud.yml} 时
-     * 写的字面量 {@code -100} 必须一致。
+     * 使用的 {@code hotbarBaseAscent} 以及 {@link PackAssets#HOTBAR_BASE_ASCENT} 必须一致。
      *
      * <p>覆盖层的 ascent = 这个基准 - {@code offset-y}，所以 {@code offset-y = 0} 时
      * 覆盖层与 bundle 位置完全重合，拖动才有一个可预期的原点。
      */
-    public static final int BASE_ASCENT = -100;
+    public static final int BASE_ASCENT = PackAssets.HOTBAR_BASE_ASCENT;
 
     /**
      * 贴图原生高度（像素），必须等于三张 Hotbar 图标与选中框 PNG 的真实高度。
@@ -77,9 +77,9 @@ public final class HotbarDebugOverlayWriter {
         return minOffsetY(PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /** 指定 hotbar scale 的合法下界；ascent 必须不大于该档位的字形 height。 */
+    /** 指定 hotbar scale 的合法下界；连续布局会为向上偏移补底部透明行。 */
     public static int minOffsetY(int scale) {
-        return PackAssets.hotbarTier(scale).minOffsetY();
+        return PackAssets.minHotbarOffsetY(scale);
     }
 
     /** {@code offset-y} 的合法上界（默认 100% 档，兼容旧调用方）。 */
@@ -89,17 +89,21 @@ public final class HotbarDebugOverlayWriter {
 
     /** 指定 hotbar scale 的合法上界。 */
     public static int maxOffsetY(int scale) {
-        return PackAssets.hotbarTier(scale).maxOffsetY();
+        return PackAssets.maxHotbarOffsetY(scale);
     }
 
-    /** 把默认 100% 档的 {@code offset-y} 钳位，保留旧调用方行为。 */
+    /** 保留旧名称，但不再静默钳位；越界配置必须明确拒绝。 */
     public static int clampOffsetY(int offsetY) {
         return clampOffsetY(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
     }
 
-    /** 把指定 hotbar scale 的 {@code offset-y} 钳到该档位的合法区间。 */
+    /** 保留旧名称，但边界改为严格校验，避免写出未生成字形。 */
     public static int clampOffsetY(int offsetY, int scale) {
-        return Math.max(minOffsetY(scale), Math.min(maxOffsetY(scale), offsetY));
+        if (offsetY < minOffsetY(scale) || offsetY > maxOffsetY(scale)) {
+            throw new IllegalArgumentException("hotbar offset-y 超出连续资源范围（"
+                + minOffsetY(scale) + ".." + maxOffsetY(scale) + "）：" + offsetY);
+        }
+        return offsetY;
     }
 
     /** 给定默认 100% 档的 {@code offset-y} 算出要写进 images.yml 的 ascent。 */
@@ -109,8 +113,11 @@ public final class HotbarDebugOverlayWriter {
 
     /** 给定指定 scale 的 {@code offset-y} 算出要写进 images.yml 的 ascent。 */
     public static int ascentFor(int offsetY, int scale) {
-        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-        return tier.baseAscent() - clampOffsetY(offsetY, scale);
+        HudResourceRequest request = new HudResourceRequest(0, 0, 0, clampOffsetY(offsetY, scale), scale);
+        return HudOverlayLayout.hotbarGlyphs(request).stream()
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("连续布局未返回 hotbar 字形"))
+            .ascent();
     }
 
     /**
@@ -121,7 +128,7 @@ public final class HotbarDebugOverlayWriter {
      * 对齐 —— 这些正是构建期/运行期双向约定的守护点，埋进需要活 plugin 实例的私有方法里
      * 就只能靠肉眼审查了。
      *
-     * @param offsetY 垂直偏移，正数向下；内部会钳位
+     * @param offsetY 垂直偏移，正数向下；越界会明确拒绝
      */
     public static String buildImagesYaml(int offsetY) {
         return buildImagesYaml(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
@@ -129,41 +136,14 @@ public final class HotbarDebugOverlayWriter {
 
     /** 生成指定 hotbar scale 的三图标与选中框 overlay 声明。 */
     public static String buildImagesYaml(int offsetY, int scale) {
-        PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-        int clamped = clampOffsetY(offsetY, scale);
-        int ascent = ascentFor(clamped, scale);
-        // char 用 \\uXXXX 转义写进 YAML：CraftEngine 按转义序列解析，避免 PUA 字符被编辑器误改。
-        String suffix = scale == PackAssets.HOTBAR_DEFAULT_SCALE ? "" : "_s" + scale;
-        StringBuilder yaml = new StringBuilder()
-            .append("# 【运行期生成，不要手改】由 MUZ 的 HotbarDebugOverlayWriter 按\n")
-            .append("# hotbar-hud.offset-y 写出，每次在 Debug Web 保存垂直偏移都会覆盖这个文件。\n")
-            .append("# scale = ").append(scale).append("%，ascent = ").append(tier.baseAscent())
-            .append(" - offset-y(").append(clamped).append(") = ").append(ascent).append("\n")
-            .append("# 三张独立图标共用 bundle PNG；高度恒等于原生贴图高，保证只位移不缩放。\n")
-            .append("images:\n");
-        for (int index = 0; index < PackAssets.HOTBAR_ICON_COUNT; index++) {
-            yaml.append("  ").append(OVERLAY_NAMESPACE).append(":hotbar_")
-                .append(new String[] {"egg", "water", "tomato"}[index]).append("_debug").append(suffix).append(":\n")
-                .append("    height: ").append(PackAssets.hotbarIconHeight(scale)).append("\n")
-                .append("    ascent: ").append(ascent).append("\n")
-                .append("    font: ").append(tier.font()).append("\n")
-                .append("    file: ").append(PackAssets.hotbarIconTexture(index, scale)).append("\n")
-                .append("    char: ").append(String.format("\\u%04x", tier.debugCodepoint() + index)).append("\n");
-        }
-        yaml.append("  ").append(OVERLAY_NAMESPACE).append(":hotbar_select_debug").append(suffix).append(":\n")
-            .append("    height: ").append(tier.selectHeight()).append("\n")
-            .append("    ascent: ").append(ascent).append("\n")
-            .append("    font: ").append(tier.font()).append("\n")
-            .append("    file: ").append(tier.selectTexture()).append("\n")
-            .append("    char: ").append(String.format("\\u%04x", tier.selectDebugCodepoint())).append("\n");
-        return yaml.toString();
+        int valid = clampOffsetY(offsetY, scale);
+        HudResourceRequest request = new HudResourceRequest(0, 0, 0, valid, scale);
+        return HudOverlayWriter.buildImagesYaml(HudOverlayLayout.hotbarGlyphs(request));
     }
 
     /** 生成覆盖层的 {@code pack.yml} 正文。 */
     public static String buildPackYaml() {
-        return "author: linmumua\n"
-            + "description: \"MUZ hotbar 调试覆盖层（运行期生成，仅 Debug Web 调试用）\"\n"
-            + "namespace: " + OVERLAY_NAMESPACE + "\n";
+        return HudOverlayWriter.buildPackYaml();
     }
 
     /**
@@ -174,145 +154,53 @@ public final class HotbarDebugOverlayWriter {
     }
 
     /**
-     * 在指定异步执行器中等待写出覆盖层资源。调用方负责后续在主线程触发 CraftEngine 重载。
+     * 完整资源快照写入口；HotbarDebugOverlayWriter 不再接受 hotbar-only 写盘请求，
+     * 避免把 card/avatar/counter 的当前状态重置为 0。
      */
-    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
-                                                                       java.util.concurrent.Executor executor) {
+    public CompletableFuture<Boolean> writeAsync(Path root, HudResourceRequest request, Executor executor,
+                                                   BooleanSupplier active) {
+        return new HudOverlayWriter(plugin).writeAsync(root, Objects.requireNonNull(request, "request"),
+            executor, active);
+    }
+
+    /** 旧 hotbar-only 写入口明确拒绝，调用方必须改用完整 HudResourceRequest。 */
+    @Deprecated
+    public CompletableFuture<Boolean> writeAsync(Path root, int offsetY, int scale, Executor executor,
+                                                  BooleanSupplier active) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException(
+            "Hotbar-only 覆盖层写入已禁用，请传入完整 HudResourceRequest"));
+    }
+
+    @Deprecated
+    public CompletableFuture<Boolean> writeAsync(Path root, int offsetY, Executor executor) {
         return writeAsync(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, executor, () -> true);
     }
 
-    /** 带 scale 的兼容重载；覆盖层底图与选中框必须使用同一档位。 */
-    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY, int scale,
-                                                                       java.util.concurrent.Executor executor) {
-        return writeAsync(root, offsetY, scale, executor, () -> true);
-    }
-
-    /**
-     * 带任务有效性检查的异步写出。检查放在真正文件 I/O 所在线程，并且紧邻 writeNow，
-     * 这样关闭或超时后已经排队但尚未开始的写盘不会继续落地旧状态。
-     */
-    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY, int scale,
-                                                                       java.util.concurrent.Executor executor,
-                                                                       java.util.function.BooleanSupplier active) {
-        int clamped = clampOffsetY(offsetY, scale);
-        return java.util.concurrent.CompletableFuture.supplyAsync(
-            () -> active.getAsBoolean() && writeNow(root, clamped, scale), executor);
-    }
-
-    /** 旧参数顺序保留给已有调用点。 */
-    public java.util.concurrent.CompletableFuture<Boolean> writeAsync(Path root, int offsetY,
-                                                                       java.util.concurrent.Executor executor,
-                                                                       java.util.function.BooleanSupplier active) {
+    @Deprecated
+    public CompletableFuture<Boolean> writeAsync(Path root, int offsetY, Executor executor,
+                                                  BooleanSupplier active) {
         return writeAsync(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE, executor, active);
     }
 
-
-    /**
-     * 同步写出覆盖层资源；仅保留给旧调用点，实际异步流程必须先在主线程解析 Path。
-     *
-     * @return 是否真的写成功；CraftEngine 缺失或写失败都返回 false
-     */
+    /** 旧 hotbar-only 同步入口明确拒绝，防止覆盖其它三层。 */
+    @Deprecated
     boolean writeNow(int offsetY) {
-        return writeNow(offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+        throw new UnsupportedOperationException("Hotbar-only 覆盖层写入已禁用，请传入完整 HudResourceRequest");
     }
 
+    @Deprecated
     boolean writeNow(int offsetY, int scale) {
-        if (!Bukkit.isPrimaryThread()) {
-            plugin.getLogger().warning("异步写出 hotbar 调试覆盖层时未提供主线程解析的目录，已拒绝访问 CraftEngine PluginManager。");
-            return false;
-        }
-        Path root = overlayRoot();
-        if (root == null) {
-            plugin.getLogger().info("CraftEngine 未检测到，跳过 hotbar 调试覆盖层生成。");
-            return false;
-        }
-        return writeNow(root, offsetY, scale);
+        throw new UnsupportedOperationException("Hotbar-only 覆盖层写入已禁用，请传入完整 HudResourceRequest");
     }
 
-    /**
-     * 使用主线程预先解析的目录写出资源；异步阶段不得再调用 Bukkit PluginManager。
-     */
+    @Deprecated
     boolean writeNow(Path root, int offsetY) {
-        return writeNow(root, offsetY, PackAssets.HOTBAR_DEFAULT_SCALE);
+        throw new UnsupportedOperationException("Hotbar-only 覆盖层写入已禁用，请传入完整 HudResourceRequest");
     }
 
+    @Deprecated
     boolean writeNow(Path root, int offsetY, int scale) {
-        if (root == null) {
-            return false;
-        }
-        Path imagesDirectory = root.resolve("configuration").resolve("images");
-        Path imagesFile = imagesDirectory.resolve("hotbar_debug.yml");
-        Path imagesTemp = null;
-        try {
-            Files.createDirectories(imagesDirectory);
-            // 只原子替换运行期 images 文件；resources/muz/pack.yml 属于正式 bundle，不得被覆盖。
-            imagesTemp = Files.createTempFile(imagesDirectory, "hotbar_debug.yml.", ".tmp");
-            Files.writeString(imagesTemp, buildImagesYaml(offsetY, scale), StandardCharsets.UTF_8);
-            atomicReplace(imagesTemp, imagesFile);
-            plugin.getLogger().info("hotbar 调试覆盖层已写出，scale=" + scale + "%，offset-y="
-                + clampOffsetY(offsetY, scale) + "（ascent=" + ascentFor(offsetY, scale) + "）：" + root);
-            return true;
-        } catch (Exception exception) {
-            try {
-                if (imagesTemp != null) {
-                    Files.deleteIfExists(imagesTemp);
-                }
-            } catch (Exception cleanupException) {
-                plugin.getLogger().warning("清理 hotbar 调试覆盖层临时文件失败：" + cleanupException.getMessage());
-            }
-            // 不吞异常：写失败时垂直偏移不会生效，必须让服主看到原因
-            plugin.getLogger().warning("写出 hotbar 调试覆盖层失败：" + exception.getMessage());
-            return false;
-        }
-    }
-
-    private static void atomicReplace(Path source, Path target) throws IOException {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (java.nio.file.AtomicMoveNotSupportedException exception) {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
-
-    /** 在保存事务开始前捕获当前 overlay 文件，供后续资源失败时补偿。 */
-    OverlayFileState capture(Path root) throws IOException {
-        Path file = overlayFile(root);
-        return Files.isRegularFile(file)
-            ? new OverlayFileState(true, Files.readAllBytes(file))
-            : new OverlayFileState(false, new byte[0]);
-    }
-
-    /** 原子恢复保存前的 overlay；不存在的旧文件会被删除。 */
-    void restore(Path root, OverlayFileState state) throws IOException {
-        Objects.requireNonNull(state, "state");
-        Path file = overlayFile(root);
-        if (!state.exists()) {
-            Files.deleteIfExists(file);
-            return;
-        }
-        Files.createDirectories(file.getParent());
-        Path temp = Files.createTempFile(file.getParent(), "hotbar_debug.yml.rollback.", ".tmp");
-        try {
-            Files.write(temp, state.bytes());
-            atomicReplace(temp, file);
-        } finally {
-            Files.deleteIfExists(temp);
-        }
-    }
-
-    private static Path overlayFile(Path root) {
-        return root.resolve("configuration").resolve("images").resolve("hotbar_debug.yml");
-    }
-
-    record OverlayFileState(boolean exists, byte[] bytes) {
-        OverlayFileState {
-            bytes = bytes.clone();
-        }
-
-        @Override
-        public byte[] bytes() {
-            return bytes.clone();
-        }
+        throw new UnsupportedOperationException("Hotbar-only 覆盖层写入已禁用，请传入完整 HudResourceRequest");
     }
 
     /**

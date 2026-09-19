@@ -2,10 +2,18 @@ package linmumua.doudizhu.debug;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
 import org.junit.jupiter.api.Test;
+import sun.misc.Unsafe;
+
+import java.lang.reflect.Field;
+import java.nio.file.Path;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 
 /**
  * 守护 hotbar 调试覆盖层的「垂直偏移 → 字形 ascent」换算。
@@ -18,8 +26,10 @@ class HotbarDebugOverlayWriterTest {
 
     @Test
     void 偏移零时与构建期烘焙的基准ascent重合() {
-        // offset-y = 0 必须等于 bundle 里烘焙的 -100，否则拖动没有可预期的原点：
+        // offset-y = 0 必须等于 bundle 里烘焙的基础 ascent，否则拖动没有可预期的原点：
         // 一开面板底图就会自己跳一下。
+        assertEquals(-43, PackAssets.HOTBAR_BASE_ASCENT);
+        assertEquals(PackAssets.HOTBAR_BASE_ASCENT, HotbarDebugOverlayWriter.BASE_ASCENT);
         assertEquals(HotbarDebugOverlayWriter.BASE_ASCENT, HotbarDebugOverlayWriter.ascentFor(0));
     }
 
@@ -33,23 +43,23 @@ class HotbarDebugOverlayWriterTest {
     }
 
     @Test
-    void 钳位守住Minecraft的ascent不得大于height() {
-        // Minecraft 要求 ascent <= height。向上偏到极限时必须刚好不越界，
-        // 越界的资源包会被客户端拒绝加载，整套字形一起失效。
+    void 连续补行范围允许ascent超过原始height但拒绝越界() {
+        // 连续布局会在 ascent 超过原始 height 时补底部透明行，不能再把 offset 静默钳回旧下界。
         int minOffset = HotbarDebugOverlayWriter.minOffsetY();
-        assertEquals(HotbarDebugOverlayWriter.GLYPH_HEIGHT,
-            HotbarDebugOverlayWriter.ascentFor(minOffset));
-        // 超出下界要被钳回来，而不是算出一个非法 ascent
-        assertEquals(HotbarDebugOverlayWriter.GLYPH_HEIGHT,
-            HotbarDebugOverlayWriter.ascentFor(minOffset - 50));
-        assertTrue(HotbarDebugOverlayWriter.ascentFor(minOffset - 50)
-            <= HotbarDebugOverlayWriter.GLYPH_HEIGHT);
+        assertEquals(256, HotbarDebugOverlayWriter.ascentFor(minOffset));
+        assertThrows(IllegalArgumentException.class,
+            () -> HotbarDebugOverlayWriter.ascentFor(minOffset - 1));
+        assertTrue(HotbarDebugOverlayWriter.ascentFor(minOffset)
+            > HotbarDebugOverlayWriter.GLYPH_HEIGHT);
     }
 
     @Test
     void 生成的YAML与PackAssets的码位和字体严格对齐() {
         String yaml = HotbarDebugOverlayWriter.buildImagesYaml(24);
-        assertTrue(yaml.contains("\nimages:\n"), "overlay YAML 必须使用真实换行分隔根节点");
+        Object parsed = new org.yaml.snakeyaml.Yaml().load(yaml);
+        assertTrue(parsed instanceof java.util.Map<?, ?>, "overlay YAML 必须能按结构化根节点解析");
+        assertTrue(((java.util.Map<?, ?>) parsed).containsKey("images"),
+            "overlay YAML 根节点必须包含 images");
         assertFalse(yaml.contains("\\n"), "overlay YAML 不得把换行写成字面量 \\n");
 
         // 三张 overlay 图标的码位必须来自 PackAssets 复算侧，不能随手写字面量。
@@ -97,5 +107,21 @@ class HotbarDebugOverlayWriterTest {
             "Writer 不得恢复旧的命令分发入口");
         assertTrue(!source.contains("dispatchCommand"),
             "Writer 不得在异步写盘后自行分发 CraftEngine 命令");
+    }
+
+    @Test
+    void hotbarOnly写入口明确拒绝避免覆盖其它三层() throws Exception {
+        HotbarDebugOverlayWriter writer = new HotbarDebugOverlayWriter(unsafePlugin());
+        assertThrows(UnsupportedOperationException.class, () -> writer.writeNow(0, 100));
+        Executor direct = Runnable::run;
+        CompletionException failure = assertThrows(CompletionException.class,
+            () -> writer.writeAsync(Path.of("unused"), 0, 100, direct, () -> true).join());
+        assertTrue(failure.getCause() instanceof UnsupportedOperationException);
+    }
+
+    private static DoudizhuPlugin unsafePlugin() throws Exception {
+        Field field = Unsafe.class.getDeclaredField("theUnsafe");
+        field.setAccessible(true);
+        return (DoudizhuPlugin) ((Unsafe) field.get(null)).allocateInstance(DoudizhuPlugin.class);
     }
 }

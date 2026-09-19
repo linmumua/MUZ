@@ -123,6 +123,12 @@ public final class PackAssets {
     public static final int COUNTER_DEFAULT_SCALE = DEFAULT_HUD_SCALE;
     public static final int HOTBAR_DEFAULT_SCALE = DEFAULT_HUD_SCALE;
 
+    /**
+     * Hotbar 三图标基础 ascent；与 build.gradle.kts 的 hotbarBaseAscent 同源。
+     * HotbarDebugOverlayWriter 以此作为 offset-y=0 的运行期覆盖层基准。
+     */
+    public static final int HOTBAR_BASE_ASCENT = PackTiers.HOTBAR_BASE_ASCENT;
+
     /** counter 各 scale 的独立码位起点；100 档必须保留旧 0xE900。 */
     public static final int[] COUNTER_SCALE_CODEPOINT_STARTS = PackTiers.COUNTER_SCALE_CODEPOINT_STARTS;
 
@@ -270,6 +276,10 @@ public final class PackAssets {
      * 会被误判为「pack_format 不受支持」。反向新增未在构建表出现的格式也不允许。
      */
     public static final int[] SUPPORTED_RESOURCE_PACK_FORMATS = {75, 84, 88};
+
+    public static final int MIN_TRICK_OFFSET = -128;
+    public static final int MAX_TRICK_OFFSET = 512;
+    public static final int MAX_HOTBAR_OFFSET_Y = MAX_TRICK_OFFSET;
 
     public static final String HOTBAR_HUD_FONT = "minecraft:muz_hotbar";
 
@@ -906,7 +916,20 @@ public final class PackAssets {
     /** counter 完整紧凑几何；downTier 只改变三层实际 ascent，偏移表独立于头像表。 */
     public static CounterTier counterTier(int scale, int downTier) {
         counterScaleIndex(scale);
-        int downOffset = counterDownOffsetAt(downTier);
+        return counterTierForRawOffset(scale, counterDownOffsetAt(downTier), downTier);
+    }
+
+    /**
+     * 连续记牌器偏移的几何快照。保持原有 PNG 尺寸、advance 与 cell 几何，只把三层
+     * ascent 按 rawOffset 调整；rawOffset 的严格范围由连续资源请求统一约束。
+     */
+    public static CounterTier counterTierForOffset(int scale, int rawOffset) {
+        requireTrickOffset(rawOffset, "记牌器");
+        counterScaleIndex(scale);
+        return counterTierForRawOffset(scale, rawOffset, 0);
+    }
+
+    private static CounterTier counterTierForRawOffset(int scale, int downOffset, int fontOffsetTier) {
         int labelWidth = scalePixel(COUNTER_LABEL_WIDTH, scale);
         int labelHeight = scalePixel(COUNTER_LABEL_HEIGHT, scale);
         int frameWidth = scalePixel(COUNTER_FRAME_WIDTH, scale);
@@ -933,7 +956,7 @@ public final class PackAssets {
             frameWidth, frameHeight, frameAdvance, frameAscent, frameTopDelta,
             digitWidth, digitHeight, digitAdvance, digitAscent, digitInset,
             0, frameY, 0, digitY,
-            counterGlyphFont(scale, downTier), labelTexture, frameTexture, digitTexture,
+            counterGlyphFont(scale, fontOffsetTier), labelTexture, frameTexture, digitTexture,
             counterCodepointStart(scale)
         );
     }
@@ -1002,7 +1025,7 @@ public final class PackAssets {
         int height = scalePixel(HOTBAR_HUD_GLYPH_HEIGHT, scale);
         int selectWidth = scalePixel(HOTBAR_SELECT_GLYPH_WIDTH, scale);
         int selectHeight = scalePixel(HOTBAR_SELECT_GLYPH_HEIGHT, scale);
-        int baseAscent = scaleSigned(PackTiers.HOTBAR_BASE_ASCENT, scale);
+        int baseAscent = scaleSigned(HOTBAR_BASE_ASCENT, scale);
         return new HotbarTier(
             scale, width, height, width + 1, baseAscent,
             baseAscent - height, 256,
@@ -1026,6 +1049,40 @@ public final class PackAssets {
 
     public static HotbarTier hotbarGeometry(int scale) {
         return hotbarTier(scale);
+    }
+
+    /** 连续 Trick 偏移的公共校验；严格整数解析仍由 controller 负责。 */
+    public static void requireTrickOffset(int offset, String family) {
+        if (offset < MIN_TRICK_OFFSET || offset > MAX_TRICK_OFFSET) {
+            throw new IllegalArgumentException(
+                family + "连续偏移必须在 " + MIN_TRICK_OFFSET + ".." + MAX_TRICK_OFFSET + "：" + offset);
+        }
+    }
+
+    /** 已生成 hotbar scale 的公共校验。 */
+    public static void requireHotbarScale(int scale) {
+        requireScale(scale, HOTBAR_SCALE_TIERS, "hotbar");
+    }
+
+    /** 指定 scale 的连续 hotbar offset-y 下界；baseAscent 下方最多扩展 256 个显示像素。 */
+    public static int minHotbarOffsetY(int scale) {
+        requireHotbarScale(scale);
+        return scaleSigned(HOTBAR_BASE_ASCENT, scale) - 256;
+    }
+
+    public static int maxHotbarOffsetY(int scale) {
+        requireHotbarScale(scale);
+        return MAX_HOTBAR_OFFSET_Y;
+    }
+
+    public static void requireHotbarOffset(int offsetY, int scale) {
+        requireHotbarScale(scale);
+        int min = minHotbarOffsetY(scale);
+        if (offsetY < min || offsetY > maxHotbarOffsetY(scale)) {
+            throw new IllegalArgumentException(
+                "hotbar offset-y 必须在 " + min + ".." + maxHotbarOffsetY(scale)
+                    + "（scale=" + scale + "）：" + offsetY);
+        }
     }
 
     public static int hotbarCodepoint(int scale) {
@@ -1210,7 +1267,11 @@ public final class PackAssets {
      * CraftEngineBundleResourcesTest 逐档逐张比对守护。
      */
     public static String cardGlyphChar(DoudizhuCard card, int heightTier, int downOffsetTier) {
-        String assetName = cardAssetName(card);
+        return cardGlyphCharByAssetName(cardAssetName(card), heightTier, downOffsetTier);
+    }
+
+    /** 牌背及牌面资源按构建期排序表取连续覆盖层的基础码位。 */
+    public static String cardGlyphCharByAssetName(String assetName, int heightTier, int downOffsetTier) {
         Integer index = CARD_GLYPH_INDEX.get(assetName);
         if (index == null) {
             // 走到这里说明 cardAssetName 产出了字形表里没有的名字，

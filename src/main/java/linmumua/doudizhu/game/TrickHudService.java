@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
@@ -167,8 +168,12 @@ final class TrickHudService {
         int counterScale,
         int counterDownOffsetTier,
         int counterGap,
-        boolean counterHideExhausted
+        boolean counterHideExhausted,
+        int cardOffsetDown,
+        int avatarOffsetDown,
+        int counterOffsetDown
     ) {
+        /** 原始像素值必须保留；tier 只用于旧 bundle 兼容路径。 */
     }
 
     /**
@@ -199,10 +204,8 @@ final class TrickHudService {
         // avatarGap 不校验：负值是有意义的用法（让第一张牌压在头像上做紧凑排版）。
         int avatarGap = config.getInt("trick-hud.avatar-gap", DEFAULT_AVATAR_GAP);
 
-        // 缩放与向下偏移仍然只能落在【构建期预生成的档位】上（height/ascent 固化在资源包的
-        // images.yml 里，运行时改不了），但档位现在很密，所以【就近吸附】而不是回退到默认：
-        // 服主写 111 想要的显然是「111 附近」，吸到 110 的误差 1 像素肉眼看不出；
-        // 而回退到默认 50 会让他觉得「配了没用」。越界才警告 —— 配 500 想要的不是 400。
+        // 牌高仍是构建期离散资源，height/ascent 固化在资源包 images.yml 里，运行时只能
+        // 选择已生成档位；三项 Y 则在下面按连续 raw 范围读取，旧 tier 只给 legacy fallback。
         int cardHeight = config.getInt("trick-hud.card-height", PackAssets.DEFAULT_CARD_HEIGHT);
         int heightTier = snapTier(
             cardHeight, PackAssets.cardGlyphHeightMin(), PackAssets.cardGlyphHeightMax(),
@@ -210,19 +213,17 @@ final class TrickHudService {
             "trick-hud.card-height", warn, PackAssets::cardGlyphHeightAt);
 
         int offsetDown = config.getInt("trick-hud.offset-down", DEFAULT_OFFSET_DOWN);
-        int downOffsetTier = snapTier(
-            offsetDown, PackAssets.cardGlyphDownOffsetMin(), PackAssets.cardGlyphDownOffsetMax(),
-            PackAssets.nearestCardGlyphDownOffsetTier(offsetDown),
+        int downOffsetTier = rawOffsetTier(
+            offsetDown, PackAssets.nearestCardGlyphDownOffsetTier(offsetDown),
             "trick-hud.offset-down", warn, PackAssets::cardGlyphDownOffsetAt);
 
         // 头像行的偏移【独立于牌行】，查的是头像自己那张档位表。两行能各自随便调是刻意的，
         // 代价是配歪了两行会重叠 —— 那由下面的 warnIfRowsOverlap 出警告，不在这里拦。
         int avatarOffsetDown = config.getInt("trick-hud.avatar-offset-down", DEFAULT_AVATAR_OFFSET_DOWN);
-        int avatarDownOffsetTier = snapTier(
-            avatarOffsetDown, PackAssets.avatarDownOffsetMin(), PackAssets.avatarDownOffsetMax(),
-            PackAssets.nearestAvatarDownOffsetTier(avatarOffsetDown),
+        int avatarDownOffsetTier = rawOffsetTier(
+            avatarOffsetDown, PackAssets.nearestAvatarDownOffsetTier(avatarOffsetDown),
             "trick-hud.avatar-offset-down", warn, PackAssets::avatarDownOffsetAt);
-        warnIfRowsOverlap(downOffsetTier, avatarDownOffsetTier, avatarScale, warn);
+        warnIfRowsOverlap(offsetDown, avatarOffsetDown, avatarScale, warn);
 
         // offset-x 不校验：任意整数都合法（正右负左），靠负空格实现，不依赖预生成字形。
         int offsetX = config.getInt("trick-hud.offset-x", 0);
@@ -252,9 +253,8 @@ final class TrickHudService {
         int counterOffsetDown = config.contains(counterOffsetKey)
             ? config.getInt(counterOffsetKey, DEFAULT_COUNTER_OFFSET_DOWN)
             : config.getInt("trick-hud.avatar-offset-down", DEFAULT_COUNTER_OFFSET_DOWN);
-        int counterDownOffsetTier = snapTier(
-            counterOffsetDown, PackAssets.counterDownOffsetMin(), PackAssets.counterDownOffsetMax(),
-            PackAssets.nearestCounterDownOffsetTier(counterOffsetDown),
+        int counterDownOffsetTier = rawOffsetTier(
+            counterOffsetDown, PackAssets.nearestCounterDownOffsetTier(counterOffsetDown),
             counterOffsetKey, warn, PackAssets::counterDownOffsetAt);
 
         // 和 avatarGap 不同，这里【必须拦负值】：头像槽的负间距是有意义的紧凑排版，
@@ -271,7 +271,8 @@ final class TrickHudService {
 
         return new Settings(
             enabled, avatarScale, avatarGap, cardStep, heightTier, downOffsetTier, avatarDownOffsetTier, offsetX,
-            rowXOffsets, counterEnabled, counterScale, counterDownOffsetTier, counterGap, counterHideExhausted);
+            rowXOffsets, counterEnabled, counterScale, counterDownOffsetTier, counterGap, counterHideExhausted,
+            offsetDown, avatarOffsetDown, counterOffsetDown);
     }
 
     /**
@@ -289,12 +290,25 @@ final class TrickHudService {
      * @param resolve  档序号 → 实际值，用于把「吸附到了多少」写进警告
      * @return 最终采用的档序号（与传入的 {@code tier} 相同，这里只负责警告）
      */
+    private static int rawOffsetTier(
+        int value, int tier, String key, Consumer<String> warn,
+        java.util.function.IntUnaryOperator resolve) {
+        int resolved = resolve.applyAsInt(tier);
+        if (value < PackAssets.MIN_TRICK_OFFSET || value > PackAssets.MAX_TRICK_OFFSET) {
+            warn.accept(key + "=" + value + " 超出连续覆盖层范围（"
+                + PackAssets.MIN_TRICK_OFFSET + ".." + PackAssets.MAX_TRICK_OFFSET
+                + "），旧 bundle 兼容档为 " + resolved + "；HUD 将隐藏");
+        }
+        return tier;
+    }
+
     private static int snapTier(
         int value, int min, int max, int tier, String key,
         Consumer<String> warn, java.util.function.IntUnaryOperator resolve) {
+        int resolved = resolve.applyAsInt(tier);
         if (value < min || value > max) {
             warn.accept(key + "=" + value + " 超出资源包预生成范围（" + min + ".." + max
-                + "），已按最接近的 " + resolve.applyAsInt(tier) + " 处理");
+                + "），旧 bundle 兼容档为 " + resolved + "；连续覆盖层未就绪时将隐藏 HUD");
         }
         return tier;
     }
@@ -323,16 +337,14 @@ final class TrickHudService {
      * @param avatarScale          大头像倍数，决定头像盒高
      */
     static void warnIfRowsOverlap(
-        int cardDownOffsetTier, int avatarDownOffsetTier, int avatarScale, Consumer<String> warn) {
-        int cardDown = PackAssets.cardGlyphDownOffsetAt(cardDownOffsetTier);
-        int avatarDown = PackAssets.avatarDownOffsetAt(avatarDownOffsetTier);
+        int cardDown, int avatarDown, int avatarScale, Consumer<String> warn) {
         int boxHeight = PackAssets.AVATAR_ROW_TOTAL_PIXELS * avatarScale;
         int required = PackAssets.avatarRowDownOffset(cardDown, avatarScale);
         if (avatarDown >= required) {
             return;
         }
-        // 【不枚举合法值】：档位放开后有两百多档，列出来是天书。给一个可直接抄的建议值就够，
-        // 而且现在任意整数都能配（会就近吸附），服主不需要知道网格在哪。
+        // 【不枚举合法值】：连续 raw Y 不需要知道旧档网格，给一个可直接抄的建议值就够；
+        // 旧 tier 只用于未就绪时的 legacy fallback，不参与 raw 改写。
         warn.accept("trick-hud.avatar-offset-down=" + avatarDown + " 比牌行低太少，头像会压进牌里 "
             + (required - avatarDown) + " 像素（牌行 offset-down=" + cardDown + " + 头像行整体高 "
             + boxHeight + " = 至少要 " + required + "，盒高按 12*avatar-scale 算：描边 10 行加"
@@ -440,6 +452,7 @@ final class TrickHudService {
         }
         List<UUID> tableBotIds = botIdsOf(seats.toArray(new Seat[0]));
         int tier = current0.avatarRowDownTier();
+        boolean continuousFont = !legacyBundleExact(current0.settings());
         int bigScale = current0.settings().avatarScale();
         for (Seat seat : seats) {
             if (seat == null || seat.playerId() == null) {
@@ -451,11 +464,12 @@ final class TrickHudService {
                 // 【只热不戴冠那版】：这里是发牌时机，地主还没叫出来。
                 // 地主定下来后由 prewarmLandlordCrown 单独补他那一版。
                 if (seat.isBot()) {
-                    headRenderer.miniMessageForBot(tableBotIds, seat.playerId(), scale, tier, false);
+                    headRenderer.miniMessageForBot(
+                        tableBotIds, seat.playerId(), scale, tier, false, continuousFont);
                 } else {
                     Player player = Bukkit.getPlayer(seat.playerId());
                     if (player != null) {
-                        headRenderer.miniMessageFor(player, scale, tier, false);
+                        headRenderer.miniMessageFor(player, scale, tier, false, continuousFont);
                     }
                 }
             }
@@ -491,14 +505,16 @@ final class TrickHudService {
         }
         List<UUID> tableBotIds = botIdsOf(seats.toArray(new Seat[0]));
         int tier = current0.avatarRowDownTier();
+        boolean continuousFont = !legacyBundleExact(current0.settings());
         // 两种 scale 都要：地主也会轮到坐中间那个大头像的位置。
         for (int scale : new int[] {SIDE_AVATAR_SCALE, current0.settings().avatarScale()}) {
             if (seat.isBot()) {
-                headRenderer.miniMessageForBot(tableBotIds, seat.playerId(), scale, tier, true);
+                headRenderer.miniMessageForBot(
+                    tableBotIds, seat.playerId(), scale, tier, true, continuousFont);
             } else {
                 Player player = Bukkit.getPlayer(seat.playerId());
                 if (player != null) {
-                    headRenderer.miniMessageFor(player, scale, tier, true);
+                    headRenderer.miniMessageFor(player, scale, tier, true, continuousFont);
                 }
             }
         }
@@ -608,6 +624,13 @@ final class TrickHudService {
             hide(viewer);
             return;
         }
+        boolean legacyBundle = legacyBundleExact(settings);
+        if (!overlayReadyFor(settings) && !legacyBundle) {
+            warnOverlayNotReadyOnce(viewer, settings);
+            hide(viewer);
+            return;
+        }
+        boolean continuousFont = !legacyBundle;
         boolean showCards = (visibleRows & 1) != 0;
         boolean showAvatars = (visibleRows & 2) != 0;
         boolean showCounter = settings.counterEnabled()
@@ -616,9 +639,9 @@ final class TrickHudService {
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
         String line = TrickHudView.buildMiniMessage(
-            showAvatars ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
-            showAvatars ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
-            showAvatars ? avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
+            showAvatars ? avatarSlot(next, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
             showAvatars ? current0.avatarSlotWidth() : 0,
             settings.avatarGap(),
             showCards ? cards : List.of(),
@@ -629,8 +652,9 @@ final class TrickHudService {
             settings.offsetX(),
             settings.rowXOffsets(),
             showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(),
-                settings.counterScale(), settings.counterDownOffsetTier()) : List.of(),
-            settings.counterGap()
+                settings.counterScale(), settings.counterDownOffsetTier(), continuousFont) : List.of(),
+            settings.counterGap(),
+            continuousFont
         );
         apply(viewer, line);
     }
@@ -653,7 +677,8 @@ final class TrickHudService {
         Map<CardRank, Integer> remainingCounts,
         boolean hideWhenExhausted,
         int scale,
-        int downOffsetTier
+        int downOffsetTier,
+        boolean continuousFont
     ) {
         if ((playedCounts == null || playedCounts.isEmpty())
             && (remainingCounts == null || remainingCounts.isEmpty())) {
@@ -661,8 +686,10 @@ final class TrickHudService {
         }
         Map<CardRank, Integer> played = playedCounts == null ? Map.of() : playedCounts;
         Map<CardRank, Integer> remaining = remainingCounts == null ? Map.of() : remainingCounts;
-        String font = PackAssets.counterGlyphFont(scale, downOffsetTier);
-        PackAssets.CounterTier geometry = PackAssets.counterGeometry(scale, downOffsetTier);
+        int glyphDownTier = continuousFont ? 0 : downOffsetTier;
+        String baseFont = PackAssets.counterGlyphFont(scale, glyphDownTier);
+        String font = continuousFont ? HudOverlayLayout.continuousFont(baseFont) : baseFont;
+        PackAssets.CounterTier geometry = PackAssets.counterGeometry(scale, glyphDownTier);
         List<TrickHudView.CounterCell> cells = new ArrayList<>(CardRank.values().length);
         for (CardRank rank : CardRank.values()) {
             int initial = initialCount(rank);
@@ -677,9 +704,9 @@ final class TrickHudService {
             String frameColor = "white";
             String labelColor = exhausted ? "dark_gray" : "white";
             String digitColor = exhausted ? "dark_gray" : "gray";
-            String frame = layer(font, PackAssets.counterFrameChar(exhausted, scale, downOffsetTier), frameColor);
-            String label = layer(font, PackAssets.counterRankChar(rank, scale, downOffsetTier), labelColor);
-            String digit = layer(font, PackAssets.counterDigitChar(shown, scale, downOffsetTier), digitColor);
+            String frame = layer(font, PackAssets.counterFrameChar(exhausted, scale, glyphDownTier), frameColor);
+            String label = layer(font, PackAssets.counterRankChar(rank, scale, glyphDownTier), labelColor);
+            String digit = layer(font, PackAssets.counterDigitChar(shown, scale, glyphDownTier), digitColor);
             // 层顺序固定为 label → frame → digit；View 按当前生成 geometry 的 advance 拉回后层。
             cells.add(new TrickHudView.CounterCell(List.of(label, frame, digit), geometry.advance()));
         }
@@ -700,7 +727,7 @@ final class TrickHudService {
     ) {
         return counterCells(
             playedCounts, remainingCounts, hideWhenExhausted,
-            PackAssets.DEFAULT_HUD_SCALE, downOffsetTier);
+            PackAssets.DEFAULT_HUD_SCALE, downOffsetTier, false);
     }
 
     static Map<CardRank, Integer> playedCountsFromRemaining(Map<CardRank, Integer> remainingCounts) {
@@ -726,6 +753,29 @@ final class TrickHudService {
 
     private static String layer(String font, String glyph, String color) {
         return "<" + color + "><font:" + font + ">" + glyph + "</font></" + color + ">";
+    }
+
+    private boolean overlayReadyFor(Settings settings) {
+        HudOverlayRuntimeState state = plugin.getHudOverlayRuntimeState();
+        return state != null && state.matchesTrick(
+            settings.cardOffsetDown(), settings.avatarOffsetDown(), settings.counterOffsetDown());
+    }
+
+    private static boolean legacyBundleExact(Settings settings) {
+        return settings.cardOffsetDown() == PackAssets.cardGlyphDownOffsetAt(settings.downOffsetTier())
+            && settings.avatarOffsetDown() == PackAssets.avatarDownOffsetAt(settings.avatarDownOffsetTier())
+            && settings.counterOffsetDown() == PackAssets.counterDownOffsetAt(settings.counterDownOffsetTier());
+    }
+
+    private void warnOverlayNotReadyOnce(Player viewer, Settings settings) {
+        if (!offsetWarnedViewers.add(viewer.getUniqueId())) {
+            return;
+        }
+        viewer.sendActionBar(MuzTheme.danger(
+            "出牌 HUD 不可用：连续字体覆盖层未校验，请重新生成并加载资源包"));
+        plugin.getLogger().warning("出牌 HUD 因连续字体覆盖层未就绪而隐藏：card="
+            + settings.cardOffsetDown() + ", avatar=" + settings.avatarOffsetDown()
+            + ", counter=" + settings.counterOffsetDown());
     }
 
     /**
@@ -841,7 +891,7 @@ final class TrickHudService {
      * 让排版把它在槽里居中。
      */
     private TrickHudView.Avatar avatarSlot(
-        Seat seat, int scale, List<UUID> tableBotIds, int avatarRowDownTier) {
+        Seat seat, int scale, List<UUID> tableBotIds, int avatarRowDownTier, boolean continuousFont) {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }
@@ -855,15 +905,16 @@ final class TrickHudService {
         if (seat.isBot()) {
             // 机器人不会掉线：它的皮肤来自内置常量池，null 只可能是下载中或下载失败。
             rendered = headRenderer.miniMessageForBot(
-                tableBotIds, seat.playerId(), scale, avatarRowDownTier, crowned);
+                tableBotIds, seat.playerId(), scale, avatarRowDownTier, crowned, continuousFont);
         } else {
             Player player = Bukkit.getPlayer(seat.playerId());
             offline = player == null;
             rendered = offline
                 ? null
-                : headRenderer.miniMessageFor(player, scale, avatarRowDownTier, crowned);
+                : headRenderer.miniMessageFor(player, scale, avatarRowDownTier, crowned, continuousFont);
         }
-        return avatarSlotOf(seat, scale, isOutlined(), rendered, avatarRowDownTier, offline);
+        return avatarSlotOf(
+            seat, scale, isOutlined(), rendered, avatarRowDownTier, offline, continuousFont);
     }
 
     /**
@@ -882,6 +933,12 @@ final class TrickHudService {
     static TrickHudView.Avatar avatarSlotOf(
         Seat seat, int scale, boolean outlined, String rendered, int avatarRowDownTier,
         boolean offline) {
+        return avatarSlotOf(seat, scale, outlined, rendered, avatarRowDownTier, offline, false);
+    }
+
+    static TrickHudView.Avatar avatarSlotOf(
+        Seat seat, int scale, boolean outlined, String rendered, int avatarRowDownTier,
+        boolean offline, boolean continuousFont) {
         if (seat == null || seat.playerId() == null) {
             return TrickHudView.Avatar.EMPTY;
         }
@@ -896,11 +953,16 @@ final class TrickHudService {
         if (offline) {
             // 掉线是【持续状态】：这一槽在玩家回来之前一直没有头像，必须画图标占住，
             // 否则 HUD 上会留一个长期的洞，看着像 HUD 坏了。
-            // 图标挂在 PackAssets.BOT_AVATAR_FONT 上，不套 <font:...> 会是豆腐块。
+            // 连续覆盖层必须使用 base tier 0 的 bot 码位与独立 continuous 字体；
+            // 旧 bundle 路径才继续使用头像行旧档码位。
+            String botFont = continuousFont
+                ? HudOverlayLayout.continuousFont(PackAssets.BOT_AVATAR_FONT)
+                : PackAssets.BOT_AVATAR_FONT;
+            String botGlyph = continuousFont
+                ? PackAssets.botAvatarChar(seat.role())
+                : PackAssets.botAvatarChar(seat.role(), avatarRowDownTier);
             return new TrickHudView.Avatar(
-                "<white><font:" + PackAssets.BOT_AVATAR_FONT + ">"
-                    + PackAssets.botAvatarChar(seat.role(), avatarRowDownTier)
-                    + "</font></white>",
+                "<white><font:" + botFont + ">" + botGlyph + "</font></white>",
                 PackAssets.botAvatarAdvanceWidth(seat.role())
             );
         }

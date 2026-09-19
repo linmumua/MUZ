@@ -12,8 +12,12 @@ import linmumua.doudizhu.compat.VaultEconomyBridge;
 import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.debug.DebugHudConfigController;
 import linmumua.doudizhu.debug.DebugWebServer;
+import linmumua.doudizhu.debug.HudResourceRecoveryService;
+import linmumua.doudizhu.debug.HudWebApplyCoordinator;
 import linmumua.doudizhu.game.HotbarHudService;
+import linmumua.doudizhu.game.HudOverlayRuntimeState;
 import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.game.TableGadgetSettings;
 import linmumua.doudizhu.game.TableGadgetEffectService;
@@ -158,6 +162,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private TableGadgetService tableGadgetService;
     /** Debug Web 调试面板；仅 debug.web-ui.enabled=true 时非 null。 */
     private DebugWebServer debugWebServer;
+    /** Debug Web 与启动恢复共用的单实例配置控制器与资源协调器。 */
+    private DebugHudConfigController hudWebConfigController;
+    private HudWebApplyCoordinator hudWebApplyCoordinator;
+    private HudResourceRecoveryService hudResourceRecoveryService;
+    /** 四层 HUD 资源的统一已验证 request；未验证时保持空。 */
+    private HudOverlayRuntimeState hudOverlayRuntimeState;
     private PlayerHeadRenderer playerHeadRenderer;
     private VaultEconomyBridge vaultEconomyBridge;
     private AiChatGateway aiChatGateway;
@@ -412,6 +422,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
         craftEngineOffsetService = new CraftEngineOffsetService(this);
         hotbarHudService = new HotbarHudService(this, craftEngineOffsetService);
+        hudOverlayRuntimeState = new HudOverlayRuntimeState();
+        hudWebConfigController = new DebugHudConfigController(this);
+        hudWebApplyCoordinator = new HudWebApplyCoordinator(this, hudWebConfigController);
+        hudResourceRecoveryService = new HudResourceRecoveryService(this, hudWebApplyCoordinator);
         tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this),
             TableGadgetSettings.load(yamlConfig()));
         syncHotbarHudRuntime(yamlConfig().getBoolean("debug.web-ui.enabled", false));
@@ -437,6 +451,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
         CraftEngineBundleExporter.BundleExportResult exportResult = craftEngineBundleExporter.exportIfAvailable();
+        if (hudResourceRecoveryService != null) {
+            hudResourceRecoveryService.onBundleExported("startup");
+        }
         attemptPersistedTableRestore();
         logStartupSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook));
         logVaultHookDiagnosis(vaultHook);
@@ -450,6 +467,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // Debug Web 面板先停，避免关闭过程中仍有请求进来
         if (debugWebServer != null) {
             debugWebServer.close();
+        }
+        if (hudResourceRecoveryService != null) {
+            hudResourceRecoveryService.close();
+        }
+        if (hudWebApplyCoordinator != null) {
+            hudWebApplyCoordinator.close();
         }
         if (tableGadgetService != null) {
             tableGadgetService.shutdown();
@@ -511,6 +534,24 @@ public final class DoudizhuPlugin extends JavaPlugin {
     /** Debug Web 调试面板实例；debug.web-ui.enabled=false 时返回 null。 */
     public DebugWebServer getDebugWebServer() {
         return debugWebServer;
+    }
+
+    /** 返回四层 HUD 资源统一就绪状态；未验证时仍返回单实例空状态。 */
+    public HudOverlayRuntimeState getHudOverlayRuntimeState() {
+        if (hudOverlayRuntimeState == null) {
+            hudOverlayRuntimeState = new HudOverlayRuntimeState();
+        }
+        return hudOverlayRuntimeState;
+    }
+
+    /** 供 Debug Web 与启动恢复共享同一资源协调器。 */
+    public HudWebApplyCoordinator getHudWebApplyCoordinator() {
+        return hudWebApplyCoordinator;
+    }
+
+    /** 供 CraftEngine 生命周期监听器委托恢复已保存的 HUD 资源。 */
+    public HudResourceRecoveryService getHudResourceRecoveryService() {
+        return hudResourceRecoveryService;
     }
 
     public void ensurePlaceholderHookReady() {
@@ -3435,6 +3476,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 )
             );
         }
+        java.util.concurrent.CompletableFuture<HudWebApplyCoordinator.ApplyResult> hudRecovery = null;
+        if (hudResourceRecoveryService != null && exportBundle) {
+            hudRecovery = hudResourceRecoveryService.reloadFromDisk("manual-reload");
+        }
         int doudizhuTables = physicalTableManager == null ? 0 : physicalTableManager.placedTableCount();
         int ddzStageIndex = exportBundle ? 3 : 2;
         feedback.update(stageProgress(ddzStageIndex, totalStages), "刷新斗地主牌桌", rebuildDetail("斗地主牌桌", doudizhuTables));
@@ -3443,6 +3488,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         ReloadSummary summary = new ReloadSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook), doudizhuTables);
         feedback.complete(summary);
+        if (hudRecovery != null) {
+            hudRecovery.whenComplete((result, failure) -> {
+                if (failure != null) {
+                    feedback.recoveryFailed("HUD 四层资源恢复失败：" + failure.getMessage());
+                } else if (result == null || !result.ok()) {
+                    String detail = result == null || result.messages().isEmpty()
+                        ? "未返回成功结果。"
+                        : String.join("；", result.messages());
+                    feedback.recoveryFailed("HUD 四层资源恢复失败：" + detail);
+                }
+            });
+        }
         return summary;
     }
 
@@ -3484,7 +3541,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private DebugWebServer createDebugWebServer() {
-        return new DebugWebServer(this, this::suspendHotbarHudForDebugWeb, this::resumeHotbarHudAfterDebugWeb);
+        return new DebugWebServer(this, this::suspendHotbarHudForDebugWeb,
+            this::resumeHotbarHudAfterDebugWeb, hudWebConfigController, hudWebApplyCoordinator);
     }
 
     private void suspendHotbarHudForDebugWeb() {
@@ -3508,6 +3566,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // 资源包字形的 ascent 上（见 HotbarDebugOverlayWriter）。缩放属于构建期离散档，
         // 与底图/选中框共用同一 HotbarTier。
         hotbarHudService.setOffsetX(yamlConfig().getInt("hotbar-hud.offset-x", 0));
+        hotbarHudService.setOffsetY(yamlConfig().getInt("hotbar-hud.offset-y", 0));
         hotbarHudService.setScale(yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
         hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride);
         if (tableGadgetService != null) {
@@ -5522,6 +5581,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
         void complete(ReloadSummary summary);
 
+        void recoveryFailed(String detail);
+
         static ReloadFeedback silent() {
             return SilentReloadFeedback.INSTANCE;
         }
@@ -5543,6 +5604,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
         @Override
         public void complete(ReloadSummary summary) {
+        }
+
+        @Override
+        public void recoveryFailed(String detail) {
         }
     }
 
@@ -5596,6 +5661,23 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 return;
             }
             sender.sendMessage(plugin.reloadSummaryPlain(summary) + " | hooks=" + plugin.formatHookSummaryPlain(summary.hooks()));
+        }
+
+        @Override
+        public void recoveryFailed(String detail) {
+            Runnable notify = () -> {
+                if (bossBar != null) {
+                    bossBar.color(BossBar.Color.RED);
+                    bossBar.progress(1.0f);
+                    bossBar.name(plugin.bossBarComponent("重载部分失败", detail));
+                }
+                sender.sendMessage(plugin.plain(MuzTheme.named(detail, NamedTextColor.RED)));
+            };
+            if (Bukkit.isPrimaryThread()) {
+                notify.run();
+            } else {
+                plugin.scheduler().runSync(notify);
+            }
         }
     }
 
