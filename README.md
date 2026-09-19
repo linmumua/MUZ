@@ -5,6 +5,7 @@
 ## 什么是 MUZ
 
 MUZ 是一个 Paper / Purpur 服务端插件，用 Display Entity 在真实世界坐标上渲染完整的斗地主牌桌。玩家右键坐下，看到手牌一张张发出、翻转排序，然后叫分、出牌、结算——整个过程就像在桌游馆里打牌一样自然。
+![Uploading 2026-09-20 00-03-14_batch.gif…]()
 
 所有界面元素（牌面、头像、记牌器、道具图标）都由资源包字形驱动，不依赖任何客户端模组。
 
@@ -22,7 +23,7 @@ MUZ 是一个 Paper / Purpur 服务端插件，用 Display Entity 在真实世�
 ### 桌内道具互动
 
 鸡蛋和番茄可以朝同桌对手投掷（无伤害），水桶会在目标身边生成短暂的水幕效果。被选中的目标会短时发光提示，所有效果实体在离桌、关桌或停服时自动清理。
-
+<img width="480" height="270" alt="2026-09-20 00-03-14_batch_1" src="https://github.com/user-attachments/assets/3d892e41-6503-4f1d-9909-131c945fa701" />
 ### 沉浸式音效
 
 125 个 OGG 音效覆盖发牌、出牌语音、倒计时和按钮点击。五首背景音乐按局轮播，出牌和提示音正常混音且不会重复叠加。
@@ -93,6 +94,7 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 在 `config.yml` 中开启 `debug.web-ui.enabled: true` 并重载，从服务端本机访问 `http://127.0.0.1:2000` 即可打开编辑器。
 
 编辑器提供一个 640×360 的 Minecraft 逻辑画布，牌行、头像行、记牌器和三道具 HUD 各为一个可拖动图层。预览使用的是服务端真实资源 PNG，不是 CSS 假图。左键拖拽移动图层，右键查看坐标，Shift+方向键精确微调。
+<img width="1193" height="675" alt="image" src="https://github.com/user-attachments/assets/7dada293-fcd2-4026-97d7-649d5c6948d6" />
 
 共 22 个可编辑的 HUD 运行期参数。横向偏移即时生效；纵向偏移会触发资源重建、CraftEngine 重载和 ZIP 校验，客户端需要重新下载资源包才能看到变化。任何一步失败都会自动回滚。
 
@@ -116,6 +118,3 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 - **构建**：Gradle + Shadow Plugin，产物按目标版本隔离
 - **测试**：JUnit 5，94 个测试文件
 
-## 致谢
-
-判型与流程参考了 [tml104/-Minecraft-Dou-Dizhu](https://github.com/tml104/-Minecraft-Dou-Dizhu) 的状态机思路，借鉴了 [Arbousier1/MahjongEngine](https://github.com/Arbousier1/MahjongEngine) 的 Paper 1.21.11+ 与 CraftEngine bundle 构建路线。
