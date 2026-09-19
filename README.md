@@ -5,7 +5,8 @@
 ## 什么是 MUZ
 
 MUZ 是一个 Paper / Purpur 服务端插件，用 Display Entity 在真实世界坐标上渲染完整的斗地主牌桌。玩家右键坐下，看到手牌一张张发出、翻转排序，然后叫分、出牌、结算——整个过程就像在桌游馆里打牌一样自然。
-<img width="480" height="270" alt="2026-09-20 00-03-14_batch_1" src="[[https://github.com/linmumua/MUZ/blob/master/gif/donghua.gif]](https://github.com/linmumua/MUZ/blob/master/gif/donghua.gif)" />
+<img width="480" height="270" alt="donghua" src="https://github.com/user-attachments/assets/7ad85657-8eae-438f-a542-f3f0a91be695" />
+
 
 
 所有界面元素（牌面、头像、记牌器、道具图标）都由资源包字形驱动，不依赖任何客户端模组。
