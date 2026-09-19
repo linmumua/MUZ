@@ -9,7 +9,7 @@ import linmumua.doudizhu.DoudizhuPlugin;
  * 已保存 HUD 连续资源的独立恢复服务。
  *
  * <p>恢复不依赖 Debug Web 是否启用：启动完成 bundle 导出、/muz reload，以及 CraftEngine
- * 启用事件都通过同一个 {@link HudWebApplyCoordinator} 重读磁盘并验证四层资源。服务本身不
+ * 启用事件都通过同一个 {@link HudWebApplyCoordinator} 重读磁盘并验证三层资源。服务本身不
  * 直接操作 CraftEngine，也不递归触发自身生命周期；共享数据目录租约由 coordinator 统一负责。
  */
 public final class HudResourceRecoveryService implements AutoCloseable {
@@ -58,7 +58,7 @@ public final class HudResourceRecoveryService implements AutoCloseable {
                 String detail = result == null ? "空结果" : String.join("；", result.messages());
                 plugin.getLogger().warning("HUD 资源恢复未应用（" + reason + "）：" + detail);
             } else {
-                plugin.getLogger().info("HUD 资源恢复完成（" + reason + "），四层资源已在服务端校验。");
+                plugin.getLogger().info("HUD 资源恢复完成（" + reason + "），三层资源已在服务端校验。");
             }
         });
     }

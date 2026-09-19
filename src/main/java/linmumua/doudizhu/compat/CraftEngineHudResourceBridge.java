@@ -1,14 +1,11 @@
 package linmumua.doudizhu.compat;
 
 import linmumua.doudizhu.DoudizhuPlugin;
-import linmumua.doudizhu.assets.HotbarFontMetrics;
 import linmumua.doudizhu.assets.HudResourceRequest;
 import net.momirealms.craftengine.core.plugin.CraftEngine;
 import net.momirealms.craftengine.core.plugin.config.Config;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -33,8 +30,6 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
     private final RequestVerifier requestVerifier;
     private volatile EngineAccess engineAccess;
     private volatile boolean linkageFailureLogged;
-    // 仅在主线程资源重载入口记录服务器版本；异步字体阶段不得查询 Bukkit。
-    private volatile boolean supportedFontVersion;
 
     /**
      * 创建生产桥接。构造阶段不读取资源包文件；实际 CE API 访问延迟到
@@ -54,7 +49,7 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
     CraftEngineHudResourceBridge(DoudizhuPlugin plugin, ResourceVerifier verifier,
                                  EngineAccess engineAccess) {
         this(plugin, verifier,
-            (path, request) -> verifier.verify(path, request.hotbarOffsetY(), request.hotbarScale()),
+            (path, request) -> verifier.verify(path, request.hotbarOffsetY()),
             engineAccess);
     }
 
@@ -89,7 +84,7 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
     }
 
     /**
-     * 按一次性四层请求穿透既有 reload → generate → verify 链；Bridge 不复制资源事务算法。
+     * 按一次性三层请求穿透既有 reload → generate → verify 链；Bridge 不复制资源事务算法。
      */
     @Override
     public CompletableFuture<Void> reloadGenerateAndVerify(HudResourceRequest request, Executor ioExecutor,
@@ -117,7 +112,6 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
             return failedFuture(new IOException("读取 CraftEngine 状态失败：" + messageOf(exception), exception));
         }
 
-        supportedFontVersion = "26.1.2".equals(plugin.getServer().getMinecraftVersion());
         return HudResourcePackSync.run(
             access::reload,
             access::generateResourcePack,
@@ -130,32 +124,7 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
         );
     }
 
-    @Override
-    public CompletableFuture<HotbarFontMetrics> loadVerifiedHotbarFontMetrics(
-        HudResourceRequest request, Executor ioExecutor) {
-        Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(ioExecutor, "ioExecutor");
-        // 调用方在校验 Future 完成后进入此处，可能位于异步线程；只消费主线程已解析的访问器。
-        final EngineAccess access = engineAccess;
-        if (!supportedFontVersion || access == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return CompletableFuture.supplyAsync(() -> {
-            try (InputStream vanilla = plugin.getResource("hotbar-font/vanilla-26.1.2.zip")) {
-                Path actualPack = access.uploadPackPath();
-                if (vanilla == null || actualPack == null || !Files.isRegularFile(actualPack)) {
-                    return null;
-                }
-                // 原版字体归档只覆盖已验证的 26.1.2 客户端；其它目标没有该资源并明确降级。
-                return HotbarFontMetrics.load(vanilla, actualPack, 84);
-            } catch (IOException | RuntimeException exception) {
-                plugin.getLogger().warning("Hotbar 客户端字体快照加载失败，已降级：" + messageOf(exception));
-                return null;
-            }
-        }, ioExecutor);
-    }
-
-    // 旧 offset/scale 入口由 HudResourcePackBridge 接口统一 fail-closed；生产桥接不得绕过四层请求。
+    // 旧 offset/scale 入口由 HudResourcePackBridge 接口统一 fail-closed；生产桥接不得绕过三层请求。
 
     private boolean isCraftEngineEnabled() {
         try {

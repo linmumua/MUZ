@@ -145,13 +145,9 @@ public final class HudOverlayLayout {
         return List.copyOf(result);
     }
 
-    /** 四层事务统一消费的完整不可变字形列表。 */
+    /** 三层事务统一消费的不可变字形列表；Hotbar 字段仅保留请求兼容形状。 */
     public static List<Glyph> glyphs(HudResourceRequest request) {
-        Objects.requireNonNull(request, "request");
-        List<Glyph> result = new ArrayList<>();
-        result.addAll(trickGlyphs(request));
-        result.addAll(hotbarGlyphs(request));
-        return List.copyOf(result);
+        return trickGlyphs(request);
     }
 
     private static void addCards(List<Glyph> result, int offset) {

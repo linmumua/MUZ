@@ -3,8 +3,8 @@ package linmumua.doudizhu.assets;
 /**
  * 一次连续 HUD 资源覆盖层请求的不可变参数。
  *
- * <p>三层 Trick HUD 使用同一套连续偏移范围；Hotbar 的下界按已生成 scale 的基础 ascent
- * 计算，避免把未生成的 profile 档位误当成可用资源。
+ * <p>请求形状保留 Hotbar 字段以兼容并行 worker；资源请求与就绪判定只消费前三层
+ * Trick HUD 偏移，Hotbar 字段不参与校验。
  */
 public record HudResourceRequest(
     int cardOffsetDown,
@@ -17,7 +17,6 @@ public record HudResourceRequest(
         PackAssets.requireTrickOffset(cardOffsetDown, "牌面");
         PackAssets.requireTrickOffset(avatarOffsetDown, "头像");
         PackAssets.requireTrickOffset(counterOffsetDown, "记牌器");
-        PackAssets.requireHotbarScale(hotbarScale);
-        PackAssets.requireHotbarOffset(hotbarOffsetY, hotbarScale);
+        // Hotbar 字段保留旧构造形状，但不参与三层资源请求校验。
     }
 }

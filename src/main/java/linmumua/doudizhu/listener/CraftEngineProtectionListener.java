@@ -81,6 +81,10 @@ public final class CraftEngineProtectionListener implements Listener {
             NamedTextColor.DARK_PURPLE, () ->
                 "入口 FurnitureInteractEvent: rightClick=" + rightClick
                 + " blocking=" + (blocking == null ? "null" : blocking.getType().name()));
+        if (tryOpenSpeechPanel(player)) {
+            event.setCancelled(true);
+            return;
+        }
         if (handleHandCardClickOnFurniture(player, true, blocking)) {
             event.setCancelled(true);
             return;
@@ -151,6 +155,12 @@ public final class CraftEngineProtectionListener implements Listener {
         }
         GamePhase phase = table.getPhase();
         return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
+    }
+
+    /** 只有命中语音面板时才消费右键；未命中必须继续手牌/道具路由。 */
+    private boolean tryOpenSpeechPanel(Player player) {
+        return plugin.getTableSpeechPanelService() != null
+            && plugin.getTableSpeechPanelService().tryHandleRightClick(player);
     }
 
     /** CE 发包家具没有 Bukkit 实体事件，右键道具必须在 FurnitureInteractEvent 路由。 */

@@ -76,6 +76,7 @@ public final class GameTable {
     private final BotAiCoordinator botAiCoordinator;
     private final RoundSettlementCoordinator roundSettlementCoordinator;
     private final RoundOpeningCoordinator roundOpeningCoordinator;
+    private final ActionBarOverlayService actionBarOverlay;
     private RoundOpeningSettings openingSettings;
 
     private GamePhase phase = GamePhase.LOBBY;
@@ -120,6 +121,10 @@ public final class GameTable {
         this.manager = manager;
         this.name = name.trim();
         this.roomLevel = roomLevel == null ? TableLevel.FUN : roomLevel;
+        ActionBarOverlayService sharedActionBar = plugin.getActionBarOverlayService();
+        this.actionBarOverlay = sharedActionBar == null
+            ? new ActionBarOverlayService(plugin)
+            : sharedActionBar;
         this.musicCoordinator = new TableMusicCoordinator(
             plugin,
             this::canScheduleTasks,
@@ -1209,10 +1214,7 @@ public final class GameTable {
         plugin.getHandGuiService().closeHands(this);
         stopMusicAll();
         trickHud.hideAll();
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
-        if (hotbarHud != null) {
-            hotbarHud.clearTable(this);
-        }
+        actionBarOverlay.clearTable(this);
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
@@ -1417,7 +1419,6 @@ public final class GameTable {
 
     private void broadcastStickyOutcomeActionBar(List<UUID> winners) {
         lobbyUiResumeAtMillis = System.currentTimeMillis() + 5500L;
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (int index = 0; index < 5; index++) {
             long delay = index * 20L;
             plugin.scheduler().runLater(delay, () -> {
@@ -1430,12 +1431,8 @@ public final class GameTable {
                         continue;
                     }
                     Component bar = winners.contains(seat) ? MuzTheme.success("胜利") : MuzTheme.danger("失利");
-                    if (hotbarHud != null && hotbarHud.isEnabled()) {
-                        // 每次闪动持续约 1.25 秒（25 格刻），5 次共 5.5 秒覆盖 lobbyUiResumeAt 窗口
-                        hotbarHud.showOverlay(seat, bar, 25);
-                    } else {
-                        player.sendActionBar(bar);
-                    }
+                    // 每次闪动持续约 1.25 秒（25 格刻），5 次共 5.5 秒覆盖 lobbyUiResumeAt 窗口
+                    dispatchActionBar(seat, bar, 25);
                 }
             });
         }
@@ -1449,11 +1446,8 @@ public final class GameTable {
         }
         stopMusicAll();
         trickHud.hideAll();
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
-        if (hotbarHud != null) {
-            // phase 切回 LOBBY 前主动清掉最后一帧字形，避免等待下一次周期 tick。
-            hotbarHud.clearTable(this);
-        }
+        // phase 切回 LOBBY 前主动清掉最后一帧 ActionBar，避免等待下一次周期 tick。
+        actionBarOverlay.clearTable(this);
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
@@ -1708,12 +1702,7 @@ public final class GameTable {
             return;
         }
         Component hint = MuzTheme.warning("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。");
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
-        if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
-            hotbarHud.showOverlay(currentTurn, hint);
-        } else {
-            player.sendActionBar(hint);
-        }
+        dispatchActionBar(currentTurn, hint, 60);
     }
 
     private void cancelPendingNoResponsePass() {
@@ -1762,16 +1751,11 @@ public final class GameTable {
     private void broadcast(Component message) {
         Component full = MuzTheme.banner("斗地主", name + " 号桌", message);
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID seat : seats) {
             Player player = onlinePlayer(seat);
             if (player != null) {
                 player.sendMessage(full);
-                if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
-                    hotbarHud.showOverlay(seat, actionBar);
-                } else {
-                    player.sendActionBar(actionBar);
-                }
+                dispatchActionBar(seat, actionBar, 60);
             }
         }
     }
@@ -1781,28 +1765,20 @@ public final class GameTable {
             phase == GamePhase.REVEALING ? "明牌窗口" : "开局",
             MuzTheme.accent(openingRevealLabel())
         ).decoration(TextDecoration.ITALIC, false);
-        for (UUID playerId : seats) {
-            Player player = onlinePlayer(playerId);
-            if (player != null) {
-                player.sendActionBar(actionBar);
-            }
-        }
+        actionBarOverlay.sendActionBar(seats, actionBar);
     }
 
     private void broadcastActionBar(Component message) {
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player == null) {
-                continue;
-            }
-            if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
-                hotbarHud.showOverlay(seat, actionBar);
-            } else {
-                player.sendActionBar(actionBar);
+            if (onlinePlayer(seat) != null) {
+                dispatchActionBar(seat, actionBar, 60);
             }
         }
+    }
+
+    private void dispatchActionBar(UUID playerId, Component message, int durationTicks) {
+        actionBarOverlay.showOverlay(playerId, message, durationTicks);
     }
 
     private void announceChat(String plainText, Component component) {
@@ -1864,8 +1840,13 @@ public final class GameTable {
         return player != null && player.isOnline() ? player : null;
     }
 
-    private void playSoundAll(String soundKey, float volume, float pitch) {
+    /** 桌内语音/提示统一走音效协调器，避免外部服务绕过去重与收听者边界。 */
+    public void playTableSound(String soundKey, float volume, float pitch) {
         effectCoordinator.playSoundAll(soundKey, volume, pitch);
+    }
+
+    private void playSoundAll(String soundKey, float volume, float pitch) {
+        playTableSound(soundKey, volume, pitch);
     }
 
     private void playEffectAll(String soundKey) {
@@ -1981,16 +1962,11 @@ public final class GameTable {
     }
 
     private void broadcastPersistentActionBar(int remainingSeconds) {
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
         for (UUID playerId : seats) {
             Player player = onlinePlayer(playerId);
             if (player != null && player.isOnline()) {
                 Component bar = buildPersistentActionBar(playerId, remainingSeconds);
-                if (phase == GamePhase.PLAYING && hotbarHud != null && hotbarHud.isEnabled()) {
-                    hotbarHud.showOverlay(playerId, bar);
-                } else {
-                    player.sendActionBar(bar);
-                }
+                dispatchActionBar(playerId, bar, 60);
                 sendTrickHud(player);
             }
         }

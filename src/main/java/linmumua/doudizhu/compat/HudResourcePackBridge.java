@@ -1,6 +1,5 @@
 package linmumua.doudizhu.compat;
 
-import linmumua.doudizhu.assets.HotbarFontMetrics;
 import linmumua.doudizhu.assets.HudResourceRequest;
 
 import java.util.concurrent.CompletableFuture;
@@ -19,20 +18,12 @@ public interface HudResourcePackBridge {
     String preflightFailureOnMainThread();
 
     /**
-     * 重载、生成并校验四层 HUD 资源包。返回 Future 完成前不得释放资源任务租约。
-     * request 必须贯穿 card/avatar/counter/hotbar 四层，任何旧的 hotbar-only 实现都必须失败关闭。
+     * 重载、生成并校验牌行、头像、记牌器三层 HUD 资源包。返回 Future 完成前不得释放资源任务租约。
+     * {@link HudResourceRequest} 保留的 Hotbar 字段仅用于旧调用方二进制形状兼容，不参与资源校验。
      */
     CompletableFuture<Void> reloadGenerateAndVerify(HudResourceRequest request,
                                                      Executor ioExecutor, Executor mainExecutor);
 
-    /**
-     * 在资源 ZIP 已通过完整校验后异步加载客户端 Hotbar 字体快照；未知目标允许返回空。
-     * 快照完成前不得发布到 HudOverlayRuntimeState。
-     */
-    default CompletableFuture<HotbarFontMetrics> loadVerifiedHotbarFontMetrics(
-        HudResourceRequest request, Executor ioExecutor) {
-        return CompletableFuture.completedFuture(null);
-    }
 
     /**
      * 旧 hotbar-only 签名只为源码迁移保留，默认明确失败关闭，禁止冒充完整四层验证。

@@ -68,45 +68,34 @@ class HotbarHudDiagnosticsTest {
         String body = source.substring(at, Math.min(source.length(), at + 600));
         assertTrue(body.contains("diagnoseBlocked(\"overlay-not-ready\", Level.WARNING"),
             "overlay 未就绪必须记录中文告警");
-        assertTrue(body.contains("player.sendActionBar(entry == null"),
+        assertTrue(body.contains("player.sendActionBar(overlay == null"),
             "overlay 未就绪时仍必须沿用普通 ActionBar 降级语义");
         assertTrue(body.contains("continue;"), "overlay 未就绪后不能继续发送自定义字形");
     }
 
     @Test
-    void showOverlay保留enabled与CE与PLAYING的原有合并阻断条件() throws IOException {
+    void 普通叠加职责已委托给独立服务() throws IOException {
         String source = Files.readString(SERVICE);
-        assertTrue(source.contains("if (!enabled || !offsetService.isAvailable() || !playing)"),
-            "showOverlay 的既有 enabled/CE/PLAYING 阻断语义不能被拆坏");
-        int at = source.indexOf("private void diagnoseShowOverlayBlocked(boolean playing)");
-        assertTrue(at > 0, "单次 overlay 请求需要独立诊断入口");
-        String body = source.substring(at, Math.min(source.length(), at + 700));
-        assertTrue(body.contains("发送普通 ActionBar"), "阻断诊断必须说明仍走普通 ActionBar 降级");
+        assertTrue(source.contains("private final ActionBarOverlayService actionBarOverlay"),
+            "Hotbar 必须持有普通 ActionBar 兼容服务");
+        assertTrue(source.contains("actionBarOverlay.storeOverlay(List.of(id), message, durationTicks)"),
+            "Hotbar 的兼容 showOverlay 必须把普通叠加委托新服务");
+        assertTrue(source.contains("actionBarOverlay.clearOverlay(playerId)"),
+            "Hotbar 的兼容 clearOverlay 必须委托新服务");
+        assertTrue(!source.contains("Map<UUID, OverlayEntry>"),
+            "普通叠加状态不得继续由 Hotbar 自己维护");
     }
 
     @Test
-    void showOverlay与tick必须使用同一测宽失败判定() throws IOException {
-        String source = Files.readString(SERVICE);
-        assertTrue(source.contains("if (measureMessage(message).isEmpty())"),
-            "showOverlay 必须把字体快照缺失和正文测宽失败统一视为降级");
-        assertTrue(source.contains("if (entry != null && measureMessage(entry.message()).isEmpty())"),
-            "tick 必须把正文测宽失败继续交给聊天降级");
-        assertTrue(source.contains("private OptionalInt measureMessage(Component message)"),
-            "测宽失败判定必须集中到同一辅助方法");
-    }
-
-    @Test
-    void tick不能因正文出现或过期清除聊天限频状态() throws IOException {
+    void 三道具周期渲染从新服务读取普通正文() throws IOException {
         String source = Files.readString(SERVICE);
         int tick = source.indexOf("private void tick()");
-        int clear = source.indexOf("private boolean hotbarOverlayReady()", tick);
-        assertTrue(tick > 0 && clear > tick, "应能定位 tick 主循环");
-        String body = source.substring(tick, clear);
-        assertTrue(!body.contains("chatFallbacks.remove(id)"),
-            "tick 不得因正文成功测量或 ActionBar 过期清除聊天限频记录");
-        assertTrue(body.contains("chatFallbacks.keySet().removeIf(id -> !currentPlayers.contains(id))"),
-            "离桌玩家必须清除聊天降级状态");
-        assertTrue(source.contains("chatFallbacks.remove(playerId)"),
-            "clearOverlay 必须清除单个玩家的聊天降级状态");
+        int ready = source.indexOf("private boolean hotbarOverlayReady()", tick);
+        assertTrue(tick > 0 && ready > tick, "应能定位完整周期推送路径");
+        String body = source.substring(tick, ready);
+        assertTrue(body.contains("Component overlay = actionBarOverlay.currentOverlay(id)"),
+            "三道具渲染必须从普通 ActionBar 服务读取当前正文");
+        assertTrue(body.contains("player.sendActionBar(overlay == null ? Component.empty() : overlay)"),
+            "覆盖层未就绪时仍必须发送普通正文而非未声明字形");
     }
 }

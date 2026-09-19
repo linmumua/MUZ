@@ -19,7 +19,3 @@ counter:
   # 记牌器 scale/offset 只生成当前配置档位；0 保留默认字形调用基准。
   scales: [100]
   offsets: [0, 122]
-
-hotbar:
-  # Hotbar 按用户确认只生成一个当前 scale，切换档位需重新生成并下发资源包。
-  scale: 100

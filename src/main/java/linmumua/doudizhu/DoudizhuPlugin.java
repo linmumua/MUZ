@@ -3,7 +3,6 @@ package linmumua.doudizhu;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.ai.OpenAiCompatibleAiChatGateway;
 
-import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineBundleExporter;
 import linmumua.doudizhu.compat.CraftEngineFurnitureService;
@@ -12,6 +11,8 @@ import linmumua.doudizhu.compat.VaultEconomyBridge;
 import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.GamePhase;
+import linmumua.doudizhu.game.ActionBarOverlayService;
 import linmumua.doudizhu.debug.DebugHudConfigController;
 import linmumua.doudizhu.debug.DebugWebServer;
 import linmumua.doudizhu.debug.HudResourceRecoveryService;
@@ -21,6 +22,10 @@ import linmumua.doudizhu.game.HudOverlayRuntimeState;
 import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.game.TableGadgetSettings;
 import linmumua.doudizhu.game.TableGadgetEffectService;
+import linmumua.doudizhu.game.TableSpeechPanelService;
+import linmumua.doudizhu.ui.GadgetBoxGuiService;
+import linmumua.doudizhu.ui.TableGadgetGuiService;
+import linmumua.doudizhu.ui.VirtualGadgetBarStore;
 import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.game.TableManager;
 import linmumua.doudizhu.listener.CraftEngineLifecycleListener;
@@ -72,6 +77,16 @@ import org.bukkit.block.BlockFace;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.Command;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerKickEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -157,9 +172,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private CraftEngineBundleExporter craftEngineBundleExporter;
     private CraftEngineFurnitureService craftEngineFurnitureService;
     private CraftEngineOffsetService craftEngineOffsetService;
-    private HotbarHudService hotbarHudService;
+    /** 普通 ActionBar 叠加服务；Hotbar HUD 不再进入正式运行期链路。 */
+    private ActionBarOverlayService actionBarOverlayService;
     /** 桌内道具状态与效果由专用服务管理，入口仅负责装配。 */
     private TableGadgetService tableGadgetService;
+    private TableGadgetSettings tableGadgetSettings;
+    private VirtualGadgetBarStore tableGadgetLoadoutStore;
+    private TableGadgetGuiService tableGadgetGuiService;
+    private TableSpeechPanelService tableSpeechPanelService;
     /** Debug Web 调试面板；仅 debug.web-ui.enabled=true 时非 null。 */
     private DebugWebServer debugWebServer;
     /** Debug Web 与启动恢复共用的单实例配置控制器与资源协调器。 */
@@ -417,21 +437,58 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hudDebugStickKey = new NamespacedKey(this, "hud-debug-stick");
         handGuiService = new HandGuiService(this);
         tableManager = new TableManager(this);
+        tableGadgetSettings = TableGadgetSettings.load(yamlConfig());
+        tableGadgetLoadoutStore = new VirtualGadgetBarStore(playerSettingsFile.toPath());
+        tableGadgetGuiService = new TableGadgetGuiService(
+            tableGadgetLoadoutStore,
+            action -> {
+                if (action == null || tableGadgetService == null) {
+                    return;
+                }
+                switch (action.type()) {
+                    case SELECTED -> {
+                        if (action.item() != null) {
+                            tableGadgetService.select(action.viewerId(), action.item());
+                        }
+                    }
+                    case REMOVED -> {
+                        ItemStack selected = tableGadgetGuiService.selectedItem(action.viewerId());
+                        if (selected == null) {
+                            tableGadgetService.clear(action.viewerId());
+                        } else {
+                            tableGadgetService.select(action.viewerId(), selected);
+                        }
+                    }
+                    case BUBBLE -> {
+                        Player viewer = Bukkit.getPlayer(action.viewerId());
+                        if (viewer != null && tableSpeechPanelService != null) {
+                            GameTable table = tableManager.getTableOf(viewer);
+                            if (table != null) {
+                                tableGadgetGuiService.close(viewer);
+                                tableSpeechPanelService.open(table, action.viewerId());
+                            }
+                        }
+                    }
+                    default -> { }
+                }
+            },
+            tableGadgetSettings.gui().title(),
+            tableGadgetSettings.gui().bubbleName()
+        );
         databaseManager = new DatabaseManager(this);
         craftEngineBundleExporter = new CraftEngineBundleExporter(this);
         craftEngineFurnitureService = new CraftEngineFurnitureService(this);
         craftEngineOffsetService = new CraftEngineOffsetService(this);
-        hotbarHudService = new HotbarHudService(this, craftEngineOffsetService);
+        // 普通 ActionBar 仍由独立服务承载；正式运行期不再构造或启动 HotbarHudService。
+        actionBarOverlayService = new ActionBarOverlayService(this);
         hudOverlayRuntimeState = new HudOverlayRuntimeState();
         hudWebConfigController = new DebugHudConfigController(this);
         hudWebApplyCoordinator = new HudWebApplyCoordinator(this, hudWebConfigController);
         hudResourceRecoveryService = new HudResourceRecoveryService(this, hudWebApplyCoordinator);
-        tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this),
-            TableGadgetSettings.load(yamlConfig()));
-        syncHotbarHudRuntime(yamlConfig().getBoolean("debug.web-ui.enabled", false));
+        tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this), tableGadgetSettings);
+        tableSpeechPanelService = createTableSpeechPanelService(tableGadgetSettings);
         // Debug Web 调试面板：仅在 debug.web-ui.enabled=true 时启动，生产环境默认关闭。
-        // 面板启用时只切换到可拖动 ascent 字形，PLAYING 阶段的 hotbar 推送仍继续；
-        // 面板关闭时恢复 bundle 固定 ascent，并按当前 hotbar-hud.enabled 同步任务。
+        // 面板只负责 HUD 配置与资源恢复，不再接管已退役的正式 Hotbar 运行期服务。
         syncDebugWebServerRuntime();
         playerHeadRenderer = new PlayerHeadRenderer(this, craftEngineOffsetService);
         // 预览复用正式 TrickHudService，但不挂到任何牌桌；它只服务 HUD 调试棒和配置对照。
@@ -444,9 +501,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new WorldTableInteractionListener(this), this);
         getServer().getPluginManager().registerEvents(new CraftEngineLifecycleListener(this), this);
         getServer().getPluginManager().registerEvents(new HandGuiListener(this), this);
+        if (tableGadgetGuiService != null) {
+            getServer().getPluginManager().registerEvents(tableGadgetGuiService, this);
+        }
         registerMuzCommand();
         ensureCraftEngineProtectionListenerRegistered();
-        scheduler().runTimer(1L, 1L, () -> physicalTableManager.tick());
+        scheduler().runTimer(1L, 1L, () -> {
+            physicalTableManager.tick();
+            if (tableSpeechPanelService != null) {
+                tableSpeechPanelService.tick();
+            }
+        });
         scheduler().runTimer(1L, 10L, () -> tableManager.tick());
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
@@ -474,11 +539,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (hudWebApplyCoordinator != null) {
             hudWebApplyCoordinator.close();
         }
+        if (tableSpeechPanelService != null) {
+            tableSpeechPanelService.shutdown();
+        }
+        if (tableGadgetGuiService != null) {
+            tableGadgetGuiService.shutdown();
+        }
         if (tableGadgetService != null) {
             tableGadgetService.shutdown();
         }
-        if (hotbarHudService != null) {
-            hotbarHudService.stop();
+        if (actionBarOverlayService != null) {
+            actionBarOverlayService.stop();
         }
         TrickHudPreview preview = trickHudPreview;
         if (preview != null) {
@@ -505,8 +576,18 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return tableManager;
     }
 
+    /** 普通 ActionBar 叠加服务；牌桌运行期统一复用这一实例。 */
+    public ActionBarOverlayService getActionBarOverlayService() {
+        return actionBarOverlayService;
+    }
+
+    /**
+     * 兼容旧 API；HotbarHudService 已退出正式运行期装配，因此固定返回 null。
+     * 新代码不得通过该入口获取或构造正式 Hotbar 链路。
+     */
+    @Deprecated
     public HotbarHudService getHotbarHudService() {
-        return hotbarHudService;
+        return null;
     }
 
     /** 提供桌内道具交互入口，业务与临时实体均由服务持有。 */
@@ -514,21 +595,33 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return tableGadgetService;
     }
 
-    /**
-     * 由 HUD 资源协调器在主线程切换 hotbar 覆盖层就绪闸门。
-     * 只有真实 CE reload Future、ZIP 内容校验完成后才允许传 true。
-     */
-    public void setHotbarOverlayReady(boolean ready) {
-        if (hotbarHudService != null) {
-            hotbarHudService.setOverlayReady(ready);
-        }
+    /** 道具箱 GUI 服务；世界按钮只通过此 getter 打开，不重复持有 GUI 状态。 */
+    public TableGadgetGuiService getTableGadgetGuiService() {
+        return tableGadgetGuiService;
     }
 
-    /** 由 HUD 资源协调器记录已校验的具体 hotbar scale，禁止跨档复用 overlay。 */
+    /** 玩家虚拟道具栏的唯一持久化入口。 */
+    public VirtualGadgetBarStore getTableGadgetLoadoutStore() {
+        return tableGadgetLoadoutStore;
+    }
+
+    /** 桌内语音面板服务。 */
+    public TableSpeechPanelService getTableSpeechPanelService() {
+        return tableSpeechPanelService;
+    }
+
+    /**
+     * 兼容旧资源协调器 API；正式运行期已退役 HotbarHudService，调用不再启动任何服务。
+     */
+    @Deprecated
+    public void setHotbarOverlayReady(boolean ready) {
+        // 保留签名，避免旧桥接代码在升级期间链接失败；不构造或启动 HotbarHudService。
+    }
+
+    /** 兼容旧资源协调器 API；正式运行期不再消费 Hotbar overlay 就绪状态。 */
+    @Deprecated
     public void setHotbarOverlayReady(boolean ready, int hotbarScale) {
-        if (hotbarHudService != null) {
-            hotbarHudService.setOverlayReady(ready, hotbarScale);
-        }
+        // 同上：资源生成/校验仍可执行，但不再接入已退役的正式 Hotbar 运行期链路。
     }
 
     /** Debug Web 调试面板实例；debug.web-ui.enabled=false 时返回 null。 */
@@ -2392,10 +2485,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
-    /** 轻量同步 HUD 运行态：Trick HUD 重读设置，Hotbar HUD 按配置与 Debug Web 占用状态启停。 */
+    /** 轻量同步 HUD 运行态：仅重读正式 Trick HUD 设置；Hotbar 正式运行期链路已退役。 */
     public void reloadHudRuntimeState() {
         reloadTrickHudSettings();
-        syncHotbarHudRuntime(isDebugWebServerRunning());
     }
 
     /**
@@ -2408,7 +2500,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     public void applyHudRuntimeStateFromWeb() {
         synchronized (hudWebConfigLock) {
             reloadTrickHudSettings();
-            syncHotbarHudRuntime(isDebugWebServerRunning());
         }
     }
 
@@ -3243,6 +3334,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // 先迁移旧配置再合并模板：counter.offset-down 缺键时必须继承用户原有的
         // avatar-offset-down；若先 mergeDefaultYamlConfig() 写入 122，就会丢掉这条兼容语义。
         boolean changed = migrateMissingCounterOffsetDown();
+        changed |= migrateRetiredHotbarConfig();
         changed |= mergeDefaultYamlConfig();
         changed |= migrateLegacyFurnitureConfig(FurnitureType.TABLE);
         changed |= migrateLegacyFurnitureConfig(FurnitureType.CHAIR);
@@ -3261,27 +3353,47 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     /**
+     * 退役旧三道具 Hotbar 配置：只保留 interaction 语义并迁移到新段，其余资源/HUD 键全部删除。
+     */
+    private boolean migrateRetiredHotbarConfig() {
+        if (!yamlConfig().contains("hotbar-hud")) {
+            return false;
+        }
+        String[] leaves = {"enabled", "range", "cooldown-ticks", "flight-ticks", "water-ticks", "max-active"};
+        for (String leaf : leaves) {
+            String target = "table-gadgets.interaction." + leaf;
+            String legacy = "hotbar-hud.interaction." + leaf;
+            if (!yamlConfig().contains(target) && yamlConfig().contains(legacy)) {
+                yamlConfig().set(target, yamlConfig().get(legacy));
+            }
+        }
+        yamlConfig().set("hotbar-hud", null);
+        getLogger().info("已迁移并移除退役的 hotbar-hud 配置；桌内道具改用 table-gadgets 与九格道具箱。");
+        return true;
+    }
+
+    /**
      * 把旧版偏小的椅子交互箱升级成能包住椅子的尺寸
      * @return 配置是否发生变化
      */
-    /**
-     * 已退役的渲染配置键，启动时会从 config.yml 里清掉
-     * 按钮图标删掉、判定框改为按文字缩放自动推算之后，这些手调项都失去作用。
-     * 留在配置里只会让人以为还能调。
-     */
+    static final String[] PRESERVED_RENDER_KEYS = {
+        "render.button-offset.distance",
+        "render.button-offset.height",
+        "render.button-hitbox-offset.lateral",
+        "render.button-hitbox-offset.depth",
+        "render.button-hitbox-offset.vertical"
+    };
+
     static final String[] RETIRED_RENDER_KEYS = {
-        "render.chair-hitbox.width",
-        "render.chair-hitbox.height",
-        "render.chair-hitbox",
-        "render.button-hitbox.width",
-        "render.button-hitbox.height",
         "render.button-scale",
         "render.button-roll-degrees",
         "render.button-hover",
-        "render.status-avatar",
-        "render.status-avatar-offset",
-        // 手牌判定改成射线与牌平面解析求交后，牌身上再没有交互箱实体，
-        // 这两组键连读取点都没有了；子键先删、父节点最后删，避免遗留空 section。
+        "render.button-hitbox.width",
+        "render.button-hitbox.height",
+        "render.chair-hitbox.width",
+        "render.chair-hitbox.height",
+        "render.chair-hitbox",
+        "render.card-hover.backward-offset",
         "render.card-hitbox.length",
         "render.card-hitbox.width",
         "render.card-hitbox.height",
@@ -3290,40 +3402,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         "render.card-hitbox-offset.depth",
         "render.card-hitbox-offset.vertical",
         "render.card-hitbox-offset",
-        // 悬停不再沿法向平移：位移会让射线交点跟着悬停漂移，形成抖动闭环。
-        // 悬停反馈全部交给 render.card-hover.scale（只放大长宽）和 .lift。
-        "render.card-hover.backward-offset",
-        // 椅子朝向旋转没有任何读取点：椅子朝向由座位方位算，改这个键不会有反应。
-        // 留在配置里只会让人以为还能调。
-        "render.chair-visual-offset.rotation-degrees",
-        // 座位头像 ItemDisplay 已移除，这些配置键连读取点都没有了。
-        "render.seat-avatar.scale",
-        "render.seat-avatar",
-        "render.seat-avatar-offset.lateral",
-        "render.seat-avatar-offset.vertical",
-        "render.seat-avatar-offset.depth",
-        "render.seat-avatar-offset",
-        // 头像/名字显示模式枚举已移除，座位始终显示名字。
-        "render.player-head-show-id",
-        // player-head-scale 原作为 seat-avatar.scale 的迁移默认值，现在两者都删了。
-        "render.player-head-scale",
-        // 屏幕中央那条「轮到谁出牌」的头像 Title 已整体移除，这两个键连读取点都没有了；
-        // 子键先删、父节点最后删，避免遗留空 section。
         "render.current-play-head.enabled",
         "render.current-play-head.drop",
         "render.current-play-head"
-    };
-
-    /**
-     * 必须保留的渲染配置键，迁移时绝不能顺手删掉
-     * 用户明确要求保留按钮远近高低和判定框位置微调。
-     */
-    static final String[] PRESERVED_RENDER_KEYS = {
-        "render.button-offset.distance",
-        "render.button-offset.height",
-        "render.button-hitbox-offset.lateral",
-        "render.button-hitbox-offset.depth",
-        "render.button-hitbox-offset.vertical"
     };
 
     private boolean migrateChairHitboxConfig() {
@@ -3452,6 +3533,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         loadRenderSettings();
         loadAiSettings();
         reloadHudRuntimeState();
+        reloadTableGadgetRuntime();
         syncDebugWebServerRuntime();
         // 【偏移服务也要重解析】：它的 initialised 只置一次，解析失败后永不重试。
         // 若 CraftEngine 曾因资源包配置错误而没就绪，整条 HUD 会被 render 直接 hide；
@@ -3520,7 +3602,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 debugWebServer.close();
                 debugWebServer = null;
             }
-            syncHotbarHudRuntime(false);
             return;
         }
         if (debugWebServer != null && debugWebServer.isRunning() && debugWebServer.getPort() != configuredPort) {
@@ -3533,55 +3614,152 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (!debugWebServer.isRunning()) {
             debugWebServer.start(configuredPort);
         }
-        if (debugWebServer.isRunning()) {
-            syncHotbarHudRuntime(true);
-        } else {
-            syncHotbarHudRuntime(false);
-        }
+        // Debug Web 只负责配置与资源恢复，不再接管已退役的 Hotbar 运行期服务。
     }
 
     private DebugWebServer createDebugWebServer() {
-        return new DebugWebServer(this, this::suspendHotbarHudForDebugWeb,
-            this::resumeHotbarHudAfterDebugWeb, hudWebConfigController, hudWebApplyCoordinator);
+        return new DebugWebServer(this, null, null, hudWebConfigController, hudWebApplyCoordinator);
     }
 
-    private void suspendHotbarHudForDebugWeb() {
-        syncHotbarHudRuntime(true);
-    }
-
-    private void resumeHotbarHudAfterDebugWeb() {
-        syncHotbarHudRuntime(false);
-    }
-
-    private boolean isDebugWebServerRunning() {
-        return debugWebServer != null && debugWebServer.isRunning();
-    }
-
-    private void syncHotbarHudRuntime(boolean debugWebOverride) {
-        if (hotbarHudService == null) {
+    /** 按新配置独立同步桌内道具、语音面板；不再借用 hotbar-hud.enabled 作为生命周期开关。 */
+    private void reloadTableGadgetRuntime() {
+        if (tableGadgetService == null) {
             return;
         }
-        boolean hotbarHudEnabled = !shuttingDown && yamlConfig().getBoolean("hotbar-hud.enabled", false);
-        // 水平偏移走 CE 负空格，重读即生效；垂直偏移不在这里处理，它必须落到
-        // 资源包字形的 ascent 上（见 HotbarDebugOverlayWriter）。缩放属于构建期离散档，
-        // 与底图/选中框共用同一 HotbarTier。
-        hotbarHudService.setOffsetX(yamlConfig().getInt("hotbar-hud.offset-x", 0));
-        hotbarHudService.setOffsetY(yamlConfig().getInt("hotbar-hud.offset-y", 0));
-        hotbarHudService.setScale(yamlConfig().getInt("hotbar-hud.scale", PackAssets.HOTBAR_DEFAULT_SCALE));
-        hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride);
-        if (tableGadgetService != null) {
-            // 重载只传不可变配置；非法互动参数拒绝应用并停止旧互动，不能静默使用错误范围。
-            try {
-                tableGadgetService.reload(TableGadgetSettings.load(yamlConfig()));
-                if (hotbarHudEnabled) {
-                    tableGadgetService.start();
-                } else {
-                    tableGadgetService.stop();
-                }
-            } catch (IllegalArgumentException exception) {
+        try {
+            tableGadgetSettings = TableGadgetSettings.load(yamlConfig());
+            tableGadgetService.reload(tableGadgetSettings);
+            if (tableGadgetSettings.enabled()) {
+                tableGadgetService.start();
+            } else {
                 tableGadgetService.stop();
-                getLogger().log(java.util.logging.Level.WARNING, "道具互动配置无效，已停止互动", exception);
             }
+            if (tableSpeechPanelService != null) {
+                tableSpeechPanelService.reload(createSpeechPanelConfig(tableGadgetSettings));
+            }
+        } catch (IllegalArgumentException exception) {
+            tableGadgetService.stop();
+            getLogger().log(java.util.logging.Level.WARNING, "桌内道具配置无效，已停止互动", exception);
+        }
+    }
+
+    private TableSpeechPanelService createTableSpeechPanelService(TableGadgetSettings settings) {
+        TableGadgetSettings initial = settings == null ? TableGadgetSettings.load(yamlConfig()) : settings;
+        if (tableGadgetSettings == null) {
+            tableGadgetSettings = initial;
+        }
+        return new TableSpeechPanelService(
+            this,
+            createSpeechPanelConfig(initial),
+            (table, ownerId) -> {
+                TableGadgetSettings current = tableGadgetSettings == null ? initial : tableGadgetSettings;
+                return buildSpeechEntries(table, ownerId, current);
+            },
+            () -> tableManager == null ? List.of() : tableManager.getTables(),
+            (table, ownerId, targetId, entry) -> {
+                TableGadgetSettings current = tableGadgetSettings == null ? initial : tableGadgetSettings;
+                executeSpeechAction(table, ownerId, targetId, entry, current);
+            }
+        );
+    }
+
+    private TableSpeechPanelService.Config createSpeechPanelConfig(TableGadgetSettings settings) {
+        TableGadgetSettings.Voices voices = settings == null ? null : settings.voices();
+        TableGadgetSettings.Panel panel = settings == null ? null : settings.panel();
+        return new TableSpeechPanelService.Settings(
+            voices != null && voices.enabled() && panel != null && panel.enabled(),
+            panel == null ? TableGadgetSettings.DEFAULT_PANEL_HOVER_INTERVAL_TICKS : panel.hoverIntervalTicks(),
+            settings == null ? TableGadgetSettings.DEFAULT_RANGE : settings.range(),
+            panel == null ? TableGadgetSettings.DEFAULT_PANEL_VOICE_COOLDOWN_TICKS : panel.voiceCooldownTicks(),
+            Set.of(GamePhase.PLAYING)
+        );
+    }
+
+    private List<TableSpeechPanelService.SpeechEntry> buildSpeechEntries(GameTable table, UUID ownerId, TableGadgetSettings settings) {
+        if (table == null || ownerId == null || settings == null || settings.voices() == null
+            || !settings.voices().enabled() || settings.panel() == null || !settings.panel().enabled()) {
+            return List.of();
+        }
+        Player owner = Bukkit.getPlayer(ownerId);
+        if (owner == null || !owner.isOnline()) {
+            return List.of();
+        }
+        TableGadgetSettings.Panel panel = settings.panel();
+        org.bukkit.util.Vector forward = owner.getEyeLocation().getDirection().setY(0.0);
+        if (forward.lengthSquared() < 1.0e-6) {
+            float yaw = owner.getEyeLocation().getYaw();
+            double radians = Math.toRadians(yaw);
+            forward = new org.bukkit.util.Vector(-Math.sin(radians), 0.0, Math.cos(radians));
+        } else {
+            forward.normalize();
+        }
+        Location base = owner.getEyeLocation().clone().add(forward.clone().multiply(panel.forwardOffset()));
+        base.add(0.0, panel.verticalOffset(), 0.0);
+        float panelYaw = owner.getEyeLocation().getYaw() + 180.0f;
+        UUID currentTurn = table.getCurrentTurn();
+        Player target = currentTurn == null ? null : Bukkit.getPlayer(currentTurn);
+        String senderName = owner.getName();
+        String targetName = target == null ? "当前玩家" : target.getName();
+        List<TableSpeechPanelService.SpeechEntry> entries = new ArrayList<>();
+        int limit = Math.min(panel.maxEntries(), settings.voices().entries().size());
+        double totalHeight = limit * panel.rowHeight() + Math.max(0, limit - 1) * panel.rowGap();
+        for (int index = 0; index < limit; index++) {
+            TableGadgetSettings.Voice voice = settings.voices().entries().get(index);
+            if (voice == null) {
+                continue;
+            }
+            String rendered = voice.text().replace("{sender}", senderName).replace("{target}", targetName);
+            double y = totalHeight * 0.5 - panel.rowHeight() * 0.5
+                - entries.size() * (panel.rowHeight() + panel.rowGap());
+            Location center = base.clone().add(0.0, y, 0.0);
+            entries.add(new TableSpeechPanelService.SpeechEntry(
+                voice.id(), Component.text(rendered),
+                new TableSpeechPanelService.Panel(center, panel.width(), panel.rowHeight(), panelYaw)
+            ));
+        }
+        return List.copyOf(entries);
+    }
+
+    private void executeSpeechAction(
+        GameTable table,
+        UUID ownerId,
+        UUID targetId,
+        TableSpeechPanelService.SpeechEntry entry,
+        TableGadgetSettings settings
+    ) {
+        if (table == null || ownerId == null || entry == null || settings == null || settings.voices() == null) {
+            return;
+        }
+        TableGadgetSettings.Voice voice = settings.voices().entries().stream()
+            .filter(candidate -> candidate != null && candidate.id().equals(entry.id()))
+            .findFirst().orElse(null);
+        if (voice == null) {
+            return;
+        }
+        Player sender = Bukkit.getPlayer(ownerId);
+        if (sender == null || !sender.isOnline()) {
+            return;
+        }
+        Player target = targetId == null ? null : Bukkit.getPlayer(targetId);
+        if ("current-turn".equals(voice.target())) {
+            if (targetId == null || ownerId.equals(targetId) || table.isBot(targetId)
+                || target == null || !target.isOnline()) {
+                sender.sendMessage(Component.text("当前没有可催促的在线真人玩家。"));
+                return;
+            }
+        }
+        String targetName = target == null ? "当前玩家" : target.getName();
+        String rendered = voice.text().replace("{sender}", sender.getName()).replace("{target}", targetName);
+        Component message = Component.text(rendered);
+        table.playTableSound(voice.sound(), voice.volume(), voice.pitch());
+        for (UUID recipient : table.getSeats()) {
+            Player player = Bukkit.getPlayer(recipient);
+            if (player != null && player.isOnline() && !table.isBot(recipient)) {
+                player.sendMessage(message);
+            }
+        }
+        if (actionBarOverlayService != null) {
+            actionBarOverlayService.showOverlay(table.getSeats(), message, 30);
         }
     }
 
@@ -4513,11 +4691,32 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
+    private static void clearManagedPlayerSettings(MuzYamlConfig configuration, String base) {
+        configuration.set(base + ".labels-enabled", null);
+        configuration.set(base + ".selection-sound", null);
+        configuration.set(base + ".selection-sound-profile", null);
+        configuration.set(base + ".play-action-profile", null);
+        for (PlayActionKind kind : PlayActionKind.values()) {
+            configuration.set(base + ".play-action-profiles." + kind.key(), null);
+        }
+        configuration.set(base + ".hover-glow-color", null);
+        configuration.set(base + ".selected-glow-color", null);
+        configuration.set(base + ".chip-balance", null);
+        configuration.set(base + ".hand-offset.lateral", null);
+        configuration.set(base + ".hand-offset.vertical", null);
+        configuration.set(base + ".hand-offset.depth", null);
+        configuration.set(base + ".hand-offset.spacing", null);
+        configuration.set(base + ".hand-offset.preview-scale", null);
+    }
+
     private void savePlayerSettings() {
         if (playerSettingsFile == null) {
             return;
         }
-        MuzYamlConfig configuration = MuzYamlConfig.empty(playerSettingsFile.toPath());
+        // 以磁盘现有 YAML 树为基础合并，只清理本类负责的已知键；未知键及
+        // players.<uuid>.gadget-bar 必须原样保留，不能再从空配置重建 players 根节点。
+        MuzYamlConfig configuration = new MuzYamlConfig(playerSettingsFile.toPath());
+        Set<String> existingPlayerIds = new LinkedHashSet<>(configuration.getKeys("players"));
         Set<UUID> players = new LinkedHashSet<>();
         players.addAll(playerCardLabelSettings.keySet());
         players.addAll(playerSelectionSoundSettings.keySet());
@@ -4528,7 +4727,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         players.addAll(playerSelectedGlowColorSettings.keySet());
         players.addAll(playerChipBalances.keySet());
         players.addAll(playerHandOffsets.keySet());
-        configuration.set("players", new LinkedHashMap<String, Object>());
+        for (String rawId : existingPlayerIds) {
+            clearManagedPlayerSettings(configuration, "players." + rawId);
+        }
         for (UUID playerId : players) {
             String base = "players." + playerId;
             if (playerCardLabelSettings.containsKey(playerId)) {

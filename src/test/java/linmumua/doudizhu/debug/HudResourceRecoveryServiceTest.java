@@ -20,7 +20,7 @@ import sun.misc.Unsafe;
  * 守护启动、CraftEngine enable 和 /muz reload 共用同一份磁盘恢复委托。
  *
  * <p>这里不启动 Bukkit；资源桥缺失时只验证恢复服务 fail-closed，避免把「提交恢复任务」
- * 误报成「四层资源已验证」。
+ * 误报成「三层资源已验证」。
  */
 class HudResourceRecoveryServiceTest {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();

@@ -45,15 +45,9 @@ public class DebugHudConfigControllerTest {
             "trick-hud.counter.offset-down",
             "trick-hud.counter.gap",
             "trick-hud.counter.hide-exhausted",
-            "trick-hud.counter.offset-x",
-            "hotbar-hud.scale",
-            "hotbar-hud.enabled",
-            // hotbar 定位两键：offset-x 走 CE 负空格运行期即时生效，
-            // offset-y 要落到字形 ascent 上（由 HotbarDebugOverlayWriter 写覆盖层）。
-            "hotbar-hud.offset-x",
-            "hotbar-hud.offset-y"
+            "trick-hud.counter.offset-x"
         ), keys);
-        assertEquals(22, keys.size());
+        assertEquals(18, keys.size());
     }
 
     @Test
@@ -125,45 +119,8 @@ public class DebugHudConfigControllerTest {
         }
     }
 
-    @Test
-    void rejectsHotbarScaleOutsideGeneratedTiers() {
-        int invalidScale = PackAssets.HOTBAR_SCALE_TIERS[0] + 1;
-        DebugHudConfigController.ValidationException exception = assertThrows(
-            DebugHudConfigController.ValidationException.class,
-            () -> DebugHudConfigController.parsePatch("{\"hotbar-hud.scale\":" + invalidScale + "}"));
 
-        assertTrue(exception.getMessage().contains("合法档位")
-            || exception.getMessage().contains("已生成的档位"));
-        assertTrue(exception.getMessage().contains("重新生成资源包"));
-    }
 
-    @Test
-    void rejectsOffsetOutsideSelectedHotbarScaleBounds() {
-        final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
-        final int invalidOffset = HudOverlayLayout.minHotbarOffsetY(scale) - 1;
-        final DebugHudConfigController.Patch invalidPatch = new DebugHudConfigController.Patch(
-            java.util.Map.of("hotbar-hud.offset-y", invalidOffset));
-
-        DebugHudConfigController.ValidationException exception = assertThrows(
-            DebugHudConfigController.ValidationException.class,
-            () -> DebugHudConfigController.validateHotbarPatch(scale, 0, invalidPatch));
-
-        assertTrue(exception.getMessage().contains("scale=" + scale + "%"));
-        assertTrue(exception.getMessage().contains("重新生成该档位资源包"));
-    }
-
-    @Test
-    void acceptsOffsetWithinSelectedHotbarScaleBounds() {
-        final int scale = PackAssets.HOTBAR_SCALE_TIERS[0];
-        final int min = HudOverlayLayout.minHotbarOffsetY(scale);
-        final DebugHudConfigController.Patch patch = DebugHudConfigController.parsePatch(
-            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + min + "}");
-        DebugHudConfigController.validateHotbarPatch(scale, 0, patch);
-
-        final DebugHudConfigController.Patch upperPatch = DebugHudConfigController.parsePatch(
-            "{\"hotbar-hud.scale\":" + scale + ",\"hotbar-hud.offset-y\":" + HudOverlayLayout.MAX_TRICK_OFFSET + "}");
-        DebugHudConfigController.validateHotbarPatch(scale, 0, upperPatch);
-    }
 
     @Test
     void validatesRgbAndArgbColors() {
@@ -185,19 +142,17 @@ public class DebugHudConfigControllerTest {
         config.set("trick-hud.avatar-scale", 6);
         config.set("trick-hud.offset-down", 50);
         config.set("trick-hud.avatar-offset-down", 122);
-        config.set("hotbar-hud.enabled", true);
         config.set("render.unrelated", 7);
-        config.saveWithComments("trick-hud:\n  enabled: true\nhotbar-hud:\n  enabled: true\nrender:\n  unrelated: 0\n");
+        config.saveWithComments("trick-hud:\n  enabled: true\nrender:\n  unrelated: 0\n");
 
         DebugHudConfigController.Patch patch = DebugHudConfigController.parsePatch("{\"values\":{\"trick-hud.enabled\":false}}");
         for (Map.Entry<String, Object> entry : patch.values().entrySet()) {
             config.set(entry.getKey(), entry.getValue());
         }
-        config.saveWithComments("trick-hud:\n  enabled: true\nhotbar-hud:\n  enabled: true\nrender:\n  unrelated: 0\n");
+        config.saveWithComments("trick-hud:\n  enabled: true\nrender:\n  unrelated: 0\n");
 
         MuzYamlConfig reloaded = new MuzYamlConfig(file);
         assertFalse(reloaded.getBoolean("trick-hud.enabled", true));
-        assertTrue(reloaded.getBoolean("hotbar-hud.enabled", false));
         assertEquals(7, reloaded.getInt("render.unrelated", 0));
     }
 
@@ -213,31 +168,6 @@ public class DebugHudConfigControllerTest {
         assertTrue(warnings.get(0).contains("重叠"));
     }
 
-    @Test
-    void hotbarGeometryPublishesThreeIndependentIconsAndVirtualSelection() {
-        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
-        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length, geometry.hotbars().size());
-        for (DebugHudConfigController.PreviewGeometry.HotbarGeometry hotbar : geometry.hotbars()) {
-            assertEquals(68, hotbar.width());
-            assertEquals(22, hotbar.height());
-            assertEquals(69, hotbar.advance());
-            assertEquals(3, hotbar.slotCount());
-            assertEquals(24, hotbar.slotStep());
-            assertEquals(0, hotbar.selectStartX());
-            assertEquals(3, hotbar.icons().size());
-            for (int index = 0; index < 3; index++) {
-                var icon = hotbar.icons().get(index);
-                assertEquals(index, icon.index());
-                assertEquals(20, icon.width());
-                assertEquals(22, icon.height());
-                assertEquals(24, icon.step());
-                assertEquals(21, icon.advance());
-                assertEquals(PackAssets.hotbarIconTexture(index, hotbar.scale()), icon.texture());
-                assertTrue(icon.codepoint() > 0);
-                assertTrue(icon.debugCodepoint() > 0);
-            }
-        }
-    }
 
     @Test
     void avatarLayoutGeometryCoversEveryScaleAndOutlineCombination() {

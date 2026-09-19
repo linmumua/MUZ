@@ -124,8 +124,7 @@ public final class PackAssets {
     public static final int HOTBAR_DEFAULT_SCALE = DEFAULT_HUD_SCALE;
 
     /**
-     * Hotbar 三图标基础 ascent；与 build.gradle.kts 的 hotbarBaseAscent 同源。
-     * HotbarDebugOverlayWriter 以此作为 offset-y=0 的运行期覆盖层基准。
+     * 已退役 Hotbar 三图标基础 ascent；仅为旧源码兼容保留，不再生成或加载运行期覆盖层。
      */
     public static final int HOTBAR_BASE_ASCENT = PackTiers.HOTBAR_BASE_ASCENT;
 
@@ -324,7 +323,7 @@ public final class PackAssets {
     public static final int[] HOTBAR_SCALE_SELECT_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_CODEPOINTS;
     public static final int[] HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS = PackTiers.HOTBAR_SCALE_SELECT_DEBUG_CODEPOINTS;
 
-    /** 新增的 overlay 选中框码位；由 HotbarDebugOverlayWriter 按 scale 生成声明。 */
+    /** 已退役 overlay 选中框码位，仅为旧源码兼容保留。 */
     public static final int HOTBAR_SELECT_DEBUG_CODEPOINT = 0xEF03;
 
     /**

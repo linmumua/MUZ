@@ -78,6 +78,12 @@ public final class WorldTableInteractionListener implements Listener {
         plugin.scheduler().runTimer(1L, 4L, this::tickToolPreviews);
     }
 
+    /** 只有命中语音面板时才消费右键；未命中必须放行到后续手牌/保护路由。 */
+    private boolean tryOpenSpeechPanel(Player player) {
+        return plugin.getTableSpeechPanelService() != null
+            && plugin.getTableSpeechPanelService().tryHandleRightClick(player);
+    }
+
     /** 只有确定性路由的所有更高优先级处理都未消费时，才尝试桌内虚拟道具。 */
     private boolean tryUseTableGadget(Player player, ItemStack item) {
         if (plugin.isHudDebugStick(item)
@@ -205,10 +211,6 @@ public final class WorldTableInteractionListener implements Listener {
     /** 调试棒换出主手后，清掉仍挂在客户端上的假预览；临时行覆盖留到离桌/退出再清。 */
     @EventHandler
     public void onHudDebugStickHeldChange(PlayerItemHeldEvent event) {
-        TableGadgetService service = plugin.tableGadgets();
-        if (service != null) {
-            service.onHeldChange(event);
-        }
         Player player = event.getPlayer();
         plugin.scheduler().runLater(1L, () -> {
             if (!player.isOnline() || plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
@@ -271,6 +273,10 @@ public final class WorldTableInteractionListener implements Listener {
             handleHudDebugStickOnce(event.getPlayer());
             return;
         }
+        if (rightClick && tryOpenSpeechPanel(event.getPlayer())) {
+            event.setCancelled(true);
+            return;
+        }
 
         if (rightClick || leftClick) {
             // 追踪：六个事件入口之一。blocking 实体恒为 null（牌无判定框，
@@ -291,13 +297,13 @@ public final class WorldTableInteractionListener implements Listener {
                     return; // 命中手牌，不再做方块保护（牌悬浮在桌子上方，准星必然同时落在桌面方块上）
                 }
             }
-            // 调试棒、放拆桌工具、手牌均已在上面优先处理；只有有效同桌目标才消费右键。
-            if (rightClick && tryUseTableGadget(event.getPlayer(), event.getItem())) {
-                event.setCancelled(true);
-                return;
-            }
         }
 
+        // 手牌之后先尝试有效道具；没有同桌真人目标时不消费，继续进入保护判定。
+        if (!event.isCancelled() && rightClick && tryUseTableGadget(event.getPlayer(), event.getItem())) {
+            event.setCancelled(true);
+            return;
+        }
         // 受保护方块判定：只在事件尚未被取消时执行，尊重其他逻辑的取消决定。
         // 手动检查 isCancelled 等价于原来独立方法上 ignoreCancelled = true 的语义。
         // 不限 Action 类型：PHYSICAL（踩压力板）等也要保护桌子方块。
@@ -341,6 +347,15 @@ public final class WorldTableInteractionListener implements Listener {
             && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
             handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
+        // 拆桌棍是工具路由，必须早于语音面板与手牌；仅在 INTERACT 路执行，避免 AT 把二次确认压成一步。
+        if (handleTableRemoverOnEntity(event.getPlayer())) {
+            event.setCancelled(true);
+            return;
+        }
+        if (tryOpenSpeechPanel(event.getPlayer())) {
+            event.setCancelled(true);
             return;
         }
         // 追踪：六个事件入口之一。onAttack 与 onInteractAt 的 tracing 用同一前缀，
@@ -444,6 +459,10 @@ public final class WorldTableInteractionListener implements Listener {
             && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
             handleHudDebugStickOnce(event.getPlayer());
+            return;
+        }
+        if (tryOpenSpeechPanel(event.getPlayer())) {
+            event.setCancelled(true);
             return;
         }
         // 追踪：六个事件入口之一。AT 与 INTERACT 两条路都打一次，看哪个包先到、

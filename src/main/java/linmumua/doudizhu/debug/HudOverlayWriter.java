@@ -30,7 +30,7 @@ import java.util.concurrent.Executor;
 import java.util.function.BooleanSupplier;
 
 /**
- * 四层连续 HUD 覆盖层的统一事务写入器。
+ * 三层 Trick HUD 连续覆盖层的统一事务写入器。
  *
  * <p>布局、码位、字体、原图和透明补行元数据全部由 {@link HudOverlayLayout} 提供；本类只负责
  * 将它们安全落到 CraftEngine 的同一个 {@code resources/muz} 根目录。无补行的字形直接引用
@@ -42,7 +42,6 @@ public final class HudOverlayWriter {
     private static final String OVERLAY_NAMESPACE = "muz";
     private static final String PACK_FILE = "pack.yml";
     private static final String TRICK_IMAGES_FILE = "configuration/images/trick_hud_continuous.yml";
-    private static final String HOTBAR_IMAGES_FILE = "configuration/images/hotbar_debug.yml";
     private static final String CONTINUOUS_TEXTURE_ROOT = "resourcepack/assets/muz/textures/font/continuous";
 
     private final DoudizhuPlugin plugin;
@@ -66,7 +65,7 @@ public final class HudOverlayWriter {
     }
 
     /**
-     * 异步写出四层 overlay。路径必须由主线程预先解析，异步阶段不访问 Bukkit。
+     * 异步写出牌行、头像、记牌器三层 overlay。路径必须由主线程预先解析，异步阶段不访问 Bukkit。
      *
      * @return 成功完成且仍处于 active 状态时为 true；任何失败或失活均为 false
      */
@@ -118,7 +117,6 @@ public final class HudOverlayWriter {
         Map<String, byte[]> files = new LinkedHashMap<>();
         captureFile(safeRoot, PACK_FILE, files);
         captureFile(safeRoot, TRICK_IMAGES_FILE, files);
-        captureFile(safeRoot, HOTBAR_IMAGES_FILE, files);
         Path dynamicRoot = safeRoot.resolve(CONTINUOUS_TEXTURE_ROOT).normalize();
         ensureWithin(safeRoot, dynamicRoot);
         if (Files.isDirectory(dynamicRoot)) {
@@ -147,7 +145,7 @@ public final class HudOverlayWriter {
     public void restore(Path root, OverlayState state) throws IOException {
         Objects.requireNonNull(state, "state");
         Path safeRoot = requireRoot(root);
-        Set<String> owned = new LinkedHashSet<>(List.of(PACK_FILE, TRICK_IMAGES_FILE, HOTBAR_IMAGES_FILE));
+        Set<String> owned = new LinkedHashSet<>(List.of(PACK_FILE, TRICK_IMAGES_FILE));
         Path dynamicRoot = safeRoot.resolve(CONTINUOUS_TEXTURE_ROOT).normalize();
         ensureWithin(safeRoot, dynamicRoot);
         if (Files.isDirectory(dynamicRoot)) {
@@ -212,11 +210,7 @@ public final class HudOverlayWriter {
     private void writeTransaction(Path root, HudResourceRequest request, BooleanSupplier active) throws IOException {
         Path safeRoot = requireRoot(root);
         List<HudOverlayLayout.Glyph> trick = HudOverlayLayout.trickGlyphs(request);
-        List<HudOverlayLayout.Glyph> hotbar = HudOverlayLayout.hotbarGlyphs(request);
-        List<HudOverlayLayout.Glyph> all = HudOverlayLayout.glyphs(request);
-        if (all.size() != trick.size() + hotbar.size()) {
-            throw new IOException("连续 HUD 字形布局返回数量不一致");
-        }
+        List<HudOverlayLayout.Glyph> all = trick;
         Map<String, byte[]> dynamic = new LinkedHashMap<>();
         for (HudOverlayLayout.Glyph glyph : all) {
             if (!active.getAsBoolean()) {
@@ -239,7 +233,6 @@ public final class HudOverlayWriter {
         }
         writeBytesAtomically(safeRoot, PACK_FILE, buildPackYaml().getBytes(StandardCharsets.UTF_8));
         writeBytesAtomically(safeRoot, TRICK_IMAGES_FILE, buildImagesYaml(trick).getBytes(StandardCharsets.UTF_8));
-        writeBytesAtomically(safeRoot, HOTBAR_IMAGES_FILE, buildImagesYaml(hotbar).getBytes(StandardCharsets.UTF_8));
         for (Map.Entry<String, byte[]> entry : dynamic.entrySet()) {
             writeBytesAtomically(safeRoot, entry.getKey(), entry.getValue());
         }

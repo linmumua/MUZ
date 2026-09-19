@@ -44,29 +44,9 @@ public final class HotbarHudService {
     /** 同一阻断原因最多每 10 秒记录一次，避免 2 tick 周期任务刷屏。 */
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 10_000_000_000L;
 
-    /** 字体宽度未知时的聊天降级窗口；同一玩家每 10 秒最多发送最新一条。 */
-    private static final long CHAT_FALLBACK_INTERVAL_NANOS = 10_000_000_000L;
-
-    /**
-     * 叠加消息的有效期，单位毫秒。
-     *
-     * <p>ActionBar 原生约3秒淡出；把内部过期时间设略短，到期后下一个 tick
-     * 不再叠加，让背景层静默继续，而不是等 ActionBar 超时变空。
-     */
-    private static final long DEFAULT_OVERLAY_DURATION_MS = 2_800L;
-
     private final DoudizhuPlugin plugin;
     private final CraftEngineOffsetService offsetService;
-
-    /**
-     * 每位玩家的叠加消息条目，过期后在 tick 里惰性清理。
-     *
-     * <p>只在主线程访问（BukkitScheduler 保证），无需并发容器。
-     */
-    private final Map<UUID, OverlayEntry> overlays = new HashMap<>();
-
-    /** 字体测宽未知时的聊天降级状态；只在主线程访问，避免 tick 重复刷屏。 */
-    private final Map<UUID, ChatFallbackEntry> chatFallbacks = new HashMap<>();
+    private final ActionBarOverlayService actionBarOverlay;
 
     /** 阻断诊断的最近记录时间；只在主线程访问，按原因而不是按 tick 去重。 */
     private final Map<String, Long> diagnosticLogAt = new HashMap<>();
@@ -101,9 +81,8 @@ public final class HotbarHudService {
      * 是否使用「可拖动 ascent」的三道具调试覆盖层，而不是 bundle 内的固定 ascent。
      * 图标码位取自 PackAssets，避免沿用已退役的整幅底板 EF00/EF01。
      *
-     * <p>由已验证资源请求驱动（见 {@link #refreshOverlayGlyphSelection()}）。对应码位同属
-     * {@code minecraft:muz_hotbar} 字体、共用三张独立贴图，差别只在 ascent 来自哪里：
-     * 基础声明烘焙在构建产物里，覆盖声明由 {@code HotbarDebugOverlayWriter} 运行期写出。
+     * <p>该旧服务不再进入正式运行期装配；字段与选择逻辑仅保留源码兼容，不得据此恢复
+     * {@code minecraft:muz_hotbar} provider 或运行期覆盖层。
      */
     private boolean useDebugOverlayGlyph;
 
@@ -126,7 +105,7 @@ public final class HotbarHudService {
     private int overlayReadyScale = -1;
 
     /**
-     * 当前正在合成的虚拟道具下标（0..2），供 {@link #buildActionBar(OverlayEntry)} 叠加选中框。
+     * 当前正在合成的虚拟道具下标（0..2），供 {@link #buildActionBar(Component)} 叠加选中框。
      *
      * <p>【为什么用字段而不是给 buildActionBar 加参数】：{@code DoudizhuRuntimeSyncTest}
      * 按文本锁死了 {@code player.sendActionBar(buildActionBar(entry))} 这一行调用形态，
@@ -136,8 +115,24 @@ public final class HotbarHudService {
     private int pendingHeldSlot;
 
     public HotbarHudService(DoudizhuPlugin plugin, CraftEngineOffsetService offsetService) {
+        this(plugin, offsetService, new ActionBarOverlayService(plugin));
+    }
+
+    public HotbarHudService(
+        DoudizhuPlugin plugin,
+        CraftEngineOffsetService offsetService,
+        ActionBarOverlayService actionBarOverlay
+    ) {
         this.plugin = plugin;
         this.offsetService = offsetService;
+        this.actionBarOverlay = actionBarOverlay == null
+            ? new ActionBarOverlayService(plugin)
+            : actionBarOverlay;
+    }
+
+    /** 兼容主类装配及牌桌路由共用的普通 ActionBar 服务。 */
+    public ActionBarOverlayService actionBarOverlayService() {
+        return actionBarOverlay;
     }
 
     /** 设置启用开关（在 onEnable / reload 时由插件主类调用）。 */
@@ -291,8 +286,7 @@ public final class HotbarHudService {
             task = null;
         }
         clearRenderedPlayers();
-        overlays.clear();
-        chatFallbacks.clear();
+        actionBarOverlay.stop();
         diagnosticLogAt.clear();
     }
 
@@ -307,35 +301,24 @@ public final class HotbarHudService {
      * @param durationTicks 消息持续格刻数；一般传 60（3 秒）
      */
     public void showOverlay(Collection<UUID> players, Component message, int durationTicks) {
-        Component plain = message.decoration(TextDecoration.ITALIC, false);
-        long expireAt = System.currentTimeMillis() + (long) durationTicks * 50L;
+        Component plain = (message == null ? Component.empty() : message)
+            .decoration(TextDecoration.ITALIC, false);
         for (UUID id : players) {
             Player player = Bukkit.getPlayer(id);
             if (player == null || !player.isOnline()) {
-                overlays.remove(id);
-                chatFallbacks.remove(id);
+                actionBarOverlay.storeOverlay(List.of(id), Component.empty(), 0);
                 renderedPlayers.remove(id);
                 continue;
             }
-
-            // 只有正式出牌阶段才把消息和自定义三道具底图合成；叫地主、加倍、结算
-            // 等阶段仍然必须显示普通 ActionBar，不能因为全局开关开启就把提示吞掉。
             boolean playing = isPlayingPlayer(player);
             if (!enabled || !offsetService.isAvailable() || !playing) {
                 diagnoseShowOverlayBlocked(playing);
-                overlays.remove(id);
-                chatFallbacks.remove(id);
-                // 普通 ActionBar 会替换客户端上一帧字形；同时移出集合，避免下一轮 tick
-                // 再发一个空 ActionBar 把这条阶段提示清掉。
+                actionBarOverlay.storeOverlay(List.of(id), Component.empty(), 0);
                 renderedPlayers.remove(id);
-                player.sendActionBar(plain);
+                actionBarOverlay.sendActionBar(id, plain);
                 continue;
             }
-            overlays.put(id, new OverlayEntry(message, expireAt));
-            if (measureMessage(message).isEmpty()) {
-                queueChatFallback(id, player, message);
-                flushChatFallback(id, player);
-            }
+            actionBarOverlay.storeOverlay(List.of(id), message, durationTicks);
         }
     }
 
@@ -366,12 +349,9 @@ public final class HotbarHudService {
         if (!enabled || !offsetService.isAvailable()) {
             diagnoseTickBlocked();
             clearRenderedPlayers();
-            overlays.clear();
-            chatFallbacks.clear();
             return;
         }
 
-        long now = System.currentTimeMillis();
         Set<UUID> currentPlayers = new HashSet<>();
         TableManager tableManager = plugin.getTableManager();
         if (tableManager != null) {
@@ -399,11 +379,7 @@ public final class HotbarHudService {
                         continue;
                     }
                     currentPlayers.add(id);
-                    OverlayEntry entry = overlays.get(id);
-                    if (entry != null && entry.expireAt() <= now) {
-                        overlays.remove(id);
-                        entry = null;
-                    }
+                    Component overlay = actionBarOverlay.currentOverlay(id);
                     // 虚拟道具索引由交互服务维护；不能再绑定真实物品栏，否则取消换槽后高亮不动。
                     int selected = plugin.tableGadgets() == null ? 0 : plugin.tableGadgets().selectedIndex(id);
                     pendingHeldSlot = Math.max(0, Math.min(PackAssets.HOTBAR_HUD_SLOT_COUNT - 1, selected));
@@ -412,14 +388,10 @@ public final class HotbarHudService {
                         diagnoseBlocked("overlay-not-ready", Level.WARNING,
                             "Hotbar HUD 已进入 PLAYING 真人座位，但 offset-y=" + offsetY
                                 + "、scale=" + scale + " 的覆盖层尚未通过 CE 重载与资源包校验，暂不发送自定义字形。");
-                        player.sendActionBar(entry == null ? Component.empty() : entry.message());
+                        player.sendActionBar(overlay == null ? Component.empty() : overlay);
                         continue;
                     }
-                    if (entry != null && measureMessage(entry.message()).isEmpty()) {
-                        queueChatFallback(id, player, entry.message());
-                        flushChatFallback(id, player);
-                    }
-                    player.sendActionBar(buildActionBar(entry));
+                    player.sendActionBar(buildActionBar(overlay));
                 }
             }
         }
@@ -437,8 +409,6 @@ public final class HotbarHudService {
         }
         renderedPlayers.clear();
         renderedPlayers.addAll(currentPlayers);
-        overlays.keySet().removeIf(id -> !currentPlayers.contains(id));
-        chatFallbacks.keySet().removeIf(id -> !currentPlayers.contains(id));
     }
 
     private boolean hotbarOverlayReady() {
@@ -500,15 +470,8 @@ public final class HotbarHudService {
 
     /** 主动清除某个玩家的自定义底图及其待显示消息。 */
     public void clearOverlay(UUID playerId) {
-        overlays.remove(playerId);
-        chatFallbacks.remove(playerId);
-        if (!renderedPlayers.remove(playerId)) {
-            return;
-        }
-        Player player = Bukkit.getPlayer(playerId);
-        if (player != null) {
-            player.sendActionBar(Component.empty());
-        }
+        actionBarOverlay.clearOverlay(playerId);
+        renderedPlayers.remove(playerId);
     }
 
     /** 在牌桌离开 PLAYING、强制关闭或停服时立即清除整桌真人的最后一帧。 */
@@ -551,9 +514,9 @@ public final class HotbarHudService {
      *
      * <p>CraftEngine 不可用时降级：有叠加则只发叠加文字，无叠加则不发任何内容。
      */
-    private Component buildActionBar(OverlayEntry overlay) {
+    private Component buildActionBar(Component overlay) {
         if (!offsetService.isAvailable()) {
-            return overlay == null ? Component.empty() : overlay.message();
+            return overlay == null ? Component.empty() : overlay;
         }
 
         PackAssets.HotbarTier geometry = PackAssets.hotbarTier(scale);
@@ -597,23 +560,20 @@ public final class HotbarHudService {
             // 仅字形，前进量 = 当前 scale 的底图 advance，客户端将其居中。
             return glyph;
         }
-
-        OptionalInt measured = measureMessage(overlay.message());
+        HotbarFontMetrics metrics = verifiedHotbarFontMetrics();
+        if (metrics == null) {
+            return overlay;
+        }
+        OptionalInt measured = metrics.measure(overlay);
         if (measured.isEmpty()) {
-            // 字体快照未知或正文含无法安全测量的组件时只发送固定图标；正文由聊天降级发送。
-            return glyph;
+            return overlay;
         }
         HotbarActionBarLayout.Layout layout = HotbarActionBarLayout.calculate(
             geometry.advance(), measured.getAsInt());
         return glyph
             .append(miniOrEmpty(offsetService.offset(layout.afterGlyphOffset())))
-            .append(overlay.message())
+            .append(overlay)
             .append(miniOrEmpty(offsetService.offset(layout.afterTextOffset())));
-    }
-
-    private OptionalInt measureMessage(Component message) {
-        HotbarFontMetrics metrics = verifiedHotbarFontMetrics();
-        return metrics == null ? OptionalInt.empty() : metrics.measure(message);
     }
 
     private HotbarFontMetrics verifiedHotbarFontMetrics() {
@@ -623,32 +583,6 @@ public final class HotbarHudService {
         }
         return state.verifiedRequest() != null && state.matchesHotbar(offsetY, scale)
             ? state.verifiedHotbarFontMetrics() : null;
-    }
-
-    private void queueChatFallback(UUID id, Player player, Component message) {
-        if (player == null || !player.isOnline() || message == null) {
-            return;
-        }
-        ChatFallbackEntry previous = chatFallbacks.get(id);
-        if (previous != null && previous.message().equals(message)) {
-            return;
-        }
-        chatFallbacks.put(id, new ChatFallbackEntry(message,
-            previous == null ? 0L : previous.lastSentNanos(), previous == null ? null : previous.lastMessage()));
-    }
-
-    private void flushChatFallback(UUID id, Player player) {
-        ChatFallbackEntry entry = chatFallbacks.get(id);
-        if (entry == null || player == null || !player.isOnline()
-            || entry.message().equals(entry.lastMessage())) {
-            return;
-        }
-        long now = System.nanoTime();
-        if (entry.lastSentNanos() != 0L && now - entry.lastSentNanos() < CHAT_FALLBACK_INTERVAL_NANOS) {
-            return;
-        }
-        player.sendMessage(entry.message());
-        chatFallbacks.put(id, new ChatFallbackEntry(entry.message(), now, entry.message()));
     }
 
     /**
@@ -666,9 +600,4 @@ public final class HotbarHudService {
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    /** 叠加消息条目。{@code expireAt} 取 {@link System#currentTimeMillis()} 基准。 */
-    private record OverlayEntry(Component message, long expireAt) {}
-
-    /** 字体测宽未知时的最新聊天消息与上次发送单调时间。 */
-    private record ChatFallbackEntry(Component message, long lastSentNanos, Component lastMessage) {}
 }

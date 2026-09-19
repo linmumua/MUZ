@@ -22,8 +22,8 @@ import java.util.concurrent.ScheduledExecutorService;
  * Debug Web HUD 的串行应用协调器。
  *
      * <p>保存顺序固定为：主线程确认 CraftEngine 可用并解析覆盖层目录，异步写 config.yml 与
-     * 四层连续 HUD CE 覆盖层，主线程启动 CraftEngine 真实 reload Future，随后异步生成并校验
-     * 实际资源包，最后切回主线程原子标记完整 request 已验证、应用 Trick HUD/Hotbar HUD 运行态并发布 Snapshot。
+ * 三层 Trick HUD CE 覆盖层，主线程启动 CraftEngine 真实 reload Future，随后异步生成并校验
+ * 实际资源包，最后切回主线程原子标记完整 request 已验证并发布 Snapshot。
 
  *
  * <p>HTTP 等待 Future 与 CraftEngine 原始 Future 明确分离：120 秒只让本次 Web 结果超时，
@@ -106,11 +106,6 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
 
     public CompletableFuture<ApplyResult> submitSave(DebugHudConfigController.Patch patch) {
         Objects.requireNonNull(patch, "patch");
-        try {
-            controller.validatePatchAgainstCurrentHotbar(patch);
-        } catch (DebugHudConfigController.ValidationException exception) {
-            return completedFailure(exception.getMessage());
-        }
         synchronized (lifecycleLock) {
             if (closed || taskGate.isClosed()) {
                 return completedFailure("Debug Web HUD 应用协调器已关闭。");
@@ -179,7 +174,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                 }
             }, executor).thenCompose(stage -> {
                 if (stage == null || stage.disk() == null) {
-                    return CompletableFuture.completedFuture(inactiveResult("未写入配置或 hotbar 覆盖层。"));
+                    return CompletableFuture.completedFuture(inactiveResult("未写入配置或 HUD 覆盖层。"));
                 }
                 DebugHudConfigController.DiskSaveResult disk = stage.disk();
                 if (!disk.ok()) {
@@ -193,11 +188,11 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                         () -> isTaskActive(task))
                     .thenCompose(written -> {
                         if (!isTaskActive(task)) {
-                            return rollbackAndFailure(task, transaction, "任务已失效，已回滚配置与 hotbar 覆盖层。");
+                            return rollbackAndFailure(task, transaction, "任务已失效，已回滚配置与 HUD 覆盖层。");
                         }
                         if (!written) {
                             return rollbackAndFailure(task, transaction,
-                                "写出当前 hotbar 调试覆盖层失败，已回滚配置，未触发 CraftEngine 重载。");
+                                "写出当前 HUD 调试覆盖层失败，已回滚配置，未触发 CraftEngine 重载。");
                         }
                         return resourceAndApply(resolved.bridge(), request,
                             disk.appliedKeys(), disk.messages(), task)
@@ -208,7 +203,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                                 String detail = failure == null
                                     ? (result == null ? "资源同步返回空结果。" : String.join("；", result.messages()))
                                     : "CraftEngine 资源同步失败：" + failure.getMessage();
-                                return rollbackAndFailure(task, transaction, detail + " 已回滚配置与 hotbar 覆盖层。");
+                                return rollbackAndFailure(task, transaction, detail + " 已回滚配置与 HUD 覆盖层。");
                             }).thenCompose(future -> future);
                     });
             });
@@ -291,8 +286,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                 // CE 内存内容已恢复。旧 request 不能重新标记 ready，否则运行态会继续渲染
                 // 与客户端/CE 实际内容不一致的字形；必须等下一次完整校验成功后再 ready。
                 plugin.getHudOverlayRuntimeState().clear();
-                plugin.setHotbarOverlayReady(false);
-                plugin.applyHudRuntimeStateFromWeb();
+                    plugin.applyHudRuntimeStateFromWeb();
                 return ApplyResult.failed(controller.snapshot(), List.of(detail));
             },
             () -> inactiveResult("任务已失效，迟到回滚结果未应用。")
@@ -409,9 +403,8 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             if (!isTaskActive(task)) {
                 throw new IllegalStateException("HUD 资源任务已失效，未启动 CraftEngine 重载。");
             }
-            // 四层 overlay 尚未完成真实重载、生成和校验，先清除统一 ready；失败时绝不虚报成功。
+            // 三层 overlay 尚未完成真实重载、生成和校验，先清除统一 ready；失败时绝不虚报成功。
             plugin.getHudOverlayRuntimeState().clear();
-            plugin.setHotbarOverlayReady(false);
             return selected.reloadGenerateAndVerify(request, executor, mainExecutor);
         });
         return started.thenCompose(resource -> {
@@ -419,24 +412,21 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
                 return failedFuture(new IllegalStateException("CraftEngine 资源任务返回空 Future。"));
             }
             return resource;
-        }).thenCompose(ignored -> selected.loadVerifiedHotbarFontMetrics(request, executor))
-            .thenCompose(metrics -> applyOnMain(request, metrics, appliedKeys, messages, task));
+        }).thenCompose(ignored -> applyOnMain(request, appliedKeys, messages, task));
     }
 
     private CompletableFuture<ApplyResult> applyOnMain(HudResourceRequest request,
-                                                        linmumua.doudizhu.assets.HotbarFontMetrics metrics,
                                                         List<String> appliedKeys,
                                                         List<String> messages,
                                                         HudWebApplyTaskGate.Task<ApplyResult> task) {
         return runOnMain(() -> taskGate.runIfActiveAtomically(
             task,
             () -> {
-                // 到这里才表示四层 CE reload/generate/ZIP 校验和字体快照加载已结束；无客户端回执仍不宣称客户端已应用。
-                plugin.getHudOverlayRuntimeState().markVerified(request, metrics);
-                plugin.setHotbarOverlayReady(true, request.hotbarScale());
+                // 到这里才表示三层 CE reload/generate/ZIP 校验已结束；无客户端回执仍不宣称客户端已应用。
+                plugin.getHudOverlayRuntimeState().markVerified(request);
                 plugin.applyHudRuntimeStateFromWeb();
                 List<String> resultMessages = new ArrayList<>(messages);
-                resultMessages.add("服务端四层资源包内容已校验；CraftEngine 自动上传结果未确认，客户端待重新下载。");
+                resultMessages.add("服务端三层资源包内容已校验；CraftEngine 自动上传结果未确认，客户端待重新下载。");
                 return ApplyResult.success(controller.snapshot(), appliedKeys, resultMessages);
             },
             () -> inactiveResult("未应用 HUD 运行态，也未发布旧 Snapshot。")
@@ -564,7 +554,6 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             closed = true;
             taskGate.close();
             plugin.getHudOverlayRuntimeState().clear();
-            plugin.setHotbarOverlayReady(false);
             // 不释放当前租约：CraftEngine 原始 Future 可能仍在生成/校验，迟到回调必须被挡住。
             // raw Future 完成后 shutdownIfClosed 才会释放执行器；未启动本实例任务时可立即停止。
             // 这里必须检查本实例的 task，而不是共享 lease：其它 Web 实例的任务不能阻止本实例收尾。
