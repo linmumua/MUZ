@@ -187,20 +187,10 @@ class HotbarFontMetricsTest {
     }
 
     @Test
-    void 真实2612Vanilla字体ZIP中文宽度一致而混合文本字体选项分歧时拒绝() throws Exception {
-        var vanilla = HotbarFontMetricsTest.class.getClassLoader()
-            .getResourceAsStream("hotbar-font/vanilla-26.1.2.zip");
-        assertTrue(vanilla != null, "缺少 hotbar-font/vanilla-26.1.2.zip 测试资源");
-        Path actual = writeZip(Map.of());
-        try (var input = vanilla) {
-            HotbarFontMetrics metrics = HotbarFontMetrics.load(input, actual, 84);
-            assertEquals(OptionalInt.of(36), metrics.measure(Component.text("玩家测试")),
-                "四个中文字符在官方普通与 Unicode 字体选项下均为 9px advance");
-            assertTrue(metrics.measure(Component.text("玩家测试 Hello 123")).isEmpty(),
-                "官方普通字体为 86px、Unicode 字体为 73px，不能把任一值当客户端确定宽度");
-        } finally {
-            Files.deleteIfExists(actual);
-        }
+    void 退役Hotbar字体ZIP不再进入测试资源() {
+        assertTrue(HotbarFontMetricsTest.class.getClassLoader()
+                .getResource("hotbar-font/vanilla-26.1.2.zip") == null,
+            "Hotbar 资源链退役后不得继续打包官方字体 ZIP");
     }
 
     private static byte[] bitmapFont(String file, char character) {

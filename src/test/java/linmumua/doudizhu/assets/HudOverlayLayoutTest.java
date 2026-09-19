@@ -30,32 +30,25 @@ class HudOverlayLayoutTest {
     private static final Pattern FIELD = Pattern.compile("^\\s+(height|ascent|font|file|char):\\s+(.+)$");
 
     @Test
-    void 请求范围与已生成HotbarScale严格校验() {
+    void 请求只校验三层Trick范围并忽略兼容Hotbar字段() {
         assertEquals(-128, HudOverlayLayout.MIN_TRICK_OFFSET);
         assertEquals(512, HudOverlayLayout.MAX_TRICK_OFFSET);
-        int minHotbarOffset = HudOverlayLayout.minHotbarOffsetY(100);
-        assertEquals(PackAssets.HOTBAR_BASE_ASCENT - 256, minHotbarOffset);
         assertThrows(IllegalArgumentException.class,
-            () -> new HudResourceRequest(-129, 0, 0, minHotbarOffset, 100));
+            () -> new HudResourceRequest(-129, 0, 0, Integer.MIN_VALUE, -1));
         assertThrows(IllegalArgumentException.class,
-            () -> new HudResourceRequest(0, 0, 0, minHotbarOffset - 1, 100));
-        assertThrows(IllegalArgumentException.class,
-            () -> new HudResourceRequest(0, 0, 0, 0, 101));
-        assertThrows(IllegalArgumentException.class,
-            () -> HudOverlayLayout.minHotbarOffsetY(101));
+            () -> new HudResourceRequest(0, 513, 0, Integer.MAX_VALUE, 101));
+        HudResourceRequest request = new HudResourceRequest(0, 0, 0, Integer.MIN_VALUE, -1);
+        assertEquals(0, request.cardOffsetDown());
     }
 
     @Test
-    void 四层列表数量顺序与fontchar契约稳定() {
+    void 三层列表数量顺序与fontchar契约稳定() {
         HudResourceRequest request = new HudResourceRequest(37, 83, 157, -200, 100);
         List<HudOverlayLayout.Glyph> trick = HudOverlayLayout.trickGlyphs(request);
-        List<HudOverlayLayout.Glyph> hotbar = HudOverlayLayout.hotbarGlyphs(request);
         List<HudOverlayLayout.Glyph> all = HudOverlayLayout.glyphs(request);
-        assertEquals(trick.size() + hotbar.size(), all.size());
+        assertEquals(trick, all);
         assertEquals(55 + 2 * 10 + 2 * 2 + 3 + PackAssets.COUNTER_SCALE_TIERS.length * 22, trick.size());
-        assertEquals(4, hotbar.size());
         assertEquals("minecraft:muz_cards_continuous", trick.get(0).font());
-        assertEquals("minecraft:muz_hotbar", hotbar.get(0).font());
         assertEquals(55, trick.stream().filter(g -> g.id().startsWith("card_")).count());
         assertEquals(20, trick.stream().filter(g -> g.id().startsWith("avatar_px_")).count());
         assertEquals(4, trick.stream().filter(g -> g.id().startsWith("avatar_crown_")).count());
@@ -76,8 +69,7 @@ class HudOverlayLayoutTest {
 
     @Test
     void 负偏移按gcd补行且保持比例并拒绝超限() {
-        int minHotbarOffset = HudOverlayLayout.minHotbarOffsetY(100);
-        HudResourceRequest request = new HudResourceRequest(-128, -128, -128, minHotbarOffset, 100);
+        HudResourceRequest request = new HudResourceRequest(-128, -128, -128, Integer.MIN_VALUE, -1);
         HudOverlayLayout.Glyph card = HudOverlayLayout.trickGlyphs(request).stream()
             .filter(g -> g.id().equals("card_card_back_h53")).findFirst().orElseThrow();
         assertEquals(181, card.height());
@@ -105,22 +97,15 @@ class HudOverlayLayoutTest {
         assertEquals(143, outlinedBot.height());
         assertEquals(11, outlinedBot.rasterWidth());
 
-        HudOverlayLayout.Glyph hotbar = HudOverlayLayout.hotbarGlyphs(request).get(0);
-        assertEquals(PackAssets.HOTBAR_BASE_ASCENT - minHotbarOffset, hotbar.ascent());
-        assertEquals(PackAssets.HOTBAR_BASE_ASCENT, hotbar.baseAscent());
-        assertEquals(256, hotbar.height());
-        assertEquals(234, hotbar.paddingRasterRows());
-        assertEquals(20, hotbar.originalWidth());
-        assertEquals(22, hotbar.originalHeight());
+        assertTrue(HudOverlayLayout.glyphs(request).stream()
+            .noneMatch(glyph -> glyph.id().startsWith("hotbar_")),
+            "三层资源请求不得再生成 Hotbar glyph");
     }
 
     @Test
     void 正偏移不生成动态PNG且几何不变() {
         HudResourceRequest request = new HudResourceRequest(37, 83, 157, -200, 100);
         for (HudOverlayLayout.Glyph glyph : HudOverlayLayout.glyphs(request)) {
-            if (glyph.id().startsWith("hotbar_")) {
-                continue;
-            }
             assertFalse(glyph.texture().startsWith("muz:font/continuous/"), glyph.id());
             assertEquals(0, glyph.paddingRasterRows(), glyph.id());
             assertEquals(glyph.baseHeight(), glyph.height(), glyph.id());

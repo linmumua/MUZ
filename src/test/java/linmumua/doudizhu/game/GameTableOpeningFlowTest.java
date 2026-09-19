@@ -244,6 +244,7 @@ class GameTableOpeningFlowTest {
         setField(table, "bombMultiplier", 1);
         setField(table, "revealMultiplier", 1);
         setField(table, "effectCoordinator", new TableEffectCoordinator(plugin, new Random(1L), table::getSeats, Bukkit::getPlayer));
+        setField(table, "actionBarOverlay", new ActionBarOverlayService(plugin));
         setField(table, "timedOutPlayCoordinator", unsafe().allocateInstance(TimedOutPlayCoordinator.class));
         setField(table, "openingSettings", settings(3, 8, 6));
         return table;

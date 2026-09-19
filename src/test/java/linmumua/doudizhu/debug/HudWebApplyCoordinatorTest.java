@@ -86,17 +86,10 @@ class HudWebApplyCoordinatorTest {
                     "trick-hud.avatar-offset-down", 83,
                     "trick-hud.counter.offset-down", 157
                 ))).get(5, TimeUnit.SECONDS);
-            assertTrue(first.ok(), "第一轮四层保存必须成功：" + first.messages());
+            assertTrue(first.ok(), "第一轮三层保存必须成功：" + first.messages());
             assertEquals(new HudResourceRequest(37, 83, 157, 0, 100), bridge.requests().get(0));
             assertTrue(fixture.plugin().getHudOverlayRuntimeState().matchesTrick(37, 83, 157));
 
-            HudWebApplyCoordinator.ApplyResult second = fixture.coordinator().submitSave(
-                new DebugHudConfigController.Patch(java.util.Map.of("hotbar-hud.offset-y", 24)))
-                .get(5, TimeUnit.SECONDS);
-            assertTrue(second.ok(), "第二轮保存必须成功：" + second.messages());
-            assertEquals(2, bridge.requests().size());
-            assertEquals(new HudResourceRequest(37, 83, 157, 24, 100), bridge.requests().get(1));
-            assertTrue(fixture.plugin().getHudOverlayRuntimeState().matchesHotbar(24, 100));
         } finally {
             fixture.close();
         }
@@ -126,7 +119,7 @@ class HudWebApplyCoordinatorTest {
                 "没有旧 ready 快照时，CE 失败必须保持未 ready");
             assertTrue(bridge.requests().size() == 1, "失败流程仍必须传递完整 request 给 bridge");
             assertTrue(ownedOverlayFiles(fixture.overlayRoot()).isEmpty(),
-                "CE 失败回滚后不得残留本次四层 overlay 文件");
+                "CE 失败回滚后不得残留本次三层 overlay 文件");
         } finally {
             fixture.close();
         }
@@ -343,8 +336,7 @@ class HudWebApplyCoordinatorTest {
 
     private static List<Path> ownedOverlayFiles(Path overlayRoot) throws Exception {
         List<Path> owned = new ArrayList<>();
-        for (String relative : List.of("pack.yml", "configuration/images/trick_hud_continuous.yml",
-            "configuration/images/hotbar_debug.yml")) {
+        for (String relative : List.of("pack.yml", "configuration/images/trick_hud_continuous.yml")) {
             Path path = overlayRoot.resolve(relative);
             if (Files.exists(path)) {
                 owned.add(path);

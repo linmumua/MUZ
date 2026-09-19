@@ -53,6 +53,38 @@ class CraftEngineBundleResourcesTest {
     }
 
     @Test
+    void speechBubbleItemDefinitionModelAndTextureChainIsClosed() throws IOException {
+        String id = "table_gadget_speech_bubble";
+        String item = read("craftengine/muz/resourcepack/assets/muz/items/" + id + ".json");
+        String model = read("craftengine/muz/resourcepack/assets/muz/models/item/" + id + ".json");
+        byte[] textureBytes = readBytes("craftengine/muz/resourcepack/assets/muz/textures/item/" + id + ".png");
+
+        assertTrue(item.contains("\"type\":\"minecraft:model\""),
+            "语音气泡 item definition 必须使用 minecraft:model");
+        assertTrue(item.contains("\"muz:item/" + id + "\""),
+            "语音气泡 item definition 必须指向 muz:item/" + id);
+        assertTrue(model.contains("\"parent\": \"minecraft:item/generated\""),
+            "语音气泡模型必须使用原版 generated item parent");
+        assertTrue(model.contains("\"layer0\": \"muz:item/" + id + "\""),
+            "语音气泡模型必须指向独立 item 纹理");
+
+        BufferedImage texture = ImageIO.read(new java.io.ByteArrayInputStream(textureBytes));
+        assertNotNull(texture, "语音气泡纹理必须是可解码 PNG");
+        assertEquals(16, texture.getWidth(), "语音气泡纹理宽度必须为 16");
+        assertEquals(16, texture.getHeight(), "语音气泡纹理高度必须为 16");
+        boolean visible = false;
+        boolean transparent = false;
+        for (int y = 0; y < texture.getHeight(); y++) {
+            for (int x = 0; x < texture.getWidth(); x++) {
+                int alpha = (texture.getRGB(x, y) >>> 24) & 0xFF;
+                visible |= alpha > 0;
+                transparent |= alpha == 0;
+            }
+        }
+        assertTrue(visible && transparent, "语音气泡纹理必须同时包含气泡像素与透明背景");
+    }
+
+    @Test
     void generatedCraftEngineCardsConfigContainsCardItems() throws IOException {
         String cards = read("craftengine/muz/configuration/items/doudizhu/cards.yml");
         String categories = read("craftengine/muz/configuration/categories.yml");
@@ -1718,209 +1750,6 @@ class CraftEngineBundleResourcesTest {
                     path + " 未进入 bundle 索引");
             }
         }
-    }
-
-    /**
-     * PLAYING 阶段只发布三张独立透明道具图标，不再生成旧九槽不透明底板。
-     * 每张图标为 20×22，图标 step=24，三张组合视觉宽度 68，整体 advance=69。
-     */
-    @Test
-    void hotbarIconTexturesAreIndependentTransparentGadgets() throws IOException {
-        assertEquals(3, PackAssets.HOTBAR_ICON_COUNT, "Hotbar 必须固定为 egg、water、tomato 三个图标");
-        assertEquals(20, PackAssets.HOTBAR_ICON_WIDTH);
-        assertEquals(22, PackAssets.HOTBAR_ICON_HEIGHT);
-        assertEquals(24, PackAssets.HOTBAR_ICON_STEP);
-        assertEquals(68, PackAssets.HOTBAR_HUD_GLYPH_WIDTH);
-        assertEquals(69, PackAssets.HOTBAR_HUD_GLYPH_ADVANCE);
-
-        Map<String, Map<String, String>> entries = glyphEntries();
-        String index = read("craftengine/muz/_bundle_index.txt");
-        for (int indexInBar = 0; indexInBar < PackAssets.HOTBAR_ICON_COUNT; indexInBar++) {
-            PackAssets.HotbarTier tier = PackAssets.hotbarTier(PackAssets.DEFAULT_HUD_SCALE);
-            String textureId = PackAssets.hotbarIconTexture(indexInBar, PackAssets.DEFAULT_HUD_SCALE);
-            String path = "craftengine/muz/resourcepack/assets/muz/textures/"
-                + textureId.substring("muz:".length());
-            BufferedImage texture = readImage(path);
-            assertEquals(20, texture.getWidth(), path + " 宽度必须为 20px");
-            assertEquals(22, texture.getHeight(), path + " 高度必须为 22px");
-            boolean visible = false;
-            boolean transparent = false;
-            for (int y = 0; y < texture.getHeight(); y++) {
-                for (int x = 0; x < texture.getWidth(); x++) {
-                    int alpha = (texture.getRGB(x, y) >>> 24) & 0xFF;
-                    visible |= alpha > 1;
-                    transparent |= alpha == 0;
-                }
-            }
-            assertTrue(visible, path + " 必须包含可见图标像素");
-            assertTrue(transparent, path + " 必须保留透明背景");
-            assertEquals(1, (texture.getRGB(19, 21) >>> 24) & 0xFF,
-                path + " 右下角必须保留 alpha=1 锚点");
-            String key = "hotbar_" + List.of("egg", "water", "tomato").get(indexInBar);
-            Map<String, String> fields = entries.get(key);
-            assertNotNull(fields, "images/hotbar_hud.yml 缺少 " + key + " 声明");
-            assertEquals(textureId, fields.get("file"));
-            assertEquals(String.valueOf(tier.slotHeight()), fields.get("height"));
-            assertTrue(index.lines().anyMatch(line -> line.trim().equals(
-                "resourcepack/assets/muz/textures/" + textureId.substring("muz:".length()))),
-                textureId + " 未进入 bundle 索引");
-        }
-        assertFalse(index.contains("hotbar_slots.png"), "bundle 不得包含旧九槽底图");
-    }
-
-    /**
-     * 「选中槽」高亮框字形（0xEF02）必须是 20×22、四周 2px 亮黄描边、中间透明，
-     * 并在 images/hotbar_hud.yml 里声明了 muz:hotbar_select，且进入 bundle 索引。
-     */
-    @Test
-    void hotbarSelectTextureIsHollowHighlightFrame() throws IOException {
-        String path = "craftengine/muz/resourcepack/assets/muz/textures/font/hotbar_select.png";
-        BufferedImage texture = readImage(path);
-        assertEquals(PackAssets.HOTBAR_SELECT_GLYPH_WIDTH, texture.getWidth(),
-            path + " 宽度必须是 " + PackAssets.HOTBAR_SELECT_GLYPH_WIDTH);
-        assertEquals(PackAssets.HOTBAR_SELECT_GLYPH_HEIGHT, texture.getHeight(),
-            path + " 高度必须是 " + PackAssets.HOTBAR_SELECT_GLYPH_HEIGHT);
-        assertEquals(PackAssets.HOTBAR_SELECT_GLYPH_WIDTH + 1, PackAssets.HOTBAR_SELECT_GLYPH_ADVANCE,
-            "选中框前进量必须是 PNG 宽度 + 1");
-        int border = 0xFFFFE040;
-        int thickness = 2;
-        int w = texture.getWidth();
-        int h = texture.getHeight();
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                boolean onBorder = x < thickness || x >= w - thickness || y < thickness || y >= h - thickness;
-                int argb = texture.getRGB(x, y);
-                if (onBorder) {
-                    assertEquals(border, argb, "选中框描边 (" + x + "," + y + ") 必须是亮黄 #FFE040");
-                } else {
-                    assertEquals(0, (argb >>> 24) & 0xFF, "选中框内部 (" + x + "," + y + ") 必须透明");
-                }
-            }
-        }
-        Map<String, String> fields = glyphEntries().get("hotbar_select");
-        assertNotNull(fields, "images/hotbar_hud.yml 缺少 muz:hotbar_select 字形声明");
-        assertEquals("muz:font/hotbar_select.png", fields.get("file"),
-            "选中框字形声明没有引用被测 hotbar_select.png");
-        assertEquals(String.valueOf(PackAssets.HOTBAR_SELECT_GLYPH_HEIGHT), fields.get("height"),
-            "选中框字形 height 必须等于贴图高度");
-        assertTrue(read("craftengine/muz/_bundle_index.txt").lines()
-                .anyMatch(line -> line.trim().equals("resourcepack/assets/muz/textures/font/hotbar_select.png")),
-            "hotbar_select.png 未进入 bundle 索引");
-    }
-
-    /**
-     * Hotbar 当前 profile 生成的每一档必须是独立字体、独立码位、1:1 原生 PNG 几何。
-     * 生成集合来自 PackAssets，不得假设旧版固定的 75/100/125 全量档位。
-     */
-    @Test
-    void hotbarScaleAssetsMatchPackAssetsGeometryAndCodepoints() throws IOException {
-        Map<String, Map<String, String>> entries = glyphEntries();
-        Set<String> fonts = new HashSet<>();
-        Set<String> fontChars = new HashSet<>();
-        String index = read("craftengine/muz/_bundle_index.txt");
-        List<String> names = List.of("egg", "water", "tomato");
-        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-            String suffix = scale == PackAssets.DEFAULT_HUD_SCALE ? "" : "_s" + scale;
-            assertEquals(68 * scale / 100, tier.width(), "hotbar scale=" + scale + " 组合视觉宽度不一致");
-            assertEquals(tier.width() + 1, tier.advance(), "hotbar scale=" + scale + " 整体 advance 不一致");
-            assertEquals(tier.selectWidth() + 1, tier.selectAdvance(), "hotbar scale=" + scale + " 选框 advance 不一致");
-            fonts.add(tier.font());
-            for (int indexInBar = 0; indexInBar < names.size(); indexInBar++) {
-                String textureId = PackAssets.hotbarIconTexture(indexInBar, scale);
-                String path = "craftengine/muz/resourcepack/assets/muz/textures/"
-                    + textureId.substring("muz:".length());
-                BufferedImage icon = readImage(path);
-                assertEquals(tier.slotWidth(), icon.getWidth(), "hotbar scale=" + scale + " 图标宽度不一致");
-                assertEquals(tier.slotHeight(), icon.getHeight(), "hotbar scale=" + scale + " 图标高度不一致");
-                Map<String, String> iconEntry = entries.get("hotbar_" + names.get(indexInBar) + suffix);
-                assertNotNull(iconEntry, "缺少 hotbar scale=" + scale + " 图标声明");
-                assertEquals(tier.slotHeight(), Integer.parseInt(iconEntry.get("height")));
-                assertEquals(tier.baseAscent(), Integer.parseInt(iconEntry.get("ascent")));
-                assertEquals(tier.font(), iconEntry.get("font"));
-                assertEquals(tier.baseCodepoint() + indexInBar, codePoint(iconEntry.get("char")));
-                fontChars.add(tier.font() + " " + (tier.baseCodepoint() + indexInBar));
-                assertTrue(index.lines().anyMatch(line -> line.trim().equals(
-                    "resourcepack/assets/muz/textures/" + textureId.substring("muz:".length()))));
-            }
-            String selectPath = "craftengine/muz/resourcepack/assets/muz/textures/"
-                + tier.selectTexture().substring("muz:".length());
-            BufferedImage select = readImage(selectPath);
-            assertEquals(tier.selectWidth(), select.getWidth(), "hotbar scale=" + scale + " 选框宽度不一致");
-            assertEquals(tier.selectHeight(), select.getHeight(), "hotbar scale=" + scale + " 选框高度不一致");
-            Map<String, String> selectEntry = entries.get("hotbar_select" + suffix);
-            assertNotNull(selectEntry, "缺少 hotbar scale=" + scale + " 选中框声明");
-            assertEquals(tier.selectHeight(), Integer.parseInt(selectEntry.get("height")));
-            assertEquals(tier.baseAscent(), Integer.parseInt(selectEntry.get("ascent")));
-            assertEquals(tier.font(), selectEntry.get("font"));
-            assertEquals(tier.selectCodepoint(), codePoint(selectEntry.get("char")));
-            fontChars.add(tier.font() + " " + tier.selectCodepoint());
-            assertTrue(index.lines().anyMatch(line -> line.trim().equals(
-                "resourcepack/assets/muz/textures/" + tier.selectTexture().substring("muz:".length()))));
-        }
-        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length, fonts.size(), "每个 hotbar scale 必须独立字体");
-        assertEquals(PackAssets.HOTBAR_SCALE_TIERS.length * (PackAssets.HOTBAR_ICON_COUNT + 1), fontChars.size(),
-            "三张图标与选中框不能共享重复的(font,char)");
-        PackAssets.HotbarTier defaultTier = PackAssets.hotbarTier(PackAssets.DEFAULT_HUD_SCALE);
-        assertEquals(0xEF04, defaultTier.baseCodepoint());
-        assertEquals(0xEF07, defaultTier.debugCodepoint());
-        assertEquals(0xEF02, defaultTier.selectCodepoint());
-        assertEquals(0xEF03, defaultTier.selectDebugCodepoint());
-    }
-
-    /** 当前资源 profile 只生成一个 Hotbar 档位，未生成的旧档位不能被测试默认为存在。 */
-    @Test
-    void hotbarProfileGeneratesExactlyOneScale() {
-        assertEquals(1, PackAssets.HOTBAR_SCALE_TIERS.length,
-            "当前 profile 的 Hotbar 资源契约是单档；切换档位应重新生成并下发资源包");
-        assertEquals(PackAssets.DEFAULT_HUD_SCALE, PackAssets.HOTBAR_SCALE_TIERS[0],
-            "单档 Hotbar 必须保持默认 scale，避免运行期发出未声明的固定码位");
-    }
-
-    @Test
-    void hotbarScaleSlotGeometryIsIntegerAndAnchored() {
-        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-            assertHotbarGeometry(
-                tier,
-                tier.width(),
-                tier.height(),
-                tier.slotWidth(),
-                tier.slotStep(),
-                tier.slotsStartX(),
-                tier.slotsStartY(),
-                tier.selectStartX(),
-                tier.selectStartY()
-            );
-        }
-    }
-
-    private static void assertHotbarGeometry(
-        PackAssets.HotbarTier tier,
-        int width,
-        int height,
-        int slotWidth,
-        int slotStep,
-        int slotsStartX,
-        int slotsStartY,
-        int selectStartX,
-        int selectStartY
-    ) {
-        assertEquals(width, tier.width());
-        assertEquals(height, tier.height());
-        assertEquals(width + 1, tier.advance());
-        assertEquals(slotWidth, tier.slotWidth());
-        assertEquals(slotStep, tier.slotStep());
-        assertEquals(slotsStartX, tier.slotsStartX());
-        assertEquals(slotsStartY, tier.slotsStartY());
-        assertEquals(selectStartX, tier.selectStartX());
-        assertEquals(selectStartY, tier.selectStartY());
-        assertEquals(tier.selectWidth() + 1, tier.selectAdvance());
-        assertEquals(PackAssets.HOTBAR_ICON_COUNT, tier.slotCount());
-        assertEquals(PackAssets.HOTBAR_ICON_WIDTH, tier.slotWidth());
-        assertEquals(PackAssets.HOTBAR_ICON_STEP, tier.slotStep());
-        assertEquals(PackAssets.HOTBAR_ICON_WIDTH, tier.selectWidth());
-        assertEquals(PackAssets.HOTBAR_ICON_HEIGHT, tier.selectHeight());
     }
 
     /**

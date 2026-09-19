@@ -30,9 +30,7 @@ public final class CraftEngineBundleExporter {
      * 否则每次导出都会把刚写下的指纹当成「清单外的残留」删掉，判定就永久失效。
      */
     private static final String BUNDLE_FINGERPRINT_FILE = ".muz-bundle-fingerprint";
-    /** 运行期 Hotbar overlay 直接位于 muz bundle 内，但不是 JAR 固定清单。 */
-    private static final String RUNTIME_HOTBAR_OVERLAY = "configuration/images/hotbar_debug.yml";
-    /** 连续 Trick overlay 与运行期 Hotbar 共用同一个 CE resources/muz 根。 */
+    /** 连续 Trick overlay 位于 CE resources/muz 根，不属于 JAR 固定清单。 */
     private static final String RUNTIME_TRICK_OVERLAY = "configuration/images/trick_hud_continuous.yml";
     /** 运行期补行 PNG 的专属目录；bundle 导出不得清理或覆盖其中的文件。 */
     private static final String RUNTIME_CONTINUOUS_TEXTURE_DIR = "resourcepack/assets/muz/textures/font/continuous";
@@ -64,7 +62,7 @@ public final class CraftEngineBundleExporter {
         int copiedEntries = 0;
         try (InputStream stream = plugin.getResource(BUNDLE_INDEX)) {
             cleanupLegacyGlobalHotbarSprites(targetRoot);
-            cleanupLegacyHotbarOverlay(resourcesRoot);
+            cleanupLegacyHotbarResources(targetRoot, resourcesRoot);
             if (stream == null) {
                 plugin.getLogger().warning("CraftEngine bundle index is missing, skipping bundle export.");
                 return BundleExportResult.failed("bundle 索引缺失", 0, 0);
@@ -229,7 +227,27 @@ public final class CraftEngineBundleExporter {
         Files.deleteIfExists(spriteRoot.resolve("hotbar_selection.png"));
     }
 
-    private static void cleanupLegacyHotbarOverlay(Path resourcesRoot) throws IOException {
+    /**
+     * 删除所有已退役 Hotbar 运行期资源。该清理必须早于 bundle 指纹提前返回，
+     * 否则旧 YAML/provider 与字体 PNG 会继续被 CraftEngine 打进客户端资源包。
+     */
+    static void cleanupLegacyHotbarResources(Path targetRoot, Path resourcesRoot) throws IOException {
+        Path imagesRoot = targetRoot.resolve("configuration/images");
+        Files.deleteIfExists(imagesRoot.resolve("hotbar_hud.yml"));
+        Files.deleteIfExists(imagesRoot.resolve("hotbar_debug.yml"));
+
+        Path fontRoot = targetRoot.resolve("resourcepack/assets/muz/textures/font");
+        if (Files.isDirectory(fontRoot)) {
+            try (var walk = Files.walk(fontRoot)) {
+                for (Path file : walk.filter(Files::isRegularFile).toList()) {
+                    String name = file.getFileName().toString();
+                    if (name.startsWith("hotbar_") && name.endsWith(".png")) {
+                        Files.deleteIfExists(file);
+                    }
+                }
+            }
+        }
+
         Path legacyRoot = resourcesRoot.resolve(LEGACY_HOTBAR_OVERLAY_DIR);
         if (!Files.exists(legacyRoot)) {
             return;
@@ -253,7 +271,6 @@ public final class CraftEngineBundleExporter {
     private static boolean isRuntimeOverlayEntry(String relativePath) {
         String normalized = relativePath.replace('\\', '/');
         return normalized.equals(PACK_FILE_NAME)
-            || normalized.equals(RUNTIME_HOTBAR_OVERLAY)
             || normalized.equals(RUNTIME_TRICK_OVERLAY)
             || normalized.startsWith(RUNTIME_CONTINUOUS_TEXTURE_DIR + "/");
     }

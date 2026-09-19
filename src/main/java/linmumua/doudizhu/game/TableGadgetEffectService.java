@@ -10,13 +10,12 @@ import java.util.UUID;
 import java.util.logging.Level;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.compat.VersionCompat;
-import linmumua.doudizhu.model.TableGadget;
 import linmumua.doudizhu.world.TableEntityGeometry;
 import org.bukkit.Bukkit;
-import org.bukkit.Color;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemDisplay;
@@ -59,11 +58,11 @@ public final class TableGadgetEffectService {
         GameTable table,
         Player actor,
         Player target,
-        TableGadget gadget,
+        ItemStack item,
         TableGadgetSettings settings
     ) {
-        if (stopped || table == null || actor == null || target == null || gadget == null || settings == null
-            || !settings.enabled() || !eligible(table, actor) || !eligible(table, target)
+        if (stopped || table == null || actor == null || target == null || item == null || item.getType().isAir()
+            || settings == null || !settings.enabled() || !eligible(table, actor) || !eligible(table, target)
             || actor.getUniqueId().equals(target.getUniqueId())
             || !sameWorld(actor, target) || !visibleBetween(actor, target, settings.range())) {
             return false;
@@ -73,22 +72,24 @@ public final class TableGadgetEffectService {
         if (last != null && now - last < settings.cooldownTicks()) {
             return false;
         }
+        ItemStack snapshot = item.clone();
         int limit = TableGadgetEffectGeometry.clampConcurrentLimit(settings.maxActive(), HARD_ENTITY_LIMIT);
-        if (activeEntityCount() + entityCost(gadget) > limit) {
+        boolean water = snapshot.getType() == Material.WATER_BUCKET;
+        if (activeEntityCount() + entityCost(water) > limit) {
             return false;
         }
 
         ActiveEffect effect = null;
         try {
-            effect = gadget == TableGadget.WATER
+            effect = water
                 ? spawnWater(table, actor, target, settings)
-                : spawnProjectile(table, actor, target, gadget, settings);
+                : spawnProjectile(table, actor, target, snapshot, settings);
             if (effect == null) {
                 return false;
             }
             effects.put(effect.id(), effect);
             lastPlayTicks.put(actor.getUniqueId(), now);
-            TableEffectCoordinator.playGadgetSound(plugin, table, gadget, false);
+            playGenericSound(table, Sound.ENTITY_SNOWBALL_THROW, plugin.getEffectVolume(), 1.0f);
             return true;
         } catch (Throwable failure) {
             if (effect != null) {
@@ -96,7 +97,7 @@ public final class TableGadgetEffectService {
                 removeEntities(effect);
             }
             lastPlayTicks.remove(actor.getUniqueId());
-            plugin.getLogger().log(Level.WARNING, "牌桌道具效果生成失败（" + gadget.key() + "）。", failure);
+            plugin.getLogger().log(Level.WARNING, "牌桌道具效果生成失败（" + item.getType().name() + "）。", failure);
             return false;
         }
     }
@@ -166,7 +167,7 @@ public final class TableGadgetEffectService {
         GameTable table,
         Player actor,
         Player target,
-        TableGadget gadget,
+        ItemStack item,
         TableGadgetSettings settings
     ) {
         Location start = actor.getEyeLocation().clone();
@@ -177,13 +178,13 @@ public final class TableGadgetEffectService {
         if (world == null || lockedTarget.getWorld() == null || !world.equals(lockedTarget.getWorld())) {
             return null;
         }
-        ItemDisplay display = spawnDisplay(world, start, projectileItem(gadget), table);
+        ItemDisplay display = spawnDisplay(world, start, item.clone(), table);
         if (display == null) {
             return null;
         }
         return new ProjectileEffect(
             UUID.randomUUID(), table, actor.getUniqueId(), target.getUniqueId(), display,
-            gadget, start, lockedTarget, settings.flightTicks(), world
+            start, lockedTarget, settings.flightTicks(), world
         );
     }
 
@@ -259,20 +260,6 @@ public final class TableGadgetEffectService {
         }
     }
 
-    private ItemStack projectileItem(TableGadget gadget) {
-        Material material = gadget == TableGadget.EGG ? Material.EGG : Material.PAPER;
-        ItemStack item = new ItemStack(material);
-        if (gadget == TableGadget.TOMATO) {
-            ItemMeta meta = item.getItemMeta();
-            if (meta == null) {
-                throw new IllegalStateException("番茄 ItemMeta 不可用，拒绝使用普通红色物品冒充。");
-            }
-            VersionCompat.setItemModel(meta, modelKey("muz:table_gadget_tomato"));
-            item.setItemMeta(meta);
-        }
-        return item;
-    }
-
     private ItemStack waterSheetItem() {
         ItemStack item = new ItemStack(Material.WATER_BUCKET);
         ItemMeta meta = item.getItemMeta();
@@ -333,8 +320,8 @@ public final class TableGadgetEffectService {
         }
     }
 
-    private int entityCost(TableGadget gadget) {
-        return TableGadgetEffectGeometry.entityCost(gadget == TableGadget.WATER);
+    private int entityCost(boolean water) {
+        return TableGadgetEffectGeometry.entityCost(water);
     }
 
     private int activeEntityCount() {
@@ -407,7 +394,6 @@ public final class TableGadgetEffectService {
     }
 
     private final class ProjectileEffect extends ActiveEffect {
-        private final TableGadget gadget;
         private final Location start;
         private final Location lockedTarget;
         private final int duration;
@@ -418,9 +404,8 @@ public final class TableGadgetEffectService {
         private int impactRemaining;
 
         private ProjectileEffect(UUID id, GameTable table, UUID actorId, UUID targetId, ItemDisplay entity,
-                                 TableGadget gadget, Location start, Location lockedTarget, int duration, World world) {
+                                 Location start, Location lockedTarget, int duration, World world) {
             super(id, table, actorId, targetId, entity);
-            this.gadget = gadget;
             this.start = start;
             this.lockedTarget = lockedTarget;
             this.duration = duration;
@@ -432,7 +417,7 @@ public final class TableGadgetEffectService {
         boolean tick(int currentTick) {
             if (impactRemaining > 0) {
                 if (impactLocation != null) {
-                    spawnImpact(world, impactLocation, gadget, table());
+                    spawnImpact(world, impactLocation, table());
                 }
                 impactRemaining--;
                 return impactRemaining > 0;
@@ -467,9 +452,8 @@ public final class TableGadgetEffectService {
                 impactLocation = target.getLocation().clone().add(0.0, 1.0, 0.0);
                 impactRemaining = IMPACT_TICKS;
                 removeEntity(entity());
-                spawnImpact(world, impactLocation, gadget, table());
+                spawnImpact(world, impactLocation, table());
                 impactRemaining--;
-                TableEffectCoordinator.playGadgetSound(plugin, table(), gadget, true);
                 return impactRemaining > 0;
             }
             return false;
@@ -541,17 +525,23 @@ public final class TableGadgetEffectService {
         }
     }
 
-    private void spawnImpact(World world, Location location, TableGadget gadget, GameTable table) {
-        List<Player> viewers = viewers(table, world);
-        for (Player viewer : viewers) {
-            if (gadget == TableGadget.EGG) {
-                viewer.spawnParticle(org.bukkit.Particle.BLOCK_CRUMBLE, location, 5, 0.18, 0.22, 0.18, 0.02,
-                    Material.WHITE_CONCRETE.createBlockData());
-                viewer.spawnParticle(org.bukkit.Particle.DUST, location, 4, 0.16, 0.18, 0.16, 0.01,
-                    new org.bukkit.Particle.DustOptions(Color.fromRGB(255, 245, 220), 0.8f));
-            } else {
-                viewer.spawnParticle(org.bukkit.Particle.DUST, location, 8, 0.20, 0.24, 0.20, 0.02,
-                    new org.bukkit.Particle.DustOptions(Color.fromRGB(220, 40, 35), 1.0f));
+    private void spawnImpact(World world, Location location, GameTable table) {
+        for (Player viewer : viewers(table, world)) {
+            viewer.spawnParticle(org.bukkit.Particle.CLOUD, location, 8, 0.20, 0.24, 0.20, 0.02);
+        }
+    }
+
+    private void playGenericSound(GameTable table, Sound sound, float volume, float pitch) {
+        if (table == null || sound == null || volume <= 0.0f) {
+            return;
+        }
+        for (UUID seat : table.getSeats()) {
+            if (table.isBot(seat)) {
+                continue;
+            }
+            Player viewer = Bukkit.getPlayer(seat);
+            if (viewer != null && viewer.isOnline()) {
+                viewer.playSound(viewer.getLocation(), sound, volume, pitch);
             }
         }
     }

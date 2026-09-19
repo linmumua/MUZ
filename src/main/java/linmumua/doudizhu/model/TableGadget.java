@@ -3,8 +3,8 @@ package linmumua.doudizhu.model;
 import java.util.Arrays;
 
 /**
- * 牌桌内虚拟道具。索引顺序与资源包/热键栏契约固定为：鸡蛋、水桶、番茄。
- * 不携带数量，也不映射玩家真实物品栏槽位。
+ * 牌桌道具音效兼容标识。实际桌内选择由 TableGadgetService 保存 ItemStack 快照，
+ * 不再使用本枚举映射 Hotbar 槽位；枚举仅保留给既有音效协调器的兼容契约。
  */
 public enum TableGadget {
     EGG(0, "egg", "鸡蛋"),

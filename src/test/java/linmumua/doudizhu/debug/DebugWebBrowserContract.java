@@ -51,10 +51,6 @@ public class DebugWebBrowserContract {
         values.put("trick-hud.counter.gap", 2);
         values.put("trick-hud.counter.hide-exhausted", false);
         values.put("trick-hud.counter.offset-x", 0);
-        values.put("hotbar-hud.scale", 100);
-        values.put("hotbar-hud.enabled", true);
-        values.put("hotbar-hud.offset-x", 0);
-        values.put("hotbar-hud.offset-y", 0);
 
         List<DebugHudConfigController.FieldDto> fields = DebugHudConfigController.fields().values().stream()
             .map(spec -> new DebugHudConfigController.FieldDto(
@@ -224,7 +220,7 @@ public class DebugWebBrowserContract {
                   if (!screenElement) return;
                   const screen = screenElement.getBoundingClientRect();
                   if (!(screen.width > 0 && screen.height > 0)) return;
-                  for (const kind of ['card', 'avatar', 'counter', 'hotbar']) {
+                  for (const kind of ['card', 'avatar', 'counter']) {
                     const layer = document.querySelector('.layer[data-layer="' + kind + '"]');
                     if (!layer) continue;
                     const layerRect = layer.getBoundingClientRect();
@@ -233,7 +229,7 @@ public class DebugWebBrowserContract {
                     const selector = kind === 'card' ? '.card'
                       : kind === 'avatar' ? '.avatar-face'
                       : kind === 'counter' ? '.counter-cell'
-                      : '.hotbar-icon-hit, .hotbar-select, img';
+                      : 'img';
                     for (const element of layer.querySelectorAll(selector)) {
                       if (!visible(element)) continue;
                       const rect = element.getBoundingClientRect();
@@ -255,7 +251,7 @@ public class DebugWebBrowserContract {
                 return (window.__muzBoundsFailures || []).slice(0, 20);
               }, label);
               assert.equal(failures.length, 0,
-                label + ' 四层真实 DOM 内容必须完整位于 #screen 逻辑 viewport 内：' + JSON.stringify(failures));
+                label + ' 三层真实 DOM 内容必须完整位于 #screen 逻辑 viewport 内：' + JSON.stringify(failures));
             }
 
             async function assertViewportBounds(page, label) {
@@ -279,25 +275,11 @@ public class DebugWebBrowserContract {
               await frame(page);
             }
 
-            async function exerciseExtremeHotbarOffsets(page) {
-              await page.$eval('[data-select="hotbar"]', element => element.click());
-              for (const [x, y] of [[10000, 10000], [-10000, -10000],
-                [10000, -10000], [-10000, 10000], [0, 0]]) {
-                await setRawField(page, 'hotbar-hud.offset-x', x);
-                await setRawField(page, 'hotbar-hud.offset-y', y);
-                await assertLogicalBounds(page, 'Hotbar 表单极端偏移 ' + x + ',' + y);
-                await setCoordinateField(page, 'coordX', x);
-                await setCoordinateField(page, 'coordY', y);
-                await assertLogicalBounds(page, 'Hotbar 坐标极端偏移 ' + x + ',' + y);
-              }
-            }
-
             async function exerciseDirectionalDrags(page) {
               const cases = [
                 ['card', 'trick-hud.card-offset-x', 'trick-hud.offset-down'],
                 ['avatar', 'trick-hud.avatar-offset-x', 'trick-hud.avatar-offset-down'],
                 ['counter', 'trick-hud.counter.offset-x', 'trick-hud.counter.offset-down'],
-                ['hotbar', 'hotbar-hud.offset-x', 'hotbar-hud.offset-y']
               ];
               for (const [kind, keyX, keyY] of cases) {
                 for (const [dx, dy, direction] of [[-24, 0, '左'], [24, 0, '右'],
@@ -312,7 +294,6 @@ public class DebugWebBrowserContract {
               await setRawField(page, 'trick-hud.offset-x', 0);
               await setRawField(page, 'trick-hud.avatar-offset-x', 0);
               await setRawField(page, 'trick-hud.avatar-offset-down', 100);
-              // 前一轮拖动停在 hotbar，先选中头像，避免点击隐藏手柄的零尺寸坐标。
               await page.$eval('[data-select="avatar"]', element => element.click());
               await page.$eval('#zoomMode', element => element.click());
               await frame(page);
@@ -402,14 +383,13 @@ public class DebugWebBrowserContract {
             "    }, {timeout: 10000});\n    await installLogicalBoundsMonitor(page);\n    await assertLogicalBounds(page, '初载');\n    await assertViewportBounds(page, '初载');\n    assert.equal(errors.length, 0, '页面启动 JS 错误：' + errors.join(' | '));",
             "初载断言注入点");
         source = replaceRequired(source,
-            "    assert.equal(drags.length, 4, '牌行、头像、记牌、Hotbar 四层必须全部完成最终帧拖动');",
-            "    assert.equal(drags.length, 4, '牌行、头像、记牌、Hotbar 四层必须全部完成最终帧拖动');\n"
-                + "    await exerciseExtremeHotbarOffsets(page);\n"
+            "    assert.equal(drags.length, 3, '牌行、头像、记牌三层必须全部完成最终帧拖动');",
+            "    assert.equal(drags.length, 3, '牌行、头像、记牌三层必须全部完成最终帧拖动');\n"
                 + "    await exerciseDirectionalDrags(page);\n"
                 + "    await exerciseStableResize(page);\n"
                 + "    await exerciseViewPan(page);\n"
                 + "    await assertLogicalBounds(page, '拖动、缩放与平移完成');",
-            "拖动与极端偏移断言注入点");
+            "拖动与三层拖动、缩放及平移断言注入点");
         source = replaceRequired(source,
             "    const scale2 = await screenScale(page);",
             "    const scale2 = await screenScale(page);\n"

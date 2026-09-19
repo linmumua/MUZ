@@ -2,7 +2,6 @@ package linmumua.doudizhu.debug;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.HudOverlayLayout;
-import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.HudResourceRequest;
 import org.junit.jupiter.api.Test;
 import sun.misc.Unsafe;
@@ -35,15 +34,6 @@ class HudOverlayWriterTest {
         HudResourceRequest downward = new HudResourceRequest(512, 512, 512, 512, 100);
         assertEquals(-128, upward.cardOffsetDown());
         assertEquals(512, downward.counterOffsetDown());
-    }
-
-    @Test
-    void Hotbar范围拒绝越界而不是静默钳位() {
-        int minOffset = HotbarDebugOverlayWriter.minOffsetY();
-        assertEquals(PackAssets.HOTBAR_BASE_ASCENT - 256, minOffset);
-        assertEquals(512, HotbarDebugOverlayWriter.maxOffsetY());
-        assertThrows(IllegalArgumentException.class, () -> HotbarDebugOverlayWriter.ascentFor(minOffset - 1));
-        assertThrows(IllegalArgumentException.class, () -> HotbarDebugOverlayWriter.buildImagesYaml(513));
     }
 
     @Test
@@ -89,19 +79,14 @@ class HudOverlayWriterTest {
     }
 
     @Test
-    void 两份YAML使用SnakeYAML结构化根并包含完整字形元数据() {
-        HudResourceRequest request = new HudResourceRequest(-128, -128, -128,
-            HudOverlayLayout.minHotbarOffsetY(100), 100);
+    void YAML使用SnakeYAML结构化根并包含完整字形元数据() {
+        HudResourceRequest request = new HudResourceRequest(-128, -128, -128, 0, 100);
         String trick = HudOverlayWriter.buildImagesYaml(HudOverlayLayout.trickGlyphs(request));
-        String hotbar = HudOverlayWriter.buildImagesYaml(HudOverlayLayout.hotbarGlyphs(request));
         assertTrue(trick.startsWith("images:"));
-        assertTrue(hotbar.startsWith("images:"));
-        assertFalse(trick.contains("\\n"));
-        assertFalse(hotbar.contains("\\n"));
+        assertTrue(trick.contains("\n"), "SnakeYAML 必须输出真实换行");
+        assertFalse(trick.contains("\\n"), "不得把换行写成字面量 \\n");
         assertTrue(trick.contains("font:"));
         assertTrue(trick.contains("char:"));
-        assertTrue(hotbar.contains("file:"));
-        assertTrue(hotbar.contains("height:"));
     }
 
     @Test
@@ -116,24 +101,15 @@ class HudOverlayWriterTest {
     @Test
     void image条目键带有CraftEngine资源命名空间且连续bot不覆盖基础ID() {
         HudResourceRequest request = new HudResourceRequest(0, 0, 0, 0, 100);
-        Object hotbarLoaded = new org.yaml.snakeyaml.Yaml().load(
-            HudOverlayWriter.buildImagesYaml(HudOverlayLayout.hotbarGlyphs(request)));
-        assertTrue(hotbarLoaded instanceof Map<?, ?>);
-        Map<?, ?> hotbarImages = (Map<?, ?>) ((Map<?, ?>) hotbarLoaded).get("images");
-        assertTrue(hotbarImages.keySet().stream().allMatch(key -> key instanceof String
-            && ((String) key).startsWith("muz:")), "CraftEngine image key 必须带 muz 命名空间");
-        assertTrue(hotbarImages.containsKey("muz:hotbar_egg_debug_s100"));
-        assertTrue(hotbarImages.containsKey("muz:hotbar_select_debug_s100"));
-
-        Object trickLoaded = new org.yaml.snakeyaml.Yaml().load(
+        Object loaded = new org.yaml.snakeyaml.Yaml().load(
             HudOverlayWriter.buildImagesYaml(HudOverlayLayout.trickGlyphs(request)));
-        Map<?, ?> trickImages = (Map<?, ?>) ((Map<?, ?>) trickLoaded).get("images");
-        assertTrue(trickImages.containsKey("muz:trick_hud_continuous_bot_avatar"));
-        assertTrue(trickImages.containsKey("muz:trick_hud_continuous_bot_avatar_landlord"));
-        assertTrue(trickImages.containsKey("muz:trick_hud_continuous_bot_avatar_farmer"));
-        assertFalse(trickImages.containsKey("muz:bot_avatar"));
-        assertFalse(trickImages.containsKey("muz:bot_avatar_landlord"));
-        assertFalse(trickImages.containsKey("muz:bot_avatar_farmer"));
+        assertTrue(loaded instanceof Map<?, ?>);
+        Map<?, ?> images = (Map<?, ?>) ((Map<?, ?>) loaded).get("images");
+        assertTrue(images.keySet().stream().allMatch(key -> key instanceof String
+            && ((String) key).startsWith("muz:")), "CraftEngine image key 必须带 muz 命名空间");
+        assertTrue(images.containsKey("muz:trick_hud_continuous_bot_avatar"));
+        assertTrue(images.containsKey("muz:trick_hud_continuous_bot_avatar_landlord"));
+        assertTrue(images.containsKey("muz:trick_hud_continuous_bot_avatar_farmer"));
     }
 
     @Test
@@ -145,13 +121,12 @@ class HudOverlayWriterTest {
 
         HudOverlayWriter writer = new HudOverlayWriter(unsafePlugin());
         HudResourceRequest request = new HudResourceRequest(-128, -128, -128,
-            HudOverlayLayout.minHotbarOffsetY(100), 100);
+            0, 100);
         writeBaseTextures(root, request);
         assertTrue(writer.writeNow(root, request, () -> true), "真实完整 request 必须先成功写入 fixture");
         HudOverlayWriter.OverlayState state = writer.capture(root);
         assertTrue(state.files().containsKey("pack.yml"));
         assertTrue(state.files().containsKey("configuration/images/trick_hud_continuous.yml"));
-        assertTrue(state.files().containsKey("configuration/images/hotbar_debug.yml"));
         assertTrue(state.files().keySet().stream().anyMatch(path -> path.contains("font/continuous/")),
             "fixture 必须包含动态 PNG，才能验证完整回滚");
 
@@ -200,18 +175,15 @@ class HudOverlayWriterTest {
         Path root = Files.createTempDirectory("muz-overlay-failure");
         Path pack = root.resolve("pack.yml");
         Path trick = root.resolve("configuration/images/trick_hud_continuous.yml");
-        Path hotbar = root.resolve("configuration/images/hotbar_debug.yml");
         Files.createDirectories(trick.getParent());
         Files.writeString(pack, "old-pack");
         Files.writeString(trick, "old-trick");
-        Files.writeString(hotbar, "old-hotbar");
         HudOverlayWriter writer = new HudOverlayWriter(unsafePlugin());
         HudOverlayWriter.OverlayState before = writer.capture(root);
         HudResourceRequest request = new HudResourceRequest(-128, 0, 0, 0, 100);
         assertFalse(writer.writeNow(root, request, () -> true));
         assertEquals("old-pack", Files.readString(pack));
         assertEquals("old-trick", Files.readString(trick));
-        assertEquals("old-hotbar", Files.readString(hotbar));
         Files.writeString(pack, "changed-again");
         writer.restore(root, before);
         writer.restore(root, before);

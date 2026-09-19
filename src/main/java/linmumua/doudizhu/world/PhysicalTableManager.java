@@ -1290,6 +1290,8 @@ public final class PhysicalTableManager {
                         plugin.getHandGuiService().openSettings(player);
                         hint(player, "你的个人设置菜单开好了。", NamedTextColor.GREEN);
                     }
+                    // 该 getter/GUI 由集成侧提供；世界侧只负责在命中私人按钮后打开。
+                    case GADGET -> plugin.getTableGadgetGuiService().open(player);
                     case BID_0 -> table.bid(player, 0);
                     case BID_1 -> table.bid(player, 1);
                     case BID_2 -> table.bid(player, 2);
@@ -4972,7 +4974,8 @@ public final class PhysicalTableManager {
             case PLAYING -> List.of(
                 new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.72),
                 new ActionButtonState("pass", "不要", ButtonAction.PASS_TURN, -0.24),
-                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.24)
+                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.24),
+                new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.72)
             );
             case LOBBY -> List.of(
                 new ActionButtonState("ready", "准备", ButtonAction.READY, -0.64),
@@ -5016,14 +5019,15 @@ public final class PhysicalTableManager {
             return phaseStates;
         }
         if (!owner.equals(table.getCurrentTurn())) {
-            return List.of();
+            return List.of(new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.0));
         }
         boolean canPass = table.getLeadPlayer() != null && !owner.equals(table.getLeadPlayer());
         return canPass
             ? phaseStates
             : List.of(
                 new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.56),
-                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.56)
+                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.56),
+                new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.0)
             );
     }
 
@@ -6938,6 +6942,7 @@ public final class PhysicalTableManager {
         DOUBLE_NO,
         DOUBLE_YES,
         OPEN_SETTINGS,
+        GADGET,
         BID_0,
         BID_1,
         BID_2,

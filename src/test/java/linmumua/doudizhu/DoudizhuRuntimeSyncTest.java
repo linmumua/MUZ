@@ -34,37 +34,71 @@ class DoudizhuRuntimeSyncTest {
     }
 
     @Test
-    void Hotbar默认配置与当前资源profile一致() throws IOException {
+    void Hotbar默认配置与资源profile均已退役且保留启动迁移() throws IOException {
         String config = Files.readString(Path.of("src/main/resources/config.yml"));
         String profile = Files.readString(Path.of("muz-resource-profile.yml"));
-        assertTrue(config.contains("hotbar-hud:\n")
-                && config.contains("  enabled: false\n")
-                && config.contains("  scale: 100\n")
-                && config.contains("  offset-x: 0\n")
-                && config.contains("  offset-y: 0\n"),
-            "Hotbar 默认配置必须保持关闭、100% 档、零位移，避免默认启动时误推送或选到未生成档位");
-        assertTrue(profile.contains("hotbar:\n") && profile.contains("  scale: 100\n"),
-            "默认资源 profile 必须生成与 config.yml 对齐的 100% Hotbar 档位");
-        assertTrue(config.contains("plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml"),
-            "offset-y 注释必须指向实际 Hotbar 调试覆盖层路径");
-        assertFalse(config.contains("plugins/CraftEngine/resources/muz_hotbar_debug/"),
-            "配置说明不得继续引用已不存在的旧 Hotbar 覆盖层目录");
+        String plugin = Files.readString(PLUGIN);
+        assertFalse(config.contains("\nhotbar-hud:\n"),
+            "默认配置不得继续发布已退役的三道具 Hotbar 段");
+        assertTrue(config.contains("\ntable-gadgets:\n")
+                && config.contains("  interaction:\n")
+                && config.contains("  panel:\n")
+                && config.contains("  voices:\n"),
+            "新桌内道具、私有语音面板和语音条目必须提供完整默认配置");
+        assertFalse(profile.contains("hotbar:\n"),
+            "当前资源 profile 不再生成正式 Hotbar 档位");
+        assertTrue(plugin.contains("changed |= migrateRetiredHotbarConfig()"),
+            "启动完整性流程必须迁移旧 hotbar-hud.interaction 后删除旧段");
+        assertTrue(plugin.contains("yamlConfig().set(\"hotbar-hud\", null)"),
+            "旧 Hotbar 配置迁移后必须从磁盘配置树删除");
     }
 
     @Test
-    void HUD轻量重载同时覆盖TrickHud和Hotbar运行态() throws IOException {
+    void HUD轻量重载只覆盖正式TrickHud且不启动Hotbar() throws IOException {
         String source = Files.readString(PLUGIN);
         int at = source.indexOf("public void reloadHudRuntimeState()");
         assertTrue(at > 0, "需要给 Web 编辑器和 reload 流程暴露轻量 HUD 重载入口");
         String body = source.substring(at, at + 360);
         assertTrue(body.contains("reloadTrickHudSettings()"),
             "轻量 HUD 重载不能漏掉正式 trick-hud 服务");
-        assertTrue(body.contains("syncHotbarHudRuntime(isDebugWebServerRunning())"),
-            "轻量 HUD 重载要按 Debug Web 占用状态同步 Hotbar，而不是无条件 start");
+        assertFalse(body.contains("syncHotbarHudRuntime"),
+            "正式运行期 Hotbar 已退役，HUD 轻量重载不得再同步或启动它");
 
         String hotbar = Files.readString(HOTBAR);
         assertTrue(hotbar.contains("public void reloadEnabled(boolean configuredEnabled, boolean suspended)"),
-            "HotbarHudService 需要一个按配置开关与外部接管状态同步的轻量入口");
+            "HotbarHudService 兼容 API 仍可保留，便于旧调用方链接");
+    }
+
+    @Test
+    void 正式运行期不构造Hotbar且共享普通ActionBar服务() throws IOException {
+        String plugin = Files.readString(PLUGIN);
+        String table = Files.readString(GAME_TABLE);
+        assertFalse(plugin.contains("new HotbarHudService"),
+            "主类正式装配不得构造 HotbarHudService");
+        assertFalse(plugin.contains("hotbarHudService ="),
+            "主类不得保留 HotbarHudService 运行期字段赋值");
+        assertTrue(plugin.contains("new ActionBarOverlayService(this)"),
+            "主类必须装配共享普通 ActionBar 服务");
+        assertTrue(table.contains("plugin.getActionBarOverlayService()"),
+            "GameTable 必须从主类获取共享普通 ActionBar 服务");
+        assertFalse(table.contains("getHotbarHudService()"),
+            "GameTable 正式路由不得再依赖 HotbarHudService");
+    }
+
+    @Test
+    void 玩家设置保存基于现有树并保留gadgetBar与未知键() throws IOException {
+        String source = Files.readString(PLUGIN);
+        int at = source.indexOf("private void savePlayerSettings()");
+        assertTrue(at > 0, "玩家设置保存入口必须存在");
+        String body = source.substring(at, Math.min(source.length(), at + 2400));
+        assertTrue(body.contains("new MuzYamlConfig(playerSettingsFile.toPath())"),
+            "玩家设置必须从现有 YAML 树加载后合并保存");
+        assertTrue(body.contains("clearManagedPlayerSettings(configuration, \"players.\" + rawId)"),
+            "保存时只能清理本类负责的已知键");
+        assertFalse(body.contains("configuration.set(\"players\", new LinkedHashMap<String, Object>())"),
+            "不得重建 players 根节点而丢失未知键");
+        assertTrue(body.contains("gadget-bar"),
+            "玩家设置保存契约必须明确保留 gadget-bar");
     }
 
     @Test
@@ -81,84 +115,38 @@ class DoudizhuRuntimeSyncTest {
     }
 
     @Test
-    void DebugWeb接管时Hotbar仍继续推送() throws IOException {
-        // 【这条守的是一个已经踩过的坑】：原先 suspended=true（Debug Web 面板开着）会直接
-        // stop()，理由是「避免和 Web 页面争抢底部物品栏」。但那让调试闭环断掉了 ——
-        // 在面板上拖 hotbar 位置时游戏内根本没有底图在推送，拖了也看不到任何变化。
-        // 现在 suspended 的含义是「Web 接管定位参数编辑」：周期任务照常；正式字形是否切到
-        // 可拖动 ascent 码位由已验证请求、当前 scale 与非零 raw offset-y 决定。实际接收者仍必须是
-        // PLAYING 牌桌中的真人座位。
-        String hotbar = Files.readString(HOTBAR);
-        int at = hotbar.indexOf("public void reloadEnabled(boolean configuredEnabled, boolean suspended)");
-        assertTrue(at > 0, "reloadEnabled 应当存在");
-        String body = hotbar.substring(at, Math.min(hotbar.length(), at + 500));
-        assertTrue(body.contains("if (configuredEnabled) {"),
-            "启停只能由 configuredEnabled 决定；把 suspended 也纳入判断会让面板一开就停推送");
-        assertTrue(body.contains("refreshOverlayGlyphSelection();"),
-            "正式字形必须由完整 ready、当前 scale 与 raw offset-y 决定");
-        assertFalse(body.contains("suspended && overlayReady"),
-            "Debug Web 生命周期不得阻断已验证的 hotbar offset-y overlay");
-        assertTrue(hotbar.contains("&& offsetY != 0;"),
-            "offset-y=0 必须继续使用 bundle 基线，非零已验证 offset-y 才切换 overlay");
-        assertTrue(hotbar.contains("overlayReadyScale == scale"),
-            "Debug Web 覆盖层必须绑定当前 hotbar scale，不能跨档发送未声明码位");
-        // 1.10.22 从九槽整幅字形迁移为三独立图标：守护真实发送路径，而非旧方法名。
-        assertTrue(hotbar.contains("PackAssets.hotbarIconChar(i, scale, useOverlay)"),
-            "三个图标必须按当前 scale 和 overlay 闸门选择码位，否则 offset-y 不会生效");
-        assertTrue(hotbar.contains("private int overlayReadyScale = -1"),
-            "overlay 就绪状态必须记录具体 scale，不能用全局布尔值跨档复用");
-        assertTrue(hotbar.contains("overlayReadyScale == scale"),
-            "发送调试字形前必须确认 overlay scale 与当前 Hotbar scale 一致");
+    void DebugWeb生命周期不再接管Hotbar运行期服务() throws IOException {
+        String source = Files.readString(PLUGIN);
+        int at = source.indexOf("private void syncDebugWebServerRuntime()");
+        assertTrue(at > 0, "reloadVisualState 应抽出 Debug Web 生命周期同步方法");
+        String body = source.substring(at, Math.min(source.length(), at + 1500));
+        assertTrue(body.contains("if (!debugWebServer.isRunning())"),
+            "上次启动失败后实例仍非 null，下一次 reload 必须能重试 start");
+        assertTrue(body.contains("createDebugWebServer()"),
+            "Debug Web 构造应集中到一个小工厂，主类只保留最小编排");
+        assertFalse(body.contains("syncHotbarHudRuntime"),
+            "Debug Web 生命周期不得再同步已退役的 Hotbar 运行期服务");
+        assertFalse(body.contains("suspendHotbarHudForDebugWeb")
+                || body.contains("resumeHotbarHudAfterDebugWeb"),
+            "Debug Web 不得通过回调接管已退役的 Hotbar 服务");
     }
 
     @Test
-    void Hotbar只在PLAYING真人座位显示() throws IOException {
+    void Hotbar兼容类仍可编译但不承担正式主链() throws IOException {
+        String plugin = Files.readString(PLUGIN);
         String hotbar = Files.readString(HOTBAR);
-        int at = hotbar.indexOf("private void tick()");
-        assertTrue(at > 0, "Hotbar 周期推送入口应当存在");
-        int end = hotbar.indexOf("private boolean isPlayingPlayer", at);
-        assertTrue(end > at, "tick 后应保留单玩家 PLAYING 判断入口");
-        String body = stripComments(hotbar.substring(at, end));
-
-        int tableLoop = body.indexOf("for (GameTable table : tableManager.getTables())");
-        int phaseGate = body.indexOf("if (table.getPhase() != GamePhase.PLAYING)", tableLoop);
-        int seatLoop = body.indexOf("for (UUID id : table.getSeats())", phaseGate);
-        int botGate = body.indexOf("table.isBot(id)", seatLoop);
-        int playerLookup = body.indexOf("Bukkit.getPlayer(id)", botGate);
-        int receiverAdd = body.indexOf("currentPlayers.add(id)", playerLookup);
-        int customSend = body.indexOf("player.sendActionBar(buildActionBar(entry))", receiverAdd);
-
-        assertTrue(tableLoop >= 0,
-            "接收者必须从实际牌桌集合筛选，不能遍历全服在线玩家");
-        assertTrue(phaseGate > tableLoop,
-            "每张牌桌必须先通过 GamePhase.PLAYING 阶段门，不能只在别处留下无效判断");
-        assertTrue(seatLoop > phaseGate,
-            "必须在 PLAYING 判断之后才遍历该桌座位，否则非出牌阶段也可能进入推送路径");
-        assertTrue(botGate > seatLoop,
-            "每个座位必须先排除 table.isBot(id)，机器人不能进入 Bukkit ActionBar 推送路径");
-        assertTrue(playerLookup > botGate,
-            "必须排除机器人后才查 Bukkit Player，不能把机器人 UUID 当真人接收者");
-        assertTrue(receiverAdd > playerLookup && customSend > receiverAdd,
-            "只有通过 PLAYING、真人座位、在线玩家三道门后，才允许加入接收集合并发送自定义 Hotbar");
-        assertTrue(body.indexOf("!player.isOnline()", playerLookup) > playerLookup
-                && body.indexOf("!player.isOnline()", playerLookup) < receiverAdd,
-            "Bukkit Player 查找后必须显式确认 isOnline，不能把离线/失效对象当作 Hotbar 接收者");
-        assertFalse(body.contains("Bukkit.getOnlinePlayers()"),
-            "不能退回给所有在线玩家推送，否则非牌桌玩家也会被替换物品栏");
-
-        int predicateAt = hotbar.indexOf("private boolean isPlayingPlayer(Player player)");
-        assertTrue(predicateAt > 0, "showOverlay 依赖的单玩家阶段判断必须存在");
-        String predicate = stripComments(hotbar.substring(predicateAt, hotbar.indexOf("public void clearOverlay", predicateAt)));
-        assertTrue(predicate.contains("table.getPhase() == GamePhase.PLAYING"),
-            "单玩家判断也必须锁定 PLAYING，不能让 BIDDING/DOUBLING/LOBBY 排入 overlay 队列");
-        assertTrue(predicate.contains("!player.isOnline()"),
-            "单玩家判断必须显式确认在线，不能只靠 Bukkit.getPlayer 的偶然空值兜底");
-        assertTrue(predicate.contains("!table.isBot(player.getUniqueId())"),
-            "单玩家判断必须排除机器人座位，不能只靠 Bukkit.getPlayer 的偶然空值兜底");
+        assertTrue(hotbar.contains("public final class HotbarHudService"),
+            "兼容 HotbarHudService 类仍需保留");
+        assertTrue(plugin.contains("public HotbarHudService getHotbarHudService()"),
+            "旧 getter 仍需保留以兼容链接");
+        assertTrue(plugin.contains("return null;"),
+            "正式主类不得返回运行期 Hotbar 实例");
+        assertFalse(plugin.contains("new HotbarHudService"),
+            "主类不得构造 HotbarHudService");
     }
 
     @Test
-    void PLAYING阶段所有ActionBar路由都经过Hotbar服务() throws IOException {
+    void PLAYING阶段所有ActionBar路由都经过独立叠加服务() throws IOException {
         String source = Files.readString(GAME_TABLE);
         int broadcastAt = source.indexOf("private void broadcast(Component message)");
         int actionAt = source.indexOf("private void broadcastActionBar(Component message)", broadcastAt);
@@ -170,9 +158,8 @@ class DoudizhuRuntimeSyncTest {
         String action = source.substring(actionAt, persistentAt);
         String persistent = source.substring(persistentAt, source.indexOf("    /**", persistentAt));
         for (String route : new String[] {broadcast, action, persistent}) {
-            assertTrue(route.contains("phase == GamePhase.PLAYING")
-                    && route.contains("hotbarHud.showOverlay"),
-                "PLAYING 阶段的 ActionBar 必须交给 HotbarHudService，不能绕回裸 sendActionBar");
+            assertTrue(route.contains("dispatchActionBar"),
+                "ActionBar 必须交给统一阶段分流助手，不能绕回裸 sendActionBar");
         }
         int onlineAt = source.indexOf("private Player onlinePlayer(UUID playerId)");
         assertTrue(onlineAt >= 0, "GameTable 必须集中提供在线玩家查询");
@@ -182,62 +169,46 @@ class DoudizhuRuntimeSyncTest {
     }
 
     @Test
-    void 非PLAYING提示走普通ActionBar且退出阶段立即清屏() throws IOException {
-        String hotbar = Files.readString(HOTBAR);
-        int showAt = hotbar.indexOf("public void showOverlay(Collection<UUID> players");
-        int tickAt = hotbar.indexOf("private void tick()", showAt);
-        assertTrue(showAt > 0 && tickAt > showAt, "应能完整定位 showOverlay(Collection...) 方法");
-        String showBody = stripComments(hotbar.substring(showAt, tickAt));
-        int playingCheck = showBody.indexOf("boolean playing = isPlayingPlayer(player)");
-        int plainBranch = showBody.indexOf("if (!enabled || !offsetService.isAvailable() || !playing)", playingCheck);
-        int plainSend = showBody.indexOf("player.sendActionBar(plain)", plainBranch);
-        int branchContinue = showBody.indexOf("continue;", plainSend);
-        int overlayPut = showBody.indexOf("overlays.put(id", branchContinue);
-
-        assertTrue(playingCheck >= 0,
-            "消息合成前必须逐玩家确认 PLAYING 阶段");
-        assertTrue(plainBranch > playingCheck,
-            "非 PLAYING、未启用或 CE 不可用时都必须进入普通 ActionBar 分支");
-        assertTrue(plainSend > plainBranch,
-            "非 PLAYING 分支必须直接 player.sendActionBar(plain)，不能只清队列后吞掉提示");
-        assertTrue(branchContinue > plainSend && overlayPut > branchContinue,
-            "直接发送普通 ActionBar 后必须 continue，非 PLAYING 提示绝不能继续写入 overlay 队列");
-        int overlayRemove = showBody.indexOf("overlays.remove(id)", plainBranch);
-        int renderedRemove = showBody.indexOf("renderedPlayers.remove(id)", plainBranch);
-        assertTrue(overlayRemove >= plainBranch && overlayRemove < plainSend,
-            "走普通 ActionBar 前要移除旧 overlay，避免回到 PLAYING 后重放过期阶段提示");
-        assertTrue(renderedRemove >= plainBranch && renderedRemove < plainSend,
-            "普通 ActionBar 已替换最后一帧字形时要移出 renderedPlayers，避免 tick 紧接着发空消息清掉提示");
-
+    void 普通ActionBar路由与回大厅清屏不依赖Hotbar() throws IOException {
         String gameTable = Files.readString(GAME_TABLE);
+        int broadcastAt = gameTable.indexOf("private void broadcast(Component message)");
+        int actionAt = gameTable.indexOf("private void broadcastActionBar(Component message)", broadcastAt);
+        int persistentAt = gameTable.indexOf("private void broadcastPersistentActionBar(int remainingSeconds)");
+        assertTrue(broadcastAt >= 0 && actionAt > broadcastAt && persistentAt > actionAt,
+            "GameTable 的三条 ActionBar 路由必须可定位");
+        String broadcast = gameTable.substring(broadcastAt, actionAt);
+        String action = gameTable.substring(actionAt, persistentAt);
+        String persistent = gameTable.substring(persistentAt, gameTable.indexOf("    /**", persistentAt));
+        for (String route : new String[] {broadcast, action, persistent}) {
+            assertTrue(route.contains("dispatchActionBar"),
+                "ActionBar 必须交给统一普通服务路由，不能绕回 Hotbar");
+        }
         int resetAt = gameTable.indexOf("private void resetRound()");
         int resetEnd = gameTable.indexOf("private void detachAllSeatsForForceClose", resetAt);
         String resetBody = gameTable.substring(resetAt, resetEnd);
-        assertTrue(resetBody.contains("hotbarHud.clearTable(this)"),
-            "回大厅时必须主动清除最后一帧自定义物品栏");
-        assertTrue(resetBody.indexOf("hotbarHud.clearTable(this)") < resetBody.indexOf("resetRoundStateForLobby()"),
+        assertTrue(resetBody.contains("actionBarOverlay.clearTable(this)"),
+            "回大厅时必须主动清除最后一帧 ActionBar");
+        assertTrue(resetBody.indexOf("actionBarOverlay.clearTable(this)") < resetBody.indexOf("resetRoundStateForLobby()"),
             "必须在切回 LOBBY 前清屏，避免客户端继续显示上一帧");
-        assertTrue(hotbar.contains("player.sendActionBar(Component.empty())"),
-            "退出 PLAYING 或关闭服务时必须发送空 ActionBar 恢复原版物品栏");
+        assertFalse(gameTable.contains("getHotbarHudService()"),
+            "GameTable 不得通过兼容 getter 重新接入 Hotbar");
     }
 
     @Test
-    void DebugWeb生命周期支持端口变化失败重试且回调不无条件启动Hotbar() throws IOException {
+    void DebugWeb生命周期支持端口变化失败重试且不接管Hotbar() throws IOException {
         String source = Files.readString(PLUGIN);
         int at = source.indexOf("private void syncDebugWebServerRuntime()");
         assertTrue(at > 0, "reloadVisualState 应抽出 Debug Web 生命周期同步方法");
-        String body = source.substring(at, at + 1500);
+        String body = source.substring(at, Math.min(source.length(), at + 1500));
         assertTrue(body.contains("debugWebServer.isRunning() && debugWebServer.getPort() != configuredPort"),
             "debug.web-ui.port 改变时必须停旧端口并按新端口重启");
         assertTrue(body.contains("if (!debugWebServer.isRunning())"),
             "上次启动失败后实例仍非 null，下一次 reload 必须能重试 start");
         assertTrue(body.contains("createDebugWebServer()"),
             "Debug Web 构造应集中到一个小工厂，主类只保留最小编排");
-        assertTrue(body.contains("this::suspendHotbarHudForDebugWeb")
-                && body.contains("this::resumeHotbarHudAfterDebugWeb"),
-            "Debug Web onStart/onStop 回调应走受控方法，不能直接 hotbarHudService::start");
-        assertTrue(source.contains("hotbarHudService.reloadEnabled(hotbarHudEnabled, debugWebOverride)"),
-            "恢复 Hotbar 时必须重新读取 hotbar-hud.enabled，避免 Debug Web stop 无条件拉起");
+        assertFalse(body.contains("suspendHotbarHudForDebugWeb")
+                || body.contains("resumeHotbarHudAfterDebugWeb"),
+            "Debug Web onStart/onStop 不得接管已退役的 Hotbar");
     }
 
     @Test
@@ -278,17 +249,18 @@ class DoudizhuRuntimeSyncTest {
         String body = coordinator.substring(resource, apply);
         assertTrue(body.contains("plugin.getHudOverlayRuntimeState().clear()"),
             "CE reload/generate/ZIP 校验前必须清除旧 ready");
-        assertTrue(body.contains("plugin.setHotbarOverlayReady(false)"),
-            "四层资源未验证前必须关闭 hotbar overlay ready");
+        assertTrue(body.contains("plugin.getHudOverlayRuntimeState().clear()"),
+            "四层资源未验证前必须清除统一 HUD ready 快照");
         String applyBody = coordinator.substring(apply);
-        assertTrue(applyBody.contains("markVerified(request, metrics)"),
-            "只有最终应用阶段才能原子发布完整 request 和对应字体快照");
-        assertTrue(body.indexOf("loadVerifiedHotbarFontMetrics") > body.indexOf("reloadGenerateAndVerify"),
-            "字体快照必须在真实资源校验后加载，不能独立提前发布");
+        assertTrue(applyBody.contains("markVerified(request)"),
+            "只有最终应用阶段才能原子发布完整 request 和对应 ready 快照");
+        assertTrue(body.indexOf("plugin.getHudOverlayRuntimeState().clear()")
+                < body.indexOf("reloadGenerateAndVerify"),
+            "真实资源校验前必须先清除旧 ready，不能独立沿用旧快照");
         assertTrue(applyBody.contains("runIfActiveAtomically"),
             "close/timeout 与最终 apply 必须通过原子闸门仲裁");
-        assertTrue(applyBody.contains("setHotbarOverlayReady(true, request.hotbarScale())"),
-            "ready 必须绑定当前 hotbar scale");
+        assertTrue(applyBody.contains("applyHudRuntimeStateFromWeb()"),
+            "资源校验成功后必须应用当前完整 HUD 运行态");
     }
 
     /** 源码契约断言不应被注释里的示例或历史说明误命中。 */

@@ -8,8 +8,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import linmumua.doudizhu.DoudizhuPlugin;
-import linmumua.doudizhu.compat.CraftEngineOffsetService;
-import linmumua.doudizhu.model.TableGadget;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.listener.TableGadgetLifecycleListener;
 import org.bukkit.Bukkit;
@@ -17,21 +15,19 @@ import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.event.player.PlayerItemHeldEvent;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 /**
- * 牌桌三道具的选择、资格、瞄准与事件闸门。
+ * 牌桌道具的 ItemStack 快照选择、资格、瞄准与事件闸门。
  *
- * <p>选择是虚拟的 0..2 索引，不改变玩家真实物品栏槽位。真实换槽事件无法携带
- * 「滚轮」还是「数字键」的来源信息，因此同一 previous/new 映射统一按循环方向处理，
- * 不宣称能区分两种输入。
+ * <p>选择与玩家真实物品栏解耦；每次选择都保存独立快照，成功投掷后一次性清空。
  */
 public final class TableGadgetService {
     private final DoudizhuPlugin plugin;
     private final TableGadgetEffectService effects;
-    private final Map<UUID, Integer> selectedIndexes = new HashMap<>();
+    private final Map<UUID, ItemStack> selectedItems = new HashMap<>();
     private final Map<UUID, Integer> lastUseTicks = new HashMap<>();
     private final Map<UUID, Integer> lastAttemptTicks = new HashMap<>();
     private final Map<UUID, TargetState> targets = new HashMap<>();
@@ -57,38 +53,47 @@ public final class TableGadgetService {
         return settings;
     }
 
+    /** 兼容既有渲染查询；实际选择不再由固定枚举映射。 */
     public int selectedIndex(UUID playerId) {
-        return TableGadget.wrapIndex(selectedIndexes.getOrDefault(playerId, 0));
+        return 0;
     }
 
-    public TableGadget selectedGadget(UUID playerId) {
-        return TableGadget.fromIndex(selectedIndex(playerId));
-    }
-
-    /** 将真实 9 槽换槽映射成最短循环方向；8↔0 是相邻一步。 */
-    static int slotDelta(int previousSlot, int newSlot) {
-        int previous = Math.floorMod(previousSlot, 9);
-        int next = Math.floorMod(newSlot, 9);
-        int clockwise = Math.floorMod(next - previous, 9);
-        return clockwise <= 4 ? clockwise : clockwise - 9;
-    }
-
-    /**
-     * 处理真实换槽事件。只有 hotbar HUD 开启、PLAYING 真人座位才取消真实槽切换；
-     * 其他阶段和普通玩家保持原版物品栏行为。
-     */
-    public void onHeldChange(PlayerItemHeldEvent event) {
-        if (event == null) {
+    /** 选择一份独立快照；调用方后续修改原 ItemStack 不会影响本次选择。 */
+    public void select(UUID playerId, ItemStack item) {
+        if (playerId == null || item == null || item.getType().isAir()) {
+            clear(playerId);
             return;
         }
-        Player player = event.getPlayer();
-        if (!isEligibleActor(player)) {
-            return;
+        selectedItems.put(playerId, item.clone());
+    }
+
+    public void select(Player player, ItemStack item) {
+        select(player == null ? null : player.getUniqueId(), item);
+    }
+
+    /** 清除玩家当前已选道具。 */
+    public void clear(UUID playerId) {
+        if (playerId != null) {
+            selectedItems.remove(playerId);
         }
-        int delta = slotDelta(event.getPreviousSlot(), event.getNewSlot());
-        int current = selectedIndex(player.getUniqueId());
-        selectedIndexes.put(player.getUniqueId(), TableGadget.wrapIndex(current + delta));
-        event.setCancelled(true);
+    }
+
+    public void clear(Player player) {
+        clear(player == null ? null : player.getUniqueId());
+    }
+
+    /** 返回当前快照；空值表示未选择道具。 */
+    public ItemStack current(UUID playerId) {
+        ItemStack item = playerId == null ? null : selectedItems.get(playerId);
+        return item == null ? null : item.clone();
+    }
+
+    public ItemStack current(Player player) {
+        return current(player == null ? null : player.getUniqueId());
+    }
+
+    /** 保留空入口以兼容既有监听器；道具选择不依赖换槽事件。 */
+    public void onHeldChange(Object ignored) {
     }
 
     /**
@@ -99,12 +104,12 @@ public final class TableGadgetService {
         if (!isEligibleActor(actor)) {
             return false;
         }
+        UUID actorId = actor.getUniqueId();
         GameTable table = plugin.getTableManager().getTableOf(actor);
         Player target = findTarget(actor, table);
         if (target == null) {
             return false;
         }
-        UUID actorId = actor.getUniqueId();
         int now = Bukkit.getCurrentTick();
         Integer lastAttempt = lastAttemptTicks.put(actorId, now);
         if (lastAttempt != null && lastAttempt == now) {
@@ -114,9 +119,14 @@ public final class TableGadgetService {
         if (last != null && now - last < settings.cooldownTicks()) {
             return true;
         }
-        boolean played = effects.play(table, actor, target, selectedGadget(actorId), settings);
+        ItemStack selected = current(actorId);
+        if (selected == null || selected.getType().isAir()) {
+            return false;
+        }
+        boolean played = effects.play(table, actor, target, selected, settings);
         if (played) {
             lastUseTicks.put(actorId, now);
+            clear(actorId);
         }
         return true;
     }
@@ -148,7 +158,7 @@ public final class TableGadgetService {
             task = null;
         }
         clearAllTargeting();
-        selectedIndexes.clear();
+        selectedItems.clear();
         lastUseTicks.clear();
         lastAttemptTicks.clear();
         effects.clearAll();
@@ -158,7 +168,7 @@ public final class TableGadgetService {
         if (playerId == null) {
             return;
         }
-        selectedIndexes.remove(playerId);
+        selectedItems.remove(playerId);
         lastUseTicks.remove(playerId);
         lastAttemptTicks.remove(playerId);
         clearPlayerTarget(playerId);
@@ -199,7 +209,7 @@ public final class TableGadgetService {
             return;
         }
         effects.tick();
-        if (!settings.enabled() || !isHotbarHudReady()) {
+        if (!settings.enabled()) {
             clearAllTargeting();
             return;
         }
@@ -305,20 +315,8 @@ public final class TableGadgetService {
         originalGlowing.clear();
     }
 
-    private boolean isHotbarHudReady() {
-        HotbarHudService hotbarHud = plugin.getHotbarHudService();
-        if (hotbarHud == null || !hotbarHud.isEnabled() || !hotbarHud.isRunning()) {
-            return false;
-        }
-        CraftEngineOffsetService offsetService = plugin.getCraftEngineOffsetService();
-        return offsetService != null && offsetService.isAvailable();
-    }
-
     private boolean isEligibleActor(Player player) {
         if (player == null || !player.isOnline() || settings == null || !settings.enabled()) {
-            return false;
-        }
-        if (!isHotbarHudReady()) {
             return false;
         }
         TableManager manager = plugin.getTableManager();

@@ -36,9 +36,7 @@ import java.util.concurrent.TimeoutException;
  * <p>集成方式（{@code DoudizhuPlugin.onEnable()} 末尾）：
  * <pre>
  * if (yamlConfig().getBoolean("debug.web-ui.enabled", false)) {
- *     debugWebServer = new DebugWebServer(this,
- *         () -> syncHotbarHudRuntime(true),  // 接管可拖动 ascent 字形，仍继续推送
- *         () -> syncHotbarHudRuntime(false)); // 停止接管，恢复 bundle 固定 ascent 字形
+ *     debugWebServer = new DebugWebServer(this, null, null);
  *     debugWebServer.start(yamlConfig().getInt("debug.web-ui.port", 2000));
  * }
  * </pre>
@@ -53,12 +51,9 @@ public final class DebugWebServer {
     /**
      * 同源只读资源白名单：只允许前端请求构建期生成的 HUD PNG。
      *
-     * <p>键是后端 geometry 或预览 manifest 下发的资源名（如
-     * {@code "muz:font/hotbar_egg.png"}、{@code "muz:font/scale_<n>/hotbar_select.png"}），
-     * 前端用 {@code /api/resource/<资源名>} 请求。值是 JAR classpath 内嵌路径。
-     *
-     * <p>当前 profile 的 hotbar scale × 三个独立道具 PNG + 选中框 PNG。
-     * 不要添加非 HUD 调试用途的资源条目，不要开放任意路径。
+     * <p>键是后端 geometry 或预览 manifest 下发的资源名，前端用
+     * {@code /api/resource/<资源名>} 请求。值是 JAR classpath 内嵌路径。
+     * 只暴露牌面、头像和记牌器三层真实 PNG，不开放任意路径。
      */
     private static final Map<String, String> RESOURCE_WHITELIST = buildResourceWhitelist();
     /** Debug Web 页面专用资源清单；只暴露当前构建 profile 的真实 PNG。 */
@@ -70,15 +65,6 @@ public final class DebugWebServer {
         // 构建期产物的 classpath 根路径；与 build.gradle.kts 的 outputAssetsRoot 对应
         final String classpathBase = "craftengine/muz/resourcepack/assets/muz/textures/font/";
         LinkedHashMap<String, String> map = new LinkedHashMap<>();
-        // 只登记当前 profile 已生成的 hotbar 档位；每档为三个独立道具 PNG，另有选中框 PNG。
-        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            for (int index = 0; index < 3; index++) {
-                String texture = PackAssets.hotbarIconTexture(index, scale);
-                map.put(texture, classpathBase + texture.substring("muz:font/".length()));
-            }
-            String selectTexture = PackAssets.hotbarSelectTexturePath(scale);
-            map.put(selectTexture, classpathBase + selectTexture.substring("muz:font/".length()));
-        }
         // 牌面、头像、记牌器三层同样是构建期产物；Debug Web 预览必须显示真实 PNG，
         // 因此把当前 profile 会生成的这些资源一并加入同源只读白名单。
         // 仍然只允许固定资源键，不开放任意路径。
@@ -160,19 +146,6 @@ public final class DebugWebServer {
                 PackAssets.COUNTER_CELL_WIDTH, PackAssets.COUNTER_FRAME_HEIGHT, PackAssets.COUNTER_CELL_ADVANCE, counterScale);
         }
 
-        for (int scale : PackAssets.HOTBAR_SCALE_TIERS) {
-            PackAssets.HotbarTier tier = PackAssets.hotbarTier(scale);
-            for (int index = 0; index < 3; index++) {
-                String texture = PackAssets.hotbarIconTexture(index, scale);
-                addPreviewResource(map, "hotbar-icon:" + tier.scale() + ":" + index, "hotbar-icon", texture,
-                    classpathBase + texture.substring("muz:font/".length()),
-                    PackAssets.hotbarIconWidth(scale), PackAssets.hotbarIconHeight(scale),
-                    PackAssets.hotbarIconAdvance(scale), tier.scale());
-            }
-            String selectTexture = PackAssets.hotbarSelectTexturePath(scale);
-            addPreviewResource(map, "hotbar-select:" + tier.scale(), "hotbar-select", selectTexture,
-                classpathBase + selectTexture.substring("muz:font/".length()), tier.selectWidth(), tier.selectHeight(), tier.selectAdvance(), tier.scale());
-        }
         return Map.copyOf(map);
     }
 
@@ -235,9 +208,9 @@ public final class DebugWebServer {
     private static final long HTTP_APPLY_PROTECTION_TIMEOUT_SECONDS = 125L;
 
     private final DoudizhuPlugin plugin;
-    /** 服务器启动时回调；Debug Web 接管 hotbar 定位参数，但不停止 PLAYING 阶段推送。 */
+    /** 服务器启动时回调。 */
     private final Runnable onStart;
-    /** 服务器停止时回调；结束 Debug Web 接管并恢复 bundle 固定 ascent 字形。 */
+    /** 服务器停止时回调。 */
     private final Runnable onStop;
     private final DebugHudConfigController controller;
     private final HudWebApplyCoordinator applyCoordinator;
@@ -593,10 +566,8 @@ public final class DebugWebServer {
     /**
      * /api/resource/{resourceName}（GET）：只读白名单内的构建期 PNG 资源。
      *
-     * <p>URL 路径格式为 {@code /api/resource/muz:font/hotbar_egg.png}，
-     * 前缀 {@code /api/resource/} 之后的整段作为白名单键查找。
-     * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的当前 profile 固定条目；
-     * 用于前端 hotbar 各缩放档的真实图片预览。
+     * <p>前缀 {@code /api/resource/} 之后的整段作为白名单键查找，
+     * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的当前 profile 固定条目。
      * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
      */
     private void handleResource(HttpExchange exchange) throws IOException {
@@ -606,7 +577,7 @@ public final class DebugWebServer {
         }
         String path = exchange.getRequestURI().getPath();
         // 提取 /api/resource/ 之后的完整相对路径作为白名单键
-        // 例如 /api/resource/muz:font/scale_75/hotbar_egg.png → muz:font/scale_75/hotbar_egg.png
+        // 路径中的完整资源键必须逐字匹配白名单，禁止目录穿越或任意读取
         final String prefix = "/api/resource/";
         if (!path.startsWith(prefix) || path.length() <= prefix.length()) {
             sendJson(exchange, 404, Map.of("ok", false, "messages", List.of("资源路径无效。")));
@@ -752,12 +723,6 @@ public final class DebugWebServer {
             + ".layer .tag{position:absolute;top:-17px;left:0;font-size:10px;color:#f1c75b;white-space:nowrap;pointer-events:none;text-shadow:1px 1px #111}"
             + ".cardbox{position:absolute;background:#f9fafb;outline:1px solid #222;color:#111;font-size:9px;font-weight:800;text-align:center;overflow:hidden}"
             + ".avslot{position:absolute}.avbox{position:absolute;background:#4e8cff;outline:1px solid #111}.avbox.crowned{background:#d7a52b}.avbox.empty{background:#25282a;opacity:.6}.cnt{position:absolute}.cnt-label{position:absolute;left:0;top:0;width:100%;color:#fff;text-align:center;font-size:10px}.cnt-frame{position:absolute;box-sizing:border-box;outline:1px solid #8bd5ff;background:#8bd5ff33}.cnt-digit{position:absolute;color:#b8b8b8;text-align:center;font-size:9px}.cnt.exhausted .cnt-label,.cnt.exhausted .cnt-digit{color:#777;opacity:.55}.cnt.exhausted .cnt-frame{outline-color:#777;background:#7773}"
-            // hotbar 层样式：支持 IMG 真实贴图预览，选中框为绝对定位叠加。
-            + ".hb{position:absolute;box-sizing:border-box;border:0;background:transparent!important}.hb-icon-hit{position:absolute;display:flex;align-items:flex-start;justify-content:flex-start;box-sizing:border-box;cursor:default}.hb-icon-img{display:block;image-rendering:pixelated;pointer-events:none}"
-            + ".hb-select{position:absolute;image-rendering:pixelated;pointer-events:none;z-index:2}"
-            + ".hb-slot-indicator{position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:9px;color:#f1c75b;white-space:nowrap;pointer-events:none}"
-            // 资源加载失败可见提示：红色边框 + 叠加文字，不静默隐藏
-            + ".hb-icon-error{position:absolute;inset:0;display:none;align-items:center;justify-content:center;font-size:8px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center;z-index:1}.hb-select-error{position:absolute;inset:auto 2px 2px auto;padding:2px;display:none;align-items:center;justify-content:center;font-size:9px;color:#e05050;background:#121216;border:1px dashed #e05050;pointer-events:none;text-align:center;z-index:3}"
             + ".scalebar{display:flex;gap:8px;align-items:center;margin:0 0 10px;font-size:12px;color:#eee9dc;flex-wrap:wrap}"
             // 层选择面板：标签页切换活动层，高亮当前选中层
             + ".layer-tabs{display:flex;gap:0;margin:0 0 12px;border-bottom:3px solid #17191b}"
@@ -789,7 +754,7 @@ public final class DebugWebServer {
             + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             + "<title>MUZ Debug HUD · Minecraft HUD 编辑器</title><style>" + styles + "</style></head>"
             + "<body id='mcEditor' data-token='" + htmlEscape(token) + "'><header><h1>MUZ Debug HUD</h1><span id='muzVersion' class='key'>版本由插件描述提供</span>"
-            + "<div>只开放 22 个 HUD 运行期字段；Minecraft 风格全屏编辑器 · 左键拖动 · 右键查看边界 · Shift+方向键微调 · Shift+空白拖动平移</div>"
+            + "<div>只开放 18 个 HUD 运行期字段；Minecraft 风格全屏编辑器 · 左键拖动 · 右键查看边界 · Shift+方向键微调 · Shift+空白拖动平移</div>"
             + "<button type='button' class='header-btn' id='topSaveBtn'>保存</button><button type='button' class='header-btn' id='topReloadBtn'>重载</button>"
             + "<button type='button' class='header-btn' id='panelToggle' aria-expanded='false'>配置</button><button type='button' class='header-btn' id='fullscreenBtn'>全屏</button>"
             + "<button type='button' class='header-btn' id='resetViewBtn'>重置视图</button></header>"
@@ -800,7 +765,7 @@ public final class DebugWebServer {
             + "<details class='tools-panel' id='toolsPanel'><summary>场景工具与层定位</summary>"
             + "<div class='layer-tabs' id='layerTabs' role='tablist' aria-label='HUD 图层'><button type='button' role='tab' aria-selected='true' aria-controls='layer-card' class='layer-tab active' data-layer='card'>牌行</button>"
             + "<button type='button' role='tab' aria-selected='false' aria-controls='layer-avatar' class='layer-tab' data-layer='avatar'>头像</button><button type='button' role='tab' aria-selected='false' aria-controls='layer-counter' class='layer-tab' data-layer='counter'>记牌</button>"
-            + "<button type='button' role='tab' aria-selected='false' aria-controls='layer-hotbar' class='layer-tab' data-layer='hotbar'>Hotbar</button></div>"
+            + "</div>"
             + "<div class='layer-coords' id='layerCoords'><label>X 偏移</label><input type='number' id='coordX' step='1' aria-label='层水平偏移（配置值）'>"
             + "<label>Y 偏移</label><input type='number' id='coordY' step='1' aria-label='层纵向偏移（配置值）'><label>渲染宽</label><span class='coord-ro' id='coordW'>-</span>"
             + "<label>渲染高</label><span class='coord-ro' id='coordH'>-</span></div>"
@@ -808,7 +773,7 @@ public final class DebugWebServer {
             + "<input id='viewportHeight' type='number' min='240' max='1080' step='1' value='360' aria-label='逻辑视口高度'><span>仅页面校准，不写入 HUD 配置</span></div>"
             + "<div class='scalebar'><label>客户端 GUI 倍率</label><select id='guiScale' aria-label='客户端 GUI 倍率'><option value='2'>2</option><option value='3' selected>3</option><option value='4'>4</option></select>"
             + "<label>页面查看倍率</label><select id='pageScale'><option value='0.25'>1/4</option><option value='0.3333333333' selected>1/3</option><option value='0.5'>1/2</option><option value='1'>1</option></select><span>倍率只改变 CSS 显示，逻辑位置仍为 MC px。</span></div>"
-            + "<div class='scalebar'><label><input type='checkbox' id='snapToggle' aria-label='Minecraft 风格吸附' checked> Minecraft 风格吸附</label><span id='dragStatus'>吸附：开启 · 中心线：开启 · Alt 轴锁：开启</span><span>纵向 hotbar 需保存后重载资源包。</span></div>"
+            + "<div class='scalebar'><label><input type='checkbox' id='snapToggle' aria-label='Minecraft 风格吸附' checked> Minecraft 风格吸附</label><span id='dragStatus'>吸附：开启 · 中心线：开启 · Alt 轴锁：开启</span><span>三层连续 Y 需保存后重载资源包。</span></div>"
             + "<h2>警告</h2><ul id='warnings'></ul></details><form id='hudForm'></form>"
             + "<div class='actions'><button type='button' id='saveBtn' title='Ctrl+S'>保存并应用</button><button type='button' class='secondary' id='reloadBtn' title='Ctrl+R'>重新读取</button>"
             + "<button type='button' class='secondary' id='undoBtn'>撤销</button></div><p id='message' class='msg'></p></section></main>"
@@ -816,8 +781,8 @@ public final class DebugWebServer {
             + "<script>"
             + "const token=document.body.dataset.token;let state=JSON.parse(document.getElementById('muz-state').textContent);let dirty=new Set();let dragging=null;let panning=null;let resizing=null;let busy=false;let renderQueued=false;let viewPanX=0,viewPanY=0;"
             + "let dragCfg=state.drag||{snapEnabled:true,snapThreshold:4,centerGuidesEnabled:true,altAxisLock:true};let pageSnapEnabled=true;let renderFrame=0;"
-            // 层选择状态：activeLayer 决定高亮哪层、坐标面板显示哪层。hotbar 选中槽仅页面演示，不写入 patch。
-            + "let activeLayer='card';let hotbarSelectedSlot=0;"
+            // 层选择状态：activeLayer 决定高亮哪层、坐标面板显示哪层。
+            + "let activeLayer='card';"
             + "const form=document.getElementById('hudForm'),msg=document.getElementById('message'),warns=document.getElementById('warnings'),dragHint=document.getElementById('dragHint'),screen=document.getElementById('screen'),previewPanel=document.getElementById('previewPanel');"
             + "const coordX=document.getElementById('coordX'),coordY=document.getElementById('coordY'),coordW=document.getElementById('coordW'),coordH=document.getElementById('coordH');"
             + "function fieldSpec(k){return state.fields.find(f=>f.key===k)}"
@@ -845,9 +810,9 @@ public final class DebugWebServer {
             + "document.getElementById('saveBtn').onclick=async()=>{if(busy)return;let patch;try{patch=currentPatch()}catch(e){setPrompt(e.message);return}if(!Object.keys(patch).length){setDirtyPrompt();return}setBusy(true);setPrompt('正在保存并应用，请稍候。');try{let j=await post('/api/save',{values:patch});state=j.snapshot;dirty.clear();renderForm();"
             // 保存成功消息：先显示 appliedKeys，再附上服务端返回的 messages（包含 CE 校验/上传/客户端状态）。
             // msg 与 dragHint 保持一致，都使用同一段文本。
-            + "snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);let text='已保存并应用：'+((j.appliedKeys||[]).join(', ')||'无改动')+'。四层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+='。'+srvMsgs.join('；');"
+            + "snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);let text='已保存并应用：'+((j.appliedKeys||[]).join(', ')||'无改动')+'。三层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+='。'+srvMsgs.join('；');"
             + "msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
-            + "document.getElementById('reloadBtn').onclick=async()=>{if(busy)return;setBusy(true);setPrompt('正在重新读取配置，请稍候。');try{let j=await post('/api/reload',{});state=j.snapshot;snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);dirty.clear();renderForm();let text='已重新读取配置；四层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+=srvMsgs.join('；');msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
+            + "document.getElementById('reloadBtn').onclick=async()=>{if(busy)return;setBusy(true);setPrompt('正在重新读取配置，请稍候。');try{let j=await post('/api/reload',{});state=j.snapshot;snapshotCounterOffset=Number(state.values?.['trick-hud.counter.offset-down']??122);dirty.clear();renderForm();let text='已重新读取配置；三层 HUD 需由 CraftEngine 重建资源包并让客户端重新下载。';let srvMsgs=(j.messages||[]);if(srvMsgs.length)text+=srvMsgs.join('；');msg.innerHTML='<span class=\"ok msg-fade\">'+esc(text)+'</span>';dragHint.textContent=text}catch(e){msg.textContent=e.message;dragHint.textContent=e.message}finally{setBusy(false)}};"
             + "document.getElementById('undoBtn').onclick=()=>{if(busy)return;dirty.clear();renderForm();const text='已撤销未保存改动。';msg.textContent=text;dragHint.textContent=text};"
             + "document.getElementById('topSaveBtn').onclick=()=>document.getElementById('saveBtn').click();document.getElementById('topReloadBtn').onclick=()=>document.getElementById('reloadBtn').click();"
             + "document.getElementById('panelToggle').onclick=()=>{const panel=document.getElementById('editorPanel'),open=panel.classList.toggle('collapsed');document.getElementById('panelToggle').setAttribute('aria-expanded',open?'false':'true')};"
@@ -861,7 +826,7 @@ public final class DebugWebServer {
             // 但按钮 click 只在非 busy 时触发（按钮 handler 自己检查 busy）。
             + "document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='s'){e.preventDefault();document.getElementById('saveBtn').click()}if(e.ctrlKey&&e.key==='r'){e.preventDefault();document.getElementById('reloadBtn').click()}});"
             // 【预览几何全部来自服务端 PreviewGeometry】：屏幕基准、行宽、字形前进量、
-            // Hotbar 尺寸/ascent 都由 DebugHudConfigController.currentGeometry() 汇总下发，
+            // 预览几何都由 DebugHudConfigController.currentGeometry() 汇总下发，
             // 前端不复算任何字形表。旧版把屏幕基准、字符宽度与固定 cell 估算硬写在这里，
             // 档位或分层几何一改预览就静默错位，现统一由服务端 geometry 集中下发。
             + "function geo(){return state.geometry}"
@@ -880,7 +845,6 @@ public final class DebugWebServer {
             + "return avatarDown<required?'头像行会与牌行重叠：建议 avatar-offset-down 至少为 '+required+'。':null}"
             // rowGeom 只查表，不复算：card/avatar 从 geometry 数组按档位匹配；
             // counter 只从 counterTiers[] 按 trick-hud.counter.scale 查表，缺档直接报错，禁止静默回退旧字段。
-            // hotbar 同理优先从 hotbars[] 按 hotbar-hud.scale 查表。
             + "function rowGeom(vals){const g=geo();"
             + "const cards=g.sampleCards||[],n=cards.length,step=Number(vals['trick-hud.card-step']),h=Number(vals['trick-hud.card-height']);"
             + "const card=(g.cards||[]).find(x=>Number(x.height)===h)||{width:0,advance:0,height:h};"
@@ -909,20 +873,13 @@ public final class DebugWebServer {
             + "const counterFrameTopDelta=Number(cntTier.frameTopDelta);"
             + "const counterDigitInset=Number(cntTier.digitInset);"
             + "let counterRowWidth=0;if(counterCells.length){counterRowWidth=counterCells.length*counterAdvance+(counterCells.length-1)*counterGap}"
-            // hotbar 几何按 scale 从 hotbars 数组查表，降级到顶层字段
-            + "const hbScale=Number(vals['hotbar-hud.scale'])||100;"
-            + "const hb=(g.hotbars||[]).find(x=>Number(x.scale)===hbScale)||{};"
-            + "const hbW=Number(hb.width),hbH=Number(hb.height),hbAdv=Number(hb.advance);"
-            + "const hbBaseAscent=Number(hb.baseAscent),hbIcons=hb.icons||[],hbSlotCount=Number(hb.slotCount||hbIcons.length),hbSlotStep=Number(hb.slotStep);"
-            + "const hbSelW=Number(hb.selectWidth),hbSelH=Number(hb.selectHeight),hbSelStartX=Number(hb.selectStartX),hbSelStartY=Number(hb.selectStartY),hbSelectTexture=hb.selectTexture;"
             + "return{cards:cards,cardW:cardW,cardAdvance:cardAdvance,cardRowWidth:cardRowWidth,cardHeight:cardHeight,step:step,n:n,"
             + "avatarSlot:slotWidth,avatarSlots:slots,avatarRowWidth:avatarRowWidth,avatarHeight:avatarHeight,avGap:avGap,"
             + "counterCells:counterCells,counterRowWidth:counterRowWidth,counterGap:counterGap,counterCellWidth:counterCellWidth,"
             + "counterCellHeight:counterCellHeight,counterAdvance:counterAdvance,counterLabelHeight:counterLabelHeight,"
             + "counterFrameHeight:counterFrameHeight,counterDigitHeight:counterDigitHeight,counterLabelAscent:counterLabelAscent,"
             + "snapshotCounterOffset:snapshotCounterOffset,counterFrameTopDelta:counterFrameTopDelta,counterDigitInset:counterDigitInset,"
-            + "hbW:hbW,hbH:hbH,hbAdv:hbAdv,hbBaseAscent:hbBaseAscent,hbIcons:hbIcons,hbSlotCount:hbSlotCount,hbSlotStep:hbSlotStep,"
-            + "hbSelW:hbSelW,hbSelH:hbSelH,hbSelStartX:hbSelStartX,hbSelStartY:hbSelStartY,hbSelectTexture:hbSelectTexture}}"
+            + "};}"
             // 布局警告缓存：renderPreview 每次重算，renderWarnings 再合并进列表。
             + "let layoutWarnings=[];"
             + "function pushBoundsWarn(name,x,y,w,h){const v=viewport();"
@@ -930,22 +887,18 @@ public final class DebugWebServer {
             + "if(y<0)layoutWarnings.push(name+' 越出屏幕上边界（y='+Math.round(y)+'）');"
             + "if(x+w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(x+w)+' > '+v.width+'）');"
             + "if(y+h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(y+h)+' > '+v.height+'）')}"
-            + "const SCALE_KEYS={card:'trick-hud.card-height',avatar:'trick-hud.avatar-scale',counter:'trick-hud.counter.scale',hotbar:'hotbar-hud.scale'};"
+            + "const SCALE_KEYS={card:'trick-hud.card-height',avatar:'trick-hud.avatar-scale',counter:'trick-hud.counter.scale'};"
             // 视口适配：逻辑坐标仍是 640×360 MC px，舞台按浏览器大小放大；指针换算使用同一缩放值。
-            // 滚轮切换 hotbar 选中槽（0..8）：仅在 hotbar 层上方才拦截滚轮，不劫持页面其他位置。
-            // 这只是页面演示持槽效果，不混入保存 patch。
-            + "/* Hotbar wheel、右键与空白平移统一由稳定 DOM 事件委托处理。 */"
             // 拖动：把 CSS 位移换算回 MC 像素写进表单。松手才提交（纵向重打包代价高）。
             + "const DRAG_KEYS={avatar:['trick-hud.avatar-offset-x','trick-hud.avatar-offset-down'],"
             + "card:['trick-hud.card-offset-x','trick-hud.offset-down'],"
-            + "counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down'],"
-            + "hotbar:['hotbar-hud.offset-x','hotbar-hud.offset-y']};"
+            + "counter:['trick-hud.counter.offset-x','trick-hud.counter.offset-down']};"
             + "function layerXYKeys(kind){return DRAG_KEYS[kind]||null}"
             + "function selectLayer(kind){if(!DRAG_KEYS[kind])kind='card';activeLayer=kind;document.querySelectorAll('#layerTabs [data-layer]').forEach(t=>{const active=t.dataset.layer===kind;t.classList.toggle('active',active);t.setAttribute('aria-selected',active?'true':'false')});screen.querySelectorAll('.layer[data-drag]').forEach(el=>el.classList.toggle('selected',el.dataset.drag===kind));updateCoordPanel()}"
             + "function updateCoordPanel(){const keys=layerXYKeys(activeLayer),vals=collectAll(),box=staticBoxes(vals).boxes[activeLayer];if(coordX)coordX.value=keys?Number(vals[keys[0]]||0):'';if(coordY)coordY.value=keys&&keys[1]?Number(vals[keys[1]]||0):'';if(coordW)coordW.textContent=box?Math.round(box.w):'-';if(coordH)coordH.textContent=box?Math.round(box.h):'-'}"
             + "function controls(k){const q=CSS.escape(k);return form.querySelectorAll(\"[data-key='\"+q+\"']\")}"
             + "function writeValue(k,value){controls(k).forEach(el=>{if(el.type==='checkbox')el.checked=!!value;else el.value=value})}"
-            + "function continuousYKey(key){return key==='trick-hud.offset-down'||key==='trick-hud.avatar-offset-down'||key==='trick-hud.counter.offset-down'||key==='hotbar-hud.offset-y'}"
+            + "function continuousYKey(key){return key==='trick-hud.offset-down'||key==='trick-hud.avatar-offset-down'||key==='trick-hud.counter.offset-down'}"
             + "function setField(key,val){const el=control(key);if(!el)return false;const f=fieldSpec(key);let next=continuousYKey(key)?Number(val):Math.round(val);"
             + "if(!continuousYKey(key)){if(f&&f.min!=null)next=Math.max(f.min,next);if(f&&f.max!=null)next=Math.min(f.max,next)}"
             // 档位型字段（select）只能取资源包实际生成的档，吸附到最近的合法选项；连续 Y 不进入此分支。
@@ -964,7 +917,7 @@ public final class DebugWebServer {
             + "list.forEach(w=>{let li=document.createElement('li');li.className='warn';li.textContent=w;warns.appendChild(li)});"
             + "if(!warns.children.length){let li=document.createElement('li');li.className='ok';li.textContent='当前快照无重叠警告。';warns.appendChild(li)}}"
             + """
-            // 后续运行期只更新稳定节点的几何与内容，禁止在手势期间拆除 layer/img 节点。
+            // 后续运行期只更新三层稳定节点的几何与内容，禁止在手势期间拆除 layer 节点。
             let staticDomReady=false, staticEventsReady=false, pendingStaticRender=false;
             function staticLayer(kind){return screen.querySelector('.layer[data-drag="'+kind+'"]')}
             function staticContent(el){return el.querySelector('.layer-content')}
@@ -977,22 +930,21 @@ public final class DebugWebServer {
                 const legend=document.createElement('div');legend.className='mc-screen-legend';const bossRef=document.createElement('div');bossRef.className='ref boss';
                 const grid=document.createElement('div');grid.className='ref grid';const mid=document.createElement('div');mid.className='ref mid';const bottom=document.createElement('div');bottom.className='ref bottom';
                 screen.append(boss,action,cross,world,legend,bossRef,grid,mid,bottom);
-                ['avatar','card','counter','hotbar'].forEach(kind=>{const layer=document.createElement('div');layer.className='layer';layer.dataset.drag=kind;layer.id='layer-'+kind;const tag=document.createElement('span');tag.className='tag';const content=document.createElement('div');content.className='layer-content';layer.append(tag,content);['nw','ne','sw','se','n','s','w','e'].forEach(dir=>{const h=document.createElement('div');h.className='resize-handle '+dir;h.dataset.resize=dir;layer.append(h)});screen.append(layer)});
+                ['avatar','card','counter'].forEach(kind=>{const layer=document.createElement('div');layer.className='layer';layer.dataset.drag=kind;layer.id='layer-'+kind;const tag=document.createElement('span');tag.className='tag';const content=document.createElement('div');content.className='layer-content';layer.append(tag,content);['nw','ne','sw','se','n','s','w','e'].forEach(dir=>{const h=document.createElement('div');h.className='resize-handle '+dir;h.dataset.resize=dir;layer.append(h)});screen.append(layer)});
                 staticDomReady=true;
             }
             function setStaticBox(el,b){el.hidden=!b;el.style.transform='';if(!b)return;el.style.left=cssPx(b.x)+'px';el.style.top=cssPx(b.y)+'px';el.style.width=cssPx(b.w)+'px';el.style.height=cssPx(b.h)+'px';el.dataset.mcLeft=Math.round(b.x);el.dataset.mcTop=Math.round(b.y);el.dataset.mcWidth=Math.round(b.w);el.dataset.mcHeight=Math.round(b.h)}
-            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset,w:r.counterRowWidth,h:r.counterCellHeight}}if(vals['hotbar-hud.enabled']){const h=Number(vals['hotbar-hud.offset-y']),x=Number(vals['hotbar-hud.offset-x']);out.hotbar={x:Math.floor(v.width/2)-Math.floor(r.hbAdv/2)+x,y:v.height-r.hbH+(r.hbBaseAscent-(r.hbBaseAscent-h)),w:r.hbW,h:r.hbH}}return{geometry:r,boxes:out,viewport:v}}
+            function staticBoxes(vals){const g=geo(),v=viewport(),r=rowGeom(vals),out={};if(vals['trick-hud.enabled']){const maxW=Math.max(r.cardRowWidth,r.avatarRowWidth,vals['trick-hud.counter.enabled']?r.counterRowWidth:0),baseLeft=Math.floor((v.width-maxW)/2),ox=Number(vals['trick-hud.offset-x']),base=Number(g.bossBarBaselineY);out.avatar={x:baseLeft+Math.floor((maxW-r.avatarRowWidth)/2)+ox+Number(vals['trick-hud.avatar-offset-x']),y:base-(r.avatarHeight-Number(vals['trick-hud.avatar-offset-down'])),w:r.avatarRowWidth,h:r.avatarHeight};out.card={x:baseLeft+Math.floor((maxW-r.cardRowWidth)/2)+ox+Number(vals['trick-hud.card-offset-x']),y:base-(r.cardHeight-Number(vals['trick-hud.offset-down'])),w:r.cardRowWidth,h:r.cardHeight};if(vals['trick-hud.counter.enabled'])out.counter={x:baseLeft+Math.floor((maxW-r.counterRowWidth)/2)+ox+Number(vals['trick-hud.counter.offset-x']),y:base-r.counterLabelAscent+Number(vals['trick-hud.counter.offset-down'])-r.snapshotCounterOffset,w:r.counterRowWidth,h:r.counterCellHeight}}return{geometry:r,boxes:out,viewport:v}}
             function staticCards(layer,r){const c=staticContent(layer);for(let i=0;i<r.n;i++){let el=c.querySelector('.cardbox[data-card-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cardbox';el.dataset.cardIndex=i;c.append(el)}const label=String(r.cards[i].label||r.cards[i].rank||'');el.hidden=false;el.dataset.cardRank=label;el.textContent=label;el.style.left=cssPx(i*r.step)+'px';el.style.top='0';el.style.width=cssPx(r.cardW)+'px';el.style.height=cssPx(r.cardHeight)+'px';el.style.lineHeight=cssPx(r.cardHeight)+'px'}c.querySelectorAll('.cardbox').forEach(el=>{el.hidden=Number(el.dataset.cardIndex)>=r.n})}
             function staticAvatars(layer,r,vals){const c=staticContent(layer),outline=vals['trick-hud.avatar-outline.enabled']?String(vals['trick-hud.avatar-outline.color']):'transparent';for(let i=0;i<3;i++){let slot=c.querySelector('.avslot[data-index="'+i+'"]');if(!slot){slot=document.createElement('div');slot.className='avslot';slot.dataset.index=i;slot.append(document.createElement('div'));c.append(slot)}const data=r.avatarSlots[i]||{slotWidth:r.avatarSlot,contentAdvance:r.avatarSlot,rowHeight:r.avatarHeight,crowned:false,empty:true},face=slot.firstElementChild,sw=Number(data.slotWidth||r.avatarSlot),fw=Number(data.contentAdvance||sw),fh=Number(data.rowHeight||r.avatarHeight);slot.style.left=cssPx(i*(r.avatarSlot+r.avGap))+'px';slot.style.top='0';slot.style.width=cssPx(r.avatarSlot)+'px';slot.style.height=cssPx(r.avatarHeight)+'px';face.className='avbox'+(data.crowned?' crowned':'')+(data.empty?' empty':'');face.style.left=cssPx((sw-fw)/2)+'px';face.style.top=cssPx(r.avatarHeight-fh)+'px';face.style.width=cssPx(fw)+'px';face.style.height=cssPx(fh)+'px';face.style.outlineColor=outline}}
             function staticCounter(layer,r,vals){const c=staticContent(layer);r.counterCells.forEach((cell,i)=>{let el=c.querySelector('.cnt[data-index="'+i+'"]');if(!el){el=document.createElement('div');el.className='cnt';el.dataset.index=i;el.append(document.createElement('div'),document.createElement('div'),document.createElement('div'));el.children[0].className='cnt-label';el.children[1].className='cnt-frame';el.children[2].className='cnt-digit';c.append(el)}const hidden=!!cell.exhausted&&!!vals['trick-hud.counter.hide-exhausted'],x=i*(r.counterAdvance+r.counterGap),digitWidth=r.counterCellWidth-2*r.counterDigitInset;el.hidden=false;el.className='cnt'+(cell.exhausted?' exhausted':'');el.style.left=cssPx(x)+'px';el.style.top='0';el.style.width=cssPx(r.counterCellWidth)+'px';el.style.height=cssPx(r.counterCellHeight)+'px';el.children[0].textContent=String(cell.label);el.children[0].style.display=hidden?'none':'';el.children[1].style.display=hidden?'none':'';el.children[2].textContent=String(cell.playedCount);el.children[2].style.display=hidden?'none':'';el.children[0].style.height=cssPx(r.counterLabelHeight)+'px';el.children[0].style.lineHeight=cssPx(r.counterLabelHeight)+'px';el.children[1].style.left='0';el.children[1].style.top=cssPx(r.counterFrameTopDelta)+'px';el.children[1].style.width=cssPx(r.counterCellWidth)+'px';el.children[1].style.height=cssPx(r.counterFrameHeight)+'px';el.children[2].style.left=cssPx(r.counterDigitInset)+'px';el.children[2].style.top=cssPx(r.counterFrameTopDelta+r.counterDigitInset)+'px';el.children[2].style.width=cssPx(digitWidth)+'px';el.children[2].style.height=cssPx(r.counterDigitHeight)+'px';el.children[2].style.lineHeight=cssPx(r.counterDigitHeight)+'px'});c.querySelectorAll('.cnt').forEach(el=>{el.hidden=Number(el.dataset.index)>=r.counterCells.length})}
-            function staticHotbar(layer,r){const c=staticContent(layer);c.replaceChildren();(r.hbIcons||[]).forEach(icon=>{const hit=document.createElement('span');hit.className='hb-icon-hit';hit.dataset.index=icon.index;hit.style.left=cssPx(icon.index*icon.step)+'px';hit.style.top='0';hit.style.width=cssPx(icon.width)+'px';hit.style.height=cssPx(icon.height)+'px';const img=document.createElement('img');img.className='hb-icon-img';img.alt='Hotbar 道具图标';img.src='/api/resource/'+esc(icon.texture);img.style.width=cssPx(icon.width)+'px';img.style.height=cssPx(icon.height)+'px';const err=document.createElement('span');err.className='hb-icon-error';err.textContent='资源缺失';img.onerror=()=>{img.style.display='none';err.style.display='flex'};img.onload=()=>{img.style.display='block';err.style.display='none'};hit.append(img,err);c.append(hit)});let selected=c.querySelector('.hb-select');if(!selected){selected=document.createElement('img');selected.className='hb-select';c.append(selected)}let selectErr=c.querySelector('.hb-select-error');if(!selectErr){selectErr=document.createElement('span');selectErr.className='hb-select-error';selectErr.textContent='选中框缺失';c.append(selectErr)}const selectTexture=r.hbSelectTexture||'';selected.src='/api/resource/'+esc(selectTexture);selected.onerror=()=>{selected.style.display='none';selectErr.style.display='flex'};selected.onload=()=>{selected.style.display='block';selectErr.style.display='none'};selected.style.left=cssPx(r.hbSelStartX+hotbarSelectedSlot*r.hbSlotStep)+'px';selected.style.top=cssPx(r.hbSelStartY)+'px';selected.style.width=cssPx(r.hbSelW)+'px';selected.style.height=cssPx(r.hbSelH)+'px';let note=c.querySelector('.hb-slot-indicator');if(!note){note=document.createElement('span');note.className='hb-slot-indicator';c.append(note)}note.textContent='道具 '+hotbarSelectedSlot+'（滚轮切换）'}
             function hideCoordinate(){const box=document.getElementById('mcCoordinate');if(box)box.classList.remove('show')}
             function showCoordinate(ev,layer){const box=document.getElementById('mcCoordinate');if(!box)return;const el=layer||staticLayer(activeLayer),kind=el&&el.dataset.drag||activeLayer,b=el&&!el.hidden?{x:Number(el.dataset.mcLeft||0),y:Number(el.dataset.mcTop||0),w:Number(el.dataset.mcWidth||0),h:Number(el.dataset.mcHeight||0)}:null,rect=screen.getBoundingClientRect(),s=cssScale(),z=screenZoom(),px=Math.round((ev.clientX-rect.left)/(z*s)),py=Math.round((ev.clientY-rect.top)/(z*s)),keys=DRAG_KEYS[kind],vals=collectAll(),name=el&&el.dataset.drag||'画布';box.innerHTML='左 '+(b?b.x:'-')+' · 右 '+(b?b.x+b.w:'-')+'<br>上 '+(b?b.y:'-')+' · 下 '+(b?b.y+b.h:'-')+'<br>宽 '+(b?b.w:'-')+' · 高 '+(b?b.h:'-')+'<br>配置 offset：'+(keys?Math.round(Number(vals[keys[0]]||0)):'-')+'，'+(keys?Math.round(Number(vals[keys[1]]||0)):'-')+'<br>指针 '+px+', '+py;box.style.left=Math.min(window.innerWidth-box.offsetWidth-8,Math.max(8,ev.clientX+12))+'px';box.style.top=Math.min(window.innerHeight-box.offsetHeight-8,Math.max(8,ev.clientY+12))+'px';box.classList.add('show')}
-            function bindStaticEvents(){if(staticEventsReady)return;staticEventsReady=true;screen.addEventListener('pointerdown',e=>{const handle=e.target.closest('.resize-handle'),layer=e.target.closest('.layer[data-drag]');if(handle){startStaticResize(e,handle);return}if(layer){startStaticDrag(e,layer);return}if(!busy&&e.button===0&&e.shiftKey){e.preventDefault();panning={sx:e.clientX,sy:e.clientY,x:viewPanX,y:viewPanY,pointerId:e.pointerId,__static:true};try{screen.setPointerCapture(e.pointerId)}catch(_){}dragHint.textContent='平移视图中：Shift+拖动'}});screen.addEventListener('pointermove',moveStaticPointer);screen.addEventListener('pointerup',finishStaticPointer);screen.addEventListener('pointercancel',finishStaticPointer);screen.addEventListener('lostpointercapture',finishStaticPointer);window.addEventListener('pointerup',finishStaticPointer);window.addEventListener('pointercancel',finishStaticPointer);window.addEventListener('blur',finishStaticPointer);screen.addEventListener('contextmenu',e=>{e.preventDefault();showCoordinate(e,e.target.closest('.layer[data-drag]'))});screen.addEventListener('wheel',e=>{if(!e.target.closest('.hb-icon-hit'))return;e.preventDefault();const count=(rowGeom(collectAll()).hbIcons||[]).length||3;hotbarSelectedSlot=(hotbarSelectedSlot+(e.deltaY>0?1:-1)+count)%count;scheduleRender()},{passive:false})}
+            function bindStaticEvents(){if(staticEventsReady)return;staticEventsReady=true;screen.addEventListener('pointerdown',e=>{const handle=e.target.closest('.resize-handle'),layer=e.target.closest('.layer[data-drag]');if(handle){startStaticResize(e,handle);return}if(layer){startStaticDrag(e,layer);return}if(!busy&&e.button===0&&e.shiftKey){e.preventDefault();panning={sx:e.clientX,sy:e.clientY,x:viewPanX,y:viewPanY,pointerId:e.pointerId,__static:true};try{screen.setPointerCapture(e.pointerId)}catch(_){}dragHint.textContent='平移视图中：Shift+拖动'}});screen.addEventListener('pointermove',moveStaticPointer);screen.addEventListener('pointerup',finishStaticPointer);screen.addEventListener('pointercancel',finishStaticPointer);screen.addEventListener('lostpointercapture',finishStaticPointer);window.addEventListener('pointerup',finishStaticPointer);window.addEventListener('pointercancel',finishStaticPointer);window.addEventListener('blur',finishStaticPointer);screen.addEventListener('contextmenu',e=>{e.preventDefault();showCoordinate(e,e.target.closest('.layer[data-drag]'))})}
             function startStaticDrag(e,el){if(busy||dragging||resizing||panning||e.button!==0||e.pointerType==='mouse'&&!(e.buttons&1)||e.target.closest('.resize-handle')||['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)||e.target.isContentEditable)return;const kind=el.dataset.drag,keys=DRAG_KEYS[kind],b=staticBoxes(collectAll()).boxes[kind];if(!keys||!b)return;e.preventDefault();selectLayer(kind);dragging={kind,keys,sx:e.clientX,sy:e.clientY,bx:Number(readValue(keys[0])||0),by:keys[1]?Number(readValue(keys[1])||0):0,baseLeft:b.x,baseTop:b.y,width:b.w,height:b.h,pointerId:e.pointerId,axis:null,hasMoved:false,el,__static:true};el.classList.add('drag');try{el.setPointerCapture(e.pointerId)}catch(_){} }
             function moveStaticPointer(e){const active=dragging||resizing||panning;if(!active||busy||e.pointerId!==active.pointerId)return;e.preventDefault();if(dragging){if(e.pointerType==='mouse'&&!(e.buttons&1)){finishStaticPointer();return}const d=dragging,s=cssScale()*screenZoom(),v=viewport();let dx=(e.clientX-d.sx)/s,dy=(e.clientY-d.sy)/s;if(Math.abs(dx)<.5&&Math.abs(dy)<.5&&!d.hasMoved)return;d.hasMoved=true;if(!d.keys[1])dy=0;if(dragCfg.altAxisLock&&e.altKey&&d.axis===null&&(Math.abs(dx)>=2||Math.abs(dy)>=2))d.axis=Math.abs(dx)>=Math.abs(dy)?'x':'y';if(d.axis==='x')dy=0;if(d.axis==='y')dx=0;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy);if(dragCfg.snapEnabled){const tx=(v.width-d.width)/2-d.baseLeft,ty=(v.height-d.height)/2-d.baseTop;if(d.axis!=='y'&&Math.abs(dx-tx)<=dragCfg.snapThreshold)dx=tx;if(d.keys[1]&&d.axis!=='x'&&Math.abs(dy-ty)<=dragCfg.snapThreshold)dy=ty;dx=clampDelta(d.baseLeft,d.width,v.width,dx);if(d.keys[1])dy=clampDelta(d.baseTop,d.height,v.height,dy)}setField(d.keys[0],d.bx+dx);if(d.keys[1])setField(d.keys[1],d.by+dy);d.el.style.transform='translate('+cssPx(Number(readValue(d.keys[0]))-d.bx)+'px,'+cssPx((d.keys[1]?Number(readValue(d.keys[1])):d.by)-d.by)+'px)';dragHint.textContent='拖动中：'+d.keys[0]+'='+Math.round(Number(readValue(d.keys[0])))+(d.keys[1]?('，'+d.keys[1]+'='+Math.round(Number(readValue(d.keys[1])))):'');updateCoordPanel()}else if(resizing){moveStaticResize(e)}else{viewPanX=panning.x+(e.clientX-panning.sx)/(cssScale()*screenZoom());viewPanY=panning.y+(e.clientY-panning.sy)/(cssScale()*screenZoom());applyScreenTransform()}}
             function finishStaticPointer(){if(dragging){const d=dragging,el=d.el;dragging=null;try{if(el.hasPointerCapture(d.pointerId))el.releasePointerCapture(d.pointerId)}catch(_){}el.classList.remove('drag');flushStaticRender()}if(resizing){const d=resizing;resizing=null;try{if(d.el.hasPointerCapture(d.pointerId))d.el.releasePointerCapture(d.pointerId)}catch(_){}d.el.classList.remove('drag');flushStaticRender()}if(panning){const p=panning;panning=null;try{if(screen.hasPointerCapture(p.pointerId))screen.releasePointerCapture(p.pointerId)}catch(_){}applyScreenTransform();if(pendingStaticRender)flushStaticRender()}}
-            function renderPreview(){layoutWarnings=[];createStaticScene();bindStaticEvents();const vals=collectAll(),g=geo(),v=viewport(),r=staticBoxes(vals).geometry,boxes=staticBoxes(vals).boxes;screen.style.width=cssPx(v.width)+'px';screen.style.height=cssPx(v.height)+'px';applyScreenTransform();screen.querySelector('.mc-world-label').textContent='世界：HUD_DEBUG · 视口 '+v.width+'×'+v.height;const ref=screen.querySelector('.ref.boss');ref.style.left=cssPx(Math.floor((v.width-182)/2))+'px';ref.style.top=cssPx(Math.max(0,Number(g.bossBarBaselineY)-5))+'px';ref.style.width=cssPx(182)+'px';ref.style.height=cssPx(5)+'px';screen.querySelector('.ref.grid').style.display=dragCfg.centerGuidesEnabled?'block':'none';screen.querySelector('.ref.mid').style.left=cssPx(v.width/2)+'px';screen.querySelector('.ref.bottom').style.top=cssPx(v.height-1)+'px';['avatar','card','counter','hotbar'].forEach(kind=>{const el=staticLayer(kind),b=boxes[kind];setStaticBox(el,b);el.classList.toggle('selected',activeLayer===kind);el.querySelector('.tag').textContent=kind==='hotbar'?'Hotbar offset-x / offset-y（纵向需重载资源包）':kind==='card'?'牌行 card-offset-x / offset-down':kind==='avatar'?'头像行 avatar-offset-x/down':'记牌行 counter.offset-x / offset-down'});Object.entries(boxes).forEach(([kind,b])=>{if(!b)return;const names={avatar:'头像行',card:'牌行',counter:'记牌行',hotbar:'Hotbar'},name=names[kind];if(b.x<0)layoutWarnings.push(name+' 越出屏幕左边界（x='+Math.round(b.x)+'）');if(b.y<0)layoutWarnings.push(name+' 越出屏幕上边界（y='+Math.round(b.y)+'）');if(b.x+b.w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(b.x+b.w)+' > '+v.width+'）');if(b.y+b.h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(b.y+b.h)+' > '+v.height+'）')});staticCards(staticLayer('card'),r);staticAvatars(staticLayer('avatar'),r,vals);staticCounter(staticLayer('counter'),r,vals);staticHotbar(staticLayer('hotbar'),r);updateCoordPanel()}
+            function renderPreview(){layoutWarnings=[];createStaticScene();bindStaticEvents();const vals=collectAll(),g=geo(),v=viewport(),r=staticBoxes(vals).geometry,boxes=staticBoxes(vals).boxes;screen.style.width=cssPx(v.width)+'px';screen.style.height=cssPx(v.height)+'px';applyScreenTransform();screen.querySelector('.mc-world-label').textContent='世界：HUD_DEBUG · 视口 '+v.width+'×'+v.height;const ref=screen.querySelector('.ref.boss');ref.style.left=cssPx(Math.floor((v.width-182)/2))+'px';ref.style.top=cssPx(Math.max(0,Number(g.bossBarBaselineY)-5))+'px';ref.style.width=cssPx(182)+'px';ref.style.height=cssPx(5)+'px';screen.querySelector('.ref.grid').style.display=dragCfg.centerGuidesEnabled?'block':'none';screen.querySelector('.ref.mid').style.left=cssPx(v.width/2)+'px';screen.querySelector('.ref.bottom').style.top=cssPx(v.height-1)+'px';['avatar','card','counter'].forEach(kind=>{const el=staticLayer(kind),b=boxes[kind];setStaticBox(el,b);el.classList.toggle('selected',activeLayer===kind);el.querySelector('.tag').textContent=kind==='card'?'牌行 card-offset-x / offset-down':kind==='avatar'?'头像行 avatar-offset-x/down':'记牌行 counter.offset-x / offset-down'});Object.entries(boxes).forEach(([kind,b])=>{if(!b)return;const names={avatar:'头像行',card:'牌行',counter:'记牌行'},name=names[kind];if(b.x<0)layoutWarnings.push(name+' 越出屏幕左边界（x='+Math.round(b.x)+'）');if(b.y<0)layoutWarnings.push(name+' 越出屏幕上边界（y='+Math.round(b.y)+'）');if(b.x+b.w>v.width)layoutWarnings.push(name+' 越出屏幕右边界（x+w='+Math.round(b.x+b.w)+' > '+v.width+'）');if(b.y+b.h>v.height)layoutWarnings.push(name+' 越出屏幕下边界（y+h='+Math.round(b.y+b.h)+' > '+v.height+'）')});staticCards(staticLayer('card'),r);staticAvatars(staticLayer('avatar'),r,vals);staticCounter(staticLayer('counter'),r,vals);updateCoordPanel()}
             function scheduleRender(){if(renderQueued)return;renderQueued=true;renderFrame=requestAnimationFrame(()=>{renderFrame=0;renderQueued=false;if(dragging||resizing||panning){pendingStaticRender=true;return}renderPreview();renderWarnings()})}
             function flushStaticRender(){if(renderFrame){cancelAnimationFrame(renderFrame);renderFrame=0}renderQueued=false;pendingStaticRender=false;renderPreview();renderWarnings();setDirtyPrompt()}
             function applyScreenTransform(){const z=screenZoom();screen.style.setProperty('--screen-zoom',z);screen.style.setProperty('--view-pan-x',cssPx(viewPanX)+'px');screen.style.setProperty('--view-pan-y',cssPx(viewPanY)+'px');screen.style.left='50%';screen.style.top='50%'}

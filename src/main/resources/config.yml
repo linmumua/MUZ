@@ -432,22 +432,17 @@ debug:
   web-ui:
     # Debug Web 调试面板。开启后只在服务端本机回环地址监听 port 端口，
     # 可通过 http://127.0.0.1:<port> 或 http://localhost:<port> 打开可编辑 HUD 配置页。
-    # 页面可改这些运行期字段（共 22 个）：trick-hud.enabled/avatar-scale/avatar-gap/card-step/card-height、
-    # trick-hud.offset-down/avatar-offset-down/offset-x/card-offset-x/avatar-offset-x、
-    # trick-hud.counter.enabled/scale/offset-down/gap/hide-exhausted/offset-x、
-    # hotbar-hud.scale/enabled/offset-x/offset-y。
-    # 不提供构建期 hotbar glyph-ascent/slot-count 等参数编辑。
-    # “保存并应用”按“异步 config I/O + 四层自有资源 → 主线程真实 CraftEngine reload →
+    # 页面只编辑 Trick HUD 三层的 18 个运行期字段：牌行、头像行与记牌器行。
+    # 已退役的三道具 Hotbar 不再出现在字段白名单、预览舞台或资源覆盖层中。
+    # “保存并应用”按“异步 config I/O + 三层自有资源 → 主线程真实 CraftEngine reload →
     # 异步 generateResourcePack 与实际 ZIP 字形/PNG 校验 → 主线程 markVerified/apply/snapshot”执行。
     # “重新读取配置”也走同一条 HUD 专用异步链路，只从磁盘重载，不调用完整 reloadVisualState，不重建牌桌，
     # 会丢弃页面上尚未保存的改动；启动、/muz reload 与 CraftEngine enable 的资源恢复不依赖 Web 开关。
-    # 空 patch 不触发资源流程；任一步失败都会清除 ready 并回滚四层自有资源与 HUD 配置。
+    # 空 patch 不触发资源流程；任一步失败都会清除 ready 并回滚三层自有资源与 HUD 配置。
     # 若检测到其它入口已改写 config.yml，则保留并发文件、跳过整文件回滚并记录警告；失败不返回成功。
     # 租约 120 秒只 abandon 本次结果，底层 raw 任务结束前不 cancel、不释放；客户端必须重下资源包才能看到 Y 变化。
     # Web 保存/重载共用配置锁，但该锁只覆盖 Web 自身边界，尚未统一其它旧配置入口的竞态。
-    # Hotbar 仅在 hotbar-hud.enabled=true、牌桌处于 GamePhase.PLAYING 正式出牌阶段、
-    # 且座位为在线真人时显示；LOBBY/BIDDING/DOUBLING/结算/离桌/停服/普通玩家保留原版 9 槽。
-    # 非 PLAYING 对局提示走普通 ActionBar；Debug Web 只负责定位参数，不替代游戏内 HUD 渲染。
+    # 对局普通提示继续走 ActionBarOverlayService，不依赖任何已退役 Hotbar 字形。
     # 【警告】不要在生产环境将此端口暴露到公网；仅用于本地调试。
     enabled: false
     # 监听端口。服务只绑定回环地址，外部机器不能直接访问。
@@ -588,55 +583,67 @@ player-options:
       spec: "type: play_sound; sound: minecraft:entity.player.levelup; volume: 0.35; pitch: 1.05; source: master"
 
 # ============================================================================
-# 三道具 HUD 与桌内互动（实验性功能）
+# 牌桌道具配置（桌内道具箱、实体语音面板与效果）
 # ============================================================================
-# 用 ActionBar 通道 + 独立透明字形渲染鸡蛋、水桶、番茄三个道具图标与选中高亮。
-# 每个图标盒为 20×22 像素，图标间隔 4 像素，总宽 68 像素，advance 为 69；
-# 默认基础 ascent 为 -43，按现代客户端 ActionBar 的 BitmapProvider 基线校准；offset-y=0 时三道具底部贴合逻辑屏幕底线。
-# 仅当 hotbar-hud.enabled=true、牌桌处于 GamePhase.PLAYING 正式出牌阶段、且座位为在线真人时显示；
-# 互动目标限同桌其他在线真人。机器人、旁观者、跨桌玩家和无效目标不参与。
-# 三道具叠加在原版 9 槽物品栏上方，不接 BetterHud，也不覆盖 minecraft 原版 hotbar sprite。
-# 所有非 PLAYING 阶段的对局提示直接走普通 ActionBar，游戏流程不受影响。
-hotbar-hud:
-  # 是否启用。false 时降级为普通 ActionBar（对局功能不受影响）。
-  # 【注意】启用后需要玩家重新下载包含三道具字形的资源包才能看到效果；资源包不会全局隐藏原版 hotbar。
-  enabled: false
-  # 三道具与选中高亮资源缩放档，只允许当前 muz-resource-profile.yml 已生成的档位；默认 profile 仅生成 100。
-  scale: 100
-  # 道具 HUD 水平偏移（像素，正数右移、负数左移）。
-  # 走 CraftEngine 负空格实现，【运行期即时生效】：/muz reload 或 Debug Web 保存后
-  # 下一次推送就能看到，不需要重新构建、不需要玩家重下资源包。
-  # 任意整数都合法，不依赖预生成字形。
-  offset-x: 0
-  # 道具 HUD 垂直偏移（像素，正数向下、负数向上），当前 100% 档连续范围 -299..512。
-  # 【与 offset-x 不同，这个不是即时的】：垂直位置由位图字形 ascent 与必要 padding PNG 决定，
-  # 而 ascent/PNG 烘焙在资源包里。Debug Web 会把这个值写入
-  # plugins/CraftEngine/resources/muz/configuration/images/hotbar_debug.yml，并与 Trick 三层
-  # 覆盖层一起异步写入、触发 CraftEngine 重载、重建并校验 ZIP；客户端必须重新下载资源包。
-  # 所以每改一次都要：写文件 → 重载 CE → 生成/校验资源包 → 客户端重新下载，才能看到效果。
-  # 图标可见高度仍为 22px；向上补透明行时 provider height 可能增加，但不得改变可见尺寸/advance。
-  offset-y: 0
-  # 图标字形的基础 ascent 约定，构建期烘焙进 CraftEngine bundle。
-  # 【当前运行期并不读取这个键】，它只记录 build.gradle.kts 与 PackAssets 的基础约定：
-  # hotbar 基础 ascent 为 -43；运行期四层覆盖层按 baseAscent-rawY 生成自己的声明与必要 PNG。
-  # 要在运行期调垂直位置请改上面的 offset-y 或 trick-hud 的连续 offset-down，不要改这里 ——
-  # 改这里不会有任何效果，真要动构建期烘焙值必须同步构建侧/运行期 alias/码位约定并重新构建资源包。
-  glyph-ascent: -43
-  # 图标数量（当前固定 3 个：鸡蛋、水桶、番茄）。
-  # 【当前运行期同样不读取这个键】，数量与图标盒几何由构建期资源和 PackAssets 共同决定：
-  # 每个图标盒 20×22px，图标间隔 4px，总宽 68px，advance=69；选中高亮复用 20×22 几何。
-  # 改这里不生效，不要作为普通配置项调整。
-  slot-count: 3
+# 旧 hotbar-hud 已退役：升级时只迁移其 interaction 叶子键，随后删除整段。
+# 音效暂复用现有 doudizhu.v1..v4，可替换为其它已注册声音键；本节不新增 OGG。
+table-gadgets:
   interaction:
-    # 是否启用桌内道具互动。关闭后不拦截换槽/右键，普通玩家操作保持原样。
+    # 是否启用桌内道具互动；关闭后不拦截换槽/右键。
     enabled: true
-    # 目标最大距离（方块），仅解析视线内同桌在线真人；必须为正数。
+    # 目标最大距离（方块），仅解析视线内同桌在线真人，范围 1.0..6.0。
     range: 6.0
-    # 两次投掷/使用之间的冷却 tick，40 tick 约为 2 秒；必须为非负整数。
+    # 两次投掷/使用之间的冷却 tick，范围 1..200。
     cooldown-ticks: 40
-    # 鸡蛋/番茄短暂无伤害投掷的飞行时长 tick；必须为正整数。
+    # 鸡蛋/番茄短暂无伤害投掷的飞行时长 tick，范围 1..40。
     flight-ticks: 10
-    # 水桶贴身透明水幕的持续时长 tick；必须为正整数。
+    # 水桶贴身透明水幕的持续时长 tick，范围 1..60。
     water-ticks: 16
-    # 同时活动的投掷/水幕效果上限；超过后拒绝新效果；必须为正整数。
+    # 同时活动的投掷/水幕效果上限，范围 1..64。
     max-active: 32
+  gui:
+    # 牌桌道具箱 GUI 标题与气泡入口显示名。
+    title: "桌内道具"
+    bubble-name: "语音"
+  panel:
+    # 是否允许气泡入口打开私有实体语音面板。
+    enabled: true
+    # 面板相对玩家视线的世界距离和垂直偏移，范围分别为 0.5..4.0、-2.0..2.0。
+    forward-offset: 1.5
+    vertical-offset: -0.35
+    # 每条文字面板的世界宽度、行高与行距。
+    width: 1.8
+    row-height: 0.32
+    row-gap: 0.08
+    # 最多显示条数、视线悬停扫描间隔和每位玩家的语音冷却。
+    max-entries: 8
+    hover-interval-ticks: 2
+    voice-cooldown-ticks: 40
+  voices:
+    enabled: true
+    # text 支持 {sender}/{target}；target 可取 actor、target、current-turn、table。
+    entries:
+      - id: wait
+        text: "快点吧，我等到花儿都谢了"
+        sound: doudizhu.v1
+        target: table
+        volume: 1.0
+        pitch: 1.0
+      - id: cooperate
+        text: "和你合作真是太愉快了"
+        sound: doudizhu.v2
+        target: table
+        volume: 1.0
+        pitch: 1.0
+      - id: praise
+        text: "你的牌打得也太好了"
+        sound: doudizhu.v3
+        target: table
+        volume: 1.0
+        pitch: 1.0
+      - id: urge
+        text: "{sender} 催促 {target} 尽快出牌"
+        sound: doudizhu.v4
+        target: current-turn
+        volume: 1.0
+        pitch: 1.0

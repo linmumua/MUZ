@@ -58,12 +58,6 @@ for (const resource of resources) {
   const size = pngSize(file);
   assert(size.width > 1 && size.height > 1, '禁止 1×1 假图：' + resource.texture);
 }
-const hotbarNames = ['hotbar_egg.png', 'hotbar_water.png', 'hotbar_tomato.png', 'hotbar_select.png'];
-for (const name of hotbarNames) {
-  const resource = resources.find(item => item.texture === 'muz:font/' + name);
-  assert(resource, '正式 manifest 缺少真实 Hotbar 资源：' + name);
-  assert.deepEqual(pngSize(realResourcePath(resource.texture)), {width: 20, height: 22}, 'Hotbar PNG 几何错误：' + name);
-}
 assert(fs.existsSync(backgroundPath), '真实世界背景不存在：' + backgroundPath);
 
 const server = http.createServer((req, res) => {
@@ -242,9 +236,8 @@ async function setIntegerField(page, key, value) {
     await page.goto(url, {waitUntil: 'networkidle0'});
     await page.waitForSelector('#screen .layer');
     await page.waitForFunction(() => {
-      const hotbar = document.querySelector('.layer[data-layer="hotbar"]');
-      const images = hotbar ? [...hotbar.querySelectorAll('img')] : [];
-      return images.length >= 4 && images.every(img => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
+      const layers = ['card', 'avatar', 'counter'];
+      return layers.every(kind => document.querySelector('.layer[data-layer="' + kind + '"]'));
     }, {timeout: 10000});
     assert.equal(errors.length, 0, '页面启动 JS 错误：' + errors.join(' | '));
 
@@ -281,21 +274,6 @@ async function setIntegerField(page, key, value) {
     const hudFilters = await page.evaluate(() => ({screen: getComputedStyle(document.querySelector('#screen')).filter, layer: getComputedStyle(document.querySelector('.layer')).filter}));
     assert.equal(hudFilters.screen, 'none', '背景 blur 不得作用于 HUD 逻辑舞台：' + JSON.stringify(hudFilters));
     assert.equal(hudFilters.layer, 'none', '背景 blur 不得作用于 HUD 图层：' + JSON.stringify(hudFilters));
-
-    const hotbarImages = await page.$$eval('.layer[data-layer="hotbar"] img', images => images.map(img => ({src: img.src, width: img.naturalWidth, height: img.naturalHeight, visible: img.getBoundingClientRect().width > 0 && img.getBoundingClientRect().height > 0 && getComputedStyle(img).display !== 'none' && getComputedStyle(img).visibility !== 'hidden' && Number(getComputedStyle(img).opacity) > 0})));
-    assert.equal(hotbarImages.length, 4, 'Hotbar 必须是三个道具加一个独立选中框：' + JSON.stringify(hotbarImages));
-    assert(hotbarImages.every(item => item.width === 20 && item.height === 22 && item.visible), '三个道具与选中框必须按真实 20×22 PNG 可见：' + JSON.stringify(hotbarImages));
-    const iconImages = hotbarImages.filter(item => /hotbar_(egg|water|tomato)\.png/.test(item.src));
-    assert.equal(iconImages.length, 3, 'Hotbar 必须包含鸡蛋、水桶、番茄真实资源：' + JSON.stringify(hotbarImages));
-    assert.equal(new Set(iconImages.map(item => item.src)).size, 3, '三个 Hotbar 图标不能复用同一 URL');
-    for (const item of iconImages) {
-      const alpha = await imageAlpha(page, item.src);
-      assert(alpha.nonTransparent > 3 && alpha.nonBlack > 3, 'Hotbar 真实 PNG 不得是透明/空假图：' + JSON.stringify({src: item.src, alpha}));
-    }
-    const selectImage = hotbarImages.find(item => /hotbar_select\.png/.test(item.src));
-    assert(selectImage, '缺少真实 hotbar_select.png');
-    const selectAlpha = await imageAlpha(page, selectImage.src);
-    assert(selectAlpha.nonTransparent > 3, '选中框真实 PNG 必须有可见 alpha：' + JSON.stringify(selectAlpha));
 
     // 槽原点可在屏外，只要真实头像仍在屏内，就不能把透明留白当作越界。
     const geo = apiState.snapshot.geometry;
@@ -337,8 +315,7 @@ async function setIntegerField(page, key, value) {
     drags.push(await dragLayer(page, 'card', 36, 18, 'trick-hud.card-offset-x', 'trick-hud.offset-down', true));
     drags.push(await dragLayer(page, 'avatar', 36, 18, 'trick-hud.avatar-offset-x', 'trick-hud.avatar-offset-down'));
     drags.push(await dragLayer(page, 'counter', 36, 18, 'trick-hud.counter.offset-x', 'trick-hud.counter.offset-down'));
-    drags.push(await dragLayer(page, 'hotbar', 36, 18, 'hotbar-hud.offset-x', 'hotbar-hud.offset-y'));
-    assert.equal(drags.length, 4, '牌行、头像、记牌、Hotbar 四层必须全部完成最终帧拖动');
+    assert.equal(drags.length, 3, '牌行、头像、记牌三层必须全部完成最终帧拖动');
 
     const scale3 = await screenScale(page);
     await page.$eval('#guiScale', el => { el.value = '2'; el.dispatchEvent(new Event('change', {bubbles: true})); });
@@ -376,7 +353,7 @@ async function setIntegerField(page, key, value) {
       await setIntegerField(page, key, valid);
     }
 
-    const continuousYKeys = ['trick-hud.offset-down', 'trick-hud.avatar-offset-down', 'trick-hud.counter.offset-down', 'hotbar-hud.offset-y'];
+    const continuousYKeys = ['trick-hud.offset-down', 'trick-hud.avatar-offset-down', 'trick-hud.counter.offset-down'];
     for (const key of continuousYKeys) {
       assert.equal((fieldOptions.get(key) || []).length, 0, '连续 Y 字段不得暴露离散 options：' + key);
     }
@@ -398,7 +375,6 @@ async function setIntegerField(page, key, value) {
     await setIntegerField(page, 'trick-hud.offset-down', 37);
     await setIntegerField(page, 'trick-hud.avatar-offset-down', 83);
     await setIntegerField(page, 'trick-hud.counter.offset-down', 157);
-    await setIntegerField(page, 'hotbar-hud.offset-y', -20);
     const requestCountBeforeSave = saveRequests.length;
     await page.$eval('#save', el => el.click());
     await page.waitForFunction(() => document.querySelector('#status')?.classList.contains('ok'), {timeout: 5000});
@@ -407,8 +383,7 @@ async function setIntegerField(page, key, value) {
     for (const [key, value] of Object.entries({
       'trick-hud.offset-down': 37,
       'trick-hud.avatar-offset-down': 83,
-      'trick-hud.counter.offset-down': 157,
-      'hotbar-hud.offset-y': -20
+      'trick-hud.counter.offset-down': 157
     })) {
       assert.equal(saved[key], value, '保存 patch 必须保留原始连续整数：' + key);
     }
