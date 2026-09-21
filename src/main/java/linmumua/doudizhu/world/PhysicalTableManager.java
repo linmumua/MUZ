@@ -1290,8 +1290,13 @@ public final class PhysicalTableManager {
                         plugin.getHandGuiService().openSettings(player);
                         hint(player, "你的个人设置菜单开好了。", NamedTextColor.GREEN);
                     }
-                    // 该 getter/GUI 由集成侧提供；世界侧只负责在命中私人按钮后打开。
-                    case GADGET -> plugin.getTableGadgetGuiService().open(player);
+                    // 道具栏已改为牌桌内屏幕额外栏；这里仅刷新数据，不再打开九格 Inventory GUI。
+                    case GADGET -> {
+                        if (plugin.getTableGadgetBarHudService() != null) {
+                            plugin.getTableGadgetBarHudService().refresh(player.getUniqueId());
+                        }
+                        hint(player, "牌桌额外道具栏已显示。", NamedTextColor.GREEN);
+                    }
                     case BID_0 -> table.bid(player, 0);
                     case BID_1 -> table.bid(player, 1);
                     case BID_2 -> table.bid(player, 2);

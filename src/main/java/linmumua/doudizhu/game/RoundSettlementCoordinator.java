@@ -18,6 +18,11 @@ final class RoundSettlementCoordinator {
         int seatPairFactor(UUID seat);
         void applyTotalScoreDelta(UUID playerId, int delta);
         boolean isBot(UUID playerId);
+        default boolean economyFingerprintMatches() {
+            return true;
+        }
+        default void notifySettlementFailure(String message) {
+        }
     }
 
     record RoundSettlement(
@@ -33,8 +38,7 @@ final class RoundSettlementCoordinator {
             }
             int scoreDelta = scoreDeltas.getOrDefault(playerId, 0);
             if (plugin.isChipPaymentEnabled()) {
-                double chipDelta = Math.round(scoreDelta * plugin.roomMultiplier(roomLevel));
-                return new DoudizhuPlugin.SettlementResult(chipDelta, 0.0, 0.0, false, false, "筹码");
+                return plugin.failedChipSettlement();
             }
             if (plugin.isDoudizhuRoomEconomyEnabled(roomLevel)) {
                 double currencyDelta = scoreDelta * plugin.doudizhuCurrencyPerPoint(roomLevel);
@@ -63,6 +67,9 @@ final class RoundSettlementCoordinator {
     RoundSettlement settle(UUID winner) {
         UUID landlord = support.landlord();
         boolean landlordWin = Objects.equals(winner, landlord);
+        if (!support.economyFingerprintMatches()) {
+            throw new IllegalStateException("本局经济配置已变化，拒绝结算以避免错扣或错付。");
+        }
         List<UUID> winningSeats = landlordWin
             ? List.of(landlord)
             : support.seats().stream().filter(seat -> !Objects.equals(seat, landlord)).toList();
@@ -79,26 +86,25 @@ final class RoundSettlementCoordinator {
                 if (Objects.equals(seat, landlord)) {
                     continue;
                 }
-                int loss = roundScore * support.seatPairFactor(seat);
-                landlordGain += loss;
+                int loss = Math.multiplyExact(roundScore, support.seatPairFactor(seat));
+                landlordGain = Math.addExact(landlordGain, loss);
                 scoreDeltas.put(seat, -loss);
-                support.applyTotalScoreDelta(seat, -loss);
             }
             scoreDeltas.put(landlord, landlordGain);
-            support.applyTotalScoreDelta(landlord, landlordGain);
         } else {
             int landlordLoss = 0;
             for (UUID seat : support.seats()) {
                 if (Objects.equals(seat, landlord)) {
                     continue;
                 }
-                int gain = roundScore * support.seatPairFactor(seat);
-                landlordLoss += gain;
+                int gain = Math.multiplyExact(roundScore, support.seatPairFactor(seat));
+                landlordLoss = Math.addExact(landlordLoss, gain);
                 scoreDeltas.put(seat, gain);
-                support.applyTotalScoreDelta(seat, gain);
             }
             scoreDeltas.put(landlord, -landlordLoss);
-            support.applyTotalScoreDelta(landlord, -landlordLoss);
+        }
+        for (Map.Entry<UUID, Integer> entry : scoreDeltas.entrySet()) {
+            support.applyTotalScoreDelta(entry.getKey(), entry.getValue());
         }
         return new RoundSettlement(winningSeats, landlordWin, scoreDeltas, settleEconomy(scoreDeltas));
     }
@@ -109,7 +115,10 @@ final class RoundSettlementCoordinator {
             return settlementSnapshots;
         }
         DoudizhuPlugin plugin = support.plugin();
-        if (!plugin.isDoudizhuRoomEconomyEnabled(support.roomLevel()) && !plugin.isChipPaymentEnabled()) {
+        if (plugin.isChipPaymentEnabled()) {
+            return settlePhysicalChips(scoreDeltas, plugin);
+        }
+        if (!plugin.isDoudizhuRoomEconomyEnabled(support.roomLevel())) {
             return settlementSnapshots;
         }
         for (Map.Entry<UUID, Integer> entry : scoreDeltas.entrySet()) {
@@ -141,5 +150,37 @@ final class RoundSettlementCoordinator {
             }
         }
         return settlementSnapshots;
+    }
+
+    private Map<UUID, DoudizhuPlugin.SettlementResult> settlePhysicalChips(
+        Map<UUID, Integer> scoreDeltas,
+        DoudizhuPlugin plugin
+    ) {
+        Map<UUID, DoudizhuPlugin.SettlementResult> snapshots = new LinkedHashMap<>();
+        try {
+            snapshots.putAll(plugin.settlePhysicalChips(support.roomLevel(), scoreDeltas));
+            return snapshots;
+        } catch (RuntimeException exception) {
+            String message = "实体筹码整局结算未完成，请核查日志与库存。场次="
+                + (support.roomLevel() == null ? "无" : support.roomLevel().key());
+            plugin.getLogger().log(java.util.logging.Level.SEVERE, message, exception);
+            support.notifySettlementFailure(message + " 原因=" + exception.getMessage());
+            for (UUID playerId : scoreDeltas.keySet()) {
+                if (support.isBot(playerId)) {
+                    continue;
+                }
+                try {
+                    snapshots.put(playerId, plugin.failedChipSettlement());
+                } catch (RuntimeException balanceFailure) {
+                    plugin.getLogger().log(
+                        java.util.logging.Level.SEVERE,
+                        "实体筹码失败后读取余额也失败。玩家=" + playerId,
+                        balanceFailure
+                    );
+                    snapshots.put(playerId, plugin.failedChipSettlement());
+                }
+            }
+            return snapshots;
+        }
     }
 }

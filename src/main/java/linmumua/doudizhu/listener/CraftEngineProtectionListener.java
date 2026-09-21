@@ -159,8 +159,12 @@ public final class CraftEngineProtectionListener implements Listener {
 
     /** 只有命中语音面板时才消费右键；未命中必须继续手牌/道具路由。 */
     private boolean tryOpenSpeechPanel(Player player) {
-        return plugin.getTableSpeechPanelService() != null
-            && plugin.getTableSpeechPanelService().tryHandleRightClick(player);
+        if (plugin.getTableSpeechPanelService() != null
+            && plugin.getTableSpeechPanelService().tryHandleRightClick(player)) {
+            return true;
+        }
+        return plugin.getTableGadgetBarHudService() != null
+            && plugin.getTableGadgetBarHudService().tryOpenVoice(player);
     }
 
     /** CE 发包家具没有 Bukkit 实体事件，右键道具必须在 FurnitureInteractEvent 路由。 */

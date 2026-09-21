@@ -8,7 +8,9 @@ import linmumua.doudizhu.model.DoudizhuCard;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.inventory.ItemStack;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -280,7 +282,26 @@ public final class PackAssets {
     public static final int MAX_TRICK_OFFSET = 512;
     public static final int MAX_HOTBAR_OFFSET_Y = MAX_TRICK_OFFSET;
 
+    /** 已退役 Hotbar 字体名，仅为旧源码/二进制兼容保留，正式运行期不得依赖。 */
+    @Deprecated
     public static final String HOTBAR_HUD_FONT = "minecraft:muz_hotbar";
+
+    /**
+     * 桌内九格 MUZ 自有图标栏字体；与 build.gradle.kts 的 gadgetBarFont 同源。
+     * 旧 HOTBAR_HUD_FONT 仅保留为兼容常量，正式桌内道具栏不得依赖它。
+     */
+    public static final String GADGET_BAR_FONT = PackTiers.GADGET_BAR_FONT;
+    public static final int GADGET_BAR_BASE_CODEPOINT = PackTiers.GADGET_BAR_BASE_CODEPOINT;
+    public static final int GADGET_BAR_SELECT_CODEPOINT = PackTiers.GADGET_BAR_SELECT_CODEPOINT;
+    public static final int GADGET_BAR_ICON_CODEPOINT_START = PackTiers.GADGET_BAR_ICON_CODEPOINT_START;
+    public static final int GADGET_BAR_SLOT_COUNT = PackTiers.GADGET_BAR_SLOT_COUNT;
+    public static final int GADGET_BAR_CELL_WIDTH = PackTiers.GADGET_BAR_CELL_WIDTH;
+    public static final int GADGET_BAR_CELL_HEIGHT = PackTiers.GADGET_BAR_CELL_HEIGHT;
+    public static final int GADGET_BAR_CELL_ADVANCE = PackTiers.GADGET_BAR_CELL_ADVANCE;
+    public static final int GADGET_BAR_ICON_WIDTH = PackTiers.GADGET_BAR_ICON_WIDTH;
+    public static final int GADGET_BAR_ICON_HEIGHT = PackTiers.GADGET_BAR_ICON_HEIGHT;
+    public static final int GADGET_BAR_ICON_ADVANCE = PackTiers.GADGET_BAR_ICON_ADVANCE;
+    public static final int GADGET_BAR_ICON_KIND_COUNT = PackTiers.GADGET_BAR_ICON_KIND_COUNT + 1;
 
     /** 旧九槽底图码位，仅为二进制兼容保留；新资源不再声明或发布此码位。 */
     @Deprecated
@@ -962,6 +983,57 @@ public final class PackAssets {
 
     public static CounterTier counterGeometry(int scale, int downTier) {
         return counterTier(scale, downTier);
+    }
+
+    /** 桌内九格图标栏的图标种类：空槽、鸡蛋、水桶、番茄、语音。 */
+    public static final int GADGET_BAR_EMPTY = 0;
+    public static final int GADGET_BAR_EGG = 1;
+    public static final int GADGET_BAR_WATER = 2;
+    public static final int GADGET_BAR_TOMATO = 3;
+    public static final int GADGET_BAR_SPEECH = 4;
+
+    /** 返回桌内九格栏底图字形片段。 */
+    public static String gadgetBarBaseGlyphText() {
+        return gadgetBarGlyphText(GADGET_BAR_BASE_CODEPOINT);
+    }
+
+    /** 返回桌内九格栏选框字形片段。 */
+    public static String gadgetBarSelectGlyphText() {
+        return gadgetBarGlyphText(GADGET_BAR_SELECT_CODEPOINT);
+    }
+
+    /** 返回指定真实物品图标字形片段；空槽不叠加图标。 */
+    public static String gadgetBarIconGlyphText(int kind) {
+        if (kind <= GADGET_BAR_EMPTY || kind >= GADGET_BAR_ICON_KIND_COUNT) {
+            throw new IllegalArgumentException("gadget bar 图标种类超出范围：" + kind);
+        }
+        return gadgetBarGlyphText(GADGET_BAR_ICON_CODEPOINT_START + kind - 1);
+    }
+
+    private static String gadgetBarGlyphText(int codepoint) {
+        return "<font:" + GADGET_BAR_FONT + ">"
+            + new String(Character.toChars(codepoint)) + "</font>";
+    }
+
+    /**
+     * 将虚拟栏 ItemStack 映射为构建期真实图标种类。
+     * 未知自定义物品使用空槽图标，避免冒充错误的客户端纹理；桌内可执行道具只有三类。
+     */
+    public static int gadgetBarKind(ItemStack item) {
+        if (item == null || item.getType().isAir()) {
+            return GADGET_BAR_EMPTY;
+        }
+        if (item.getType() == Material.EGG) {
+            return GADGET_BAR_EGG;
+        }
+        if (item.getType() == Material.WATER_BUCKET) {
+            return GADGET_BAR_WATER;
+        }
+        if (item.hasItemMeta() && item.getItemMeta().hasItemModel()
+            && "muz:table_gadget_tomato".equals(item.getItemMeta().getItemModel().toString())) {
+            return GADGET_BAR_TOMATO;
+        }
+        return GADGET_BAR_EMPTY;
     }
 
     /** hotbar 指定 scale 的字体名；75/125 与默认档隔离在独立字体中。 */

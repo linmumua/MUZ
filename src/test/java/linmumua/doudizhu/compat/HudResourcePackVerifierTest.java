@@ -264,6 +264,31 @@ class HudResourcePackVerifierTest {
     }
 
     @Test
+    void 根目录连续字体且无overlays声明可通过() throws IOException {
+        HudResourceRequest request = request(37, 37, 37);
+        Path source = writeContinuousPack(temporaryDirectory.resolve("continuous-root-only-source.zip"), request,
+            ContinuousMutation.NONE);
+        Path root = rewriteContinuousPackToRootWithoutOverlays(
+            temporaryDirectory.resolve("continuous-root-only.zip"), source);
+
+        assertDoesNotThrow(() -> verifier().verify(root, request));
+
+        Path wrongAscentSource = writeContinuousPack(
+            temporaryDirectory.resolve("continuous-root-only-wrong-ascent-source.zip"), request,
+            ContinuousMutation.ASCENT);
+        Path wrongAscent = rewriteContinuousPackToRootWithoutOverlays(
+            temporaryDirectory.resolve("continuous-root-only-wrong-ascent.zip"), wrongAscentSource);
+        assertThrows(IOException.class, () -> verifier().verify(wrongAscent, request));
+
+        Path missingSource = writeContinuousPack(
+            temporaryDirectory.resolve("continuous-root-only-missing-source.zip"), request,
+            ContinuousMutation.DROP_LAYER);
+        Path missing = rewriteContinuousPackToRootWithoutOverlays(
+            temporaryDirectory.resolve("continuous-root-only-missing.zip"), missingSource);
+        assertThrows(IOException.class, () -> verifier().verify(missing, request));
+    }
+
+    @Test
     void 根目录连续字体可通过且重复路径被拒绝() throws IOException {
         HudResourceRequest request = request(37, 37, 37);
         Path source = writeContinuousPack(temporaryDirectory.resolve("continuous-root-source.zip"), request,
@@ -279,6 +304,26 @@ class HudResourcePackVerifierTest {
         IOException failure = assertThrows(IOException.class, () -> verifier().verify(duplicate, request));
         assertTrue(failure.getMessage().contains("同时存在") || failure.getMessage().contains("重复"),
             failure.getMessage());
+    }
+
+    @Test
+    void 根目录连续字体的额外资源与未声明目录被拒绝() throws IOException {
+        HudResourceRequest request = request(37, 37, 37);
+        Path source = writeContinuousPack(temporaryDirectory.resolve("continuous-root-extra-source.zip"), request,
+            ContinuousMutation.NONE);
+        Path rootExtra = rewriteContinuousPackToRootWithoutOverlays(
+            temporaryDirectory.resolve("continuous-root-extra.zip"), source,
+            Map.of("assets/minecraft/font/muz_counter_continuous_extra.json", "{}"
+                .getBytes(StandardCharsets.UTF_8)));
+        IOException extraFailure = assertThrows(IOException.class, () -> verifier().verify(rootExtra, request));
+        assertTrue(extraFailure.getMessage().contains("未声明"), extraFailure.getMessage());
+
+        Path undeclaredDirectory = rewriteZip(temporaryDirectory.resolve("continuous-undeclared-dir.zip"), source,
+            Map.of(), Map.of("rogue/assets/minecraft/font/muz_counter_continuous.json",
+                "{\"providers\":[]}".getBytes(StandardCharsets.UTF_8)));
+        IOException directoryFailure = assertThrows(IOException.class,
+            () -> verifier().verify(undeclaredDirectory, request));
+        assertTrue(directoryFailure.getMessage().contains("未声明目录"), directoryFailure.getMessage());
     }
 
     @Test
@@ -719,6 +764,46 @@ class HudResourcePackVerifierTest {
             for (Map.Entry<String, byte[]> addition : additions.entrySet()) {
                 if (!added.add(addition.getKey())) {
                     throw new IOException("测试 ZIP 新增条目重复：" + addition.getKey());
+                }
+                addStored(output, addition.getKey(), addition.getValue());
+            }
+        }
+        return target;
+    }
+
+    private Path rewriteContinuousPackToRootWithoutOverlays(Path target, Path source) throws IOException {
+        return rewriteContinuousPackToRootWithoutOverlays(target, source, Map.of());
+    }
+
+    private Path rewriteContinuousPackToRootWithoutOverlays(Path target, Path source,
+                                                             Map<String, byte[]> additions) throws IOException {
+        Set<String> added = new HashSet<>();
+        try (ZipFile input = new ZipFile(source.toFile());
+             ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(target))) {
+            var entries = input.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String original = entry.getName();
+                String destination;
+                byte[] bytes = input.getInputStream(entry).readAllBytes();
+                if (PACK_META.equals(original)) {
+                    destination = original;
+                    bytes = ("{\"pack\":{\"description\":{\"color\":\"gray\",\"text\":\"CraftEngine ResourcePack\"},"
+                        + "\"min_format\":[84,0],\"max_format\":[88,0]}}")
+                        .getBytes(StandardCharsets.UTF_8);
+                } else if (original.startsWith("continuous/")) {
+                    destination = original.substring("continuous/".length());
+                } else {
+                    destination = original;
+                }
+                if (!added.add(destination)) {
+                    throw new IOException("测试 ZIP 根目录转换后条目重复：" + destination);
+                }
+                addStored(output, destination, bytes);
+            }
+            for (Map.Entry<String, byte[]> addition : additions.entrySet()) {
+                if (!added.add(addition.getKey())) {
+                    throw new IOException("测试 ZIP 根目录新增条目重复：" + addition.getKey());
                 }
                 addStored(output, addition.getKey(), addition.getValue());
             }

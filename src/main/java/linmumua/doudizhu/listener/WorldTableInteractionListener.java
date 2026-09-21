@@ -80,8 +80,12 @@ public final class WorldTableInteractionListener implements Listener {
 
     /** 只有命中语音面板时才消费右键；未命中必须放行到后续手牌/保护路由。 */
     private boolean tryOpenSpeechPanel(Player player) {
-        return plugin.getTableSpeechPanelService() != null
-            && plugin.getTableSpeechPanelService().tryHandleRightClick(player);
+        if (plugin.getTableSpeechPanelService() != null
+            && plugin.getTableSpeechPanelService().tryHandleRightClick(player)) {
+            return true;
+        }
+        return plugin.getTableGadgetBarHudService() != null
+            && plugin.getTableGadgetBarHudService().tryOpenVoice(player);
     }
 
     /** 只有确定性路由的所有更高优先级处理都未消费时，才尝试桌内虚拟道具。 */

@@ -85,6 +85,54 @@ class CraftEngineBundleResourcesTest {
     }
 
     @Test
+    void gadgetBarUsesIndependentMuzGlyphFamilyAndRealSlotPngs() throws IOException {
+        Map<String, Map<String, String>> entries = glyphEntries();
+        assertEquals(6, entries.entrySet().stream()
+            .filter(entry -> entry.getKey().startsWith("gadget_bar_"))
+            .count(), "九格栏必须有底图、选框和四类真实图标分层字形");
+        assertEquals("minecraft:muz_gadget_bar", PackAssets.GADGET_BAR_FONT);
+        assertEquals(9, PackAssets.GADGET_BAR_SLOT_COUNT);
+        assertEquals(22, PackAssets.GADGET_BAR_CELL_WIDTH);
+        assertEquals(22, PackAssets.GADGET_BAR_CELL_HEIGHT);
+        assertEquals("\\u" + String.format("%04x", PackAssets.GADGET_BAR_BASE_CODEPOINT),
+            entries.get("gadget_bar_base").get("char"));
+        assertEquals("\\u" + String.format("%04x", PackAssets.GADGET_BAR_SELECT_CODEPOINT),
+            entries.get("gadget_bar_select").get("char"));
+        String[] kinds = {"egg", "water", "tomato", "speech"};
+        for (int index = 0; index < kinds.length; index++) {
+            String name = "gadget_bar_" + kinds[index];
+            Map<String, String> glyph = entries.get(name);
+            assertNotNull(glyph, "缺少九格图标声明：" + name);
+            assertEquals("\\u" + String.format("%04x", PackAssets.GADGET_BAR_ICON_CODEPOINT_START + index),
+                glyph.get("char"));
+        }
+        for (String name : new String[] {"gadget_bar_base", "gadget_bar_select", "gadget_bar_egg",
+            "gadget_bar_water", "gadget_bar_tomato", "gadget_bar_speech"}) {
+            Map<String, String> glyph = entries.get(name);
+            assertNotNull(glyph, "缺少九格字形声明：" + name);
+            assertEquals(PackAssets.GADGET_BAR_FONT, glyph.get("font"));
+            assertEquals("22", glyph.get("height"));
+            assertEquals("22", glyph.get("ascent"));
+            String file = glyph.get("file");
+            assertNotNull(file);
+            BufferedImage image = readImage("craftengine/muz/resourcepack/assets/muz/textures/font/"
+                + file.substring("muz:font/".length()));
+            assertEquals(22, image.getWidth(), name + " 宽度必须为 22");
+            assertEquals(22, image.getHeight(), name + " 高度必须为 22");
+            boolean opaque = false;
+            for (int y = 0; y < image.getHeight(); y++) {
+                for (int x = 0; x < image.getWidth(); x++) {
+                    opaque |= ((image.getRGB(x, y) >>> 24) & 0xFF) > 0;
+                }
+            }
+            assertTrue(opaque, name + " 必须包含真实可见像素");
+        }
+        assertTrue(entries.values().stream().noneMatch(fields ->
+            "minecraft:muz_hotbar".equals(fields.get("font"))
+                && fields.get("char") != null), "九格栏不得依赖退役 Hotbar 字体声明");
+    }
+
+    @Test
     void generatedCraftEngineCardsConfigContainsCardItems() throws IOException {
         String cards = read("craftengine/muz/configuration/items/doudizhu/cards.yml");
         String categories = read("craftengine/muz/configuration/categories.yml");

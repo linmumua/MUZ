@@ -34,6 +34,18 @@ public final class MuzYamlConfig {
         reload();
     }
 
+    /** 只读预览严格解析：损坏文件直接报错，不隔离、重命名或补写玩家数据。 */
+    public static Map<String, Object> readOnlyRoot(Path file) {
+        if (!Files.exists(file)) {
+            return Map.of();
+        }
+        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            return normalizeRoot(createYaml().load(reader));
+        } catch (IOException | YAMLException exception) {
+            throw new IllegalStateException("读取只读 YAML 失败: " + file, exception);
+        }
+    }
+
     public static MuzYamlConfig empty(Path file) {
         MuzYamlConfig config = new MuzYamlConfig(file);
         config.root = new LinkedHashMap<>();

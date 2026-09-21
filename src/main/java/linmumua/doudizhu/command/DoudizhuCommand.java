@@ -7,7 +7,6 @@ import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.ui.MuzTheme;
-import linmumua.doudizhu.world.PhysicalTableManager;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -96,24 +95,33 @@ public final class DoudizhuCommand implements TabExecutor {
                                 throw new IllegalStateException("先把你想当作筹码的物品拿到主手。");
                             }
                             plugin.setChipPaymentItem(player.getInventory().getItemInMainHand());
-                            sender.sendMessage(message("主手物品已经设成全局筹码外观。", NamedTextColor.GREEN));
+                            sender.sendMessage(message("主手物品已保存为实体筹码匹配模板；不会自动兑换或发放物品。", NamedTextColor.GREEN));
                         }
                         case "resetitem" -> {
                             plugin.setChipPaymentItem(null);
-                            sender.sendMessage(message("筹码外观已经恢复默认。", NamedTextColor.YELLOW));
+                            sender.sendMessage(message("实体筹码匹配模板已恢复默认；不会改变已有物品。", NamedTextColor.YELLOW));
                         }
                         case "balance" -> {
                             requireArgs(args, 3, "/muz chip balance <玩家> [数量]");
-                            Player target = Bukkit.getPlayerExact(args[2]);
-                            if (target == null) {
-                                throw new IllegalArgumentException("目标玩家必须在线。");
+                            org.bukkit.OfflinePlayer target = Bukkit.getOfflinePlayer(args[2]);
+                            if (target == null || !target.isOnline()) {
+                                throw new IllegalStateException("目标玩家必须在线，离线玩家不能操作实体筹码。");
                             }
+                            String targetName = target.getName() == null ? args[2] : target.getName();
                             if (args.length >= 4) {
-                                int amount = Integer.parseInt(args[3]);
-                                plugin.setChipBalance(target.getUniqueId(), amount);
-                                sender.sendMessage(message(target.getName() + " 的筹码现在是 " + amount + "。", NamedTextColor.GREEN));
+                                int amount;
+                                try {
+                                    amount = Integer.parseInt(args[3]);
+                                } catch (NumberFormatException exception) {
+                                    throw new IllegalArgumentException("筹码数量必须是非负整数。", exception);
+                                }
+                                if (amount < 0) {
+                                    throw new IllegalArgumentException("筹码数量不能为负数。");
+                                }
+                                int actual = plugin.setChipBalance(target.getUniqueId(), amount);
+                                sender.sendMessage(message(targetName + " 的筹码现在是 " + actual + "。", NamedTextColor.GREEN));
                             } else {
-                                sender.sendMessage(message(target.getName() + " 当前有 " + plugin.getChipBalance(target.getUniqueId()) + " 筹码。", NamedTextColor.GOLD));
+                                sender.sendMessage(message(targetName + " 当前有 " + plugin.getChipBalance(target.getUniqueId()) + " 筹码。", NamedTextColor.GOLD));
                             }
                         }
                         default -> throw new IllegalArgumentException("用法: /muz chip <mode|setitem|resetitem|balance> ...");
@@ -290,23 +298,9 @@ public final class DoudizhuCommand implements TabExecutor {
                     if (!sender.hasPermission("muz.admin")) {
                         throw new IllegalStateException("这个命令需要管理员权限。");
                     }
-                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox|trace|web> ...");
+                    requireArgs(args, 2, "/muz debug <add|remove|bot|hitbox|web> ...");
                     if (args[1].equalsIgnoreCase("bot")) {
                         handleDebugBot(sender, args);
-                        return true;
-                    }
-                    if (args[1].equalsIgnoreCase("trace")) {
-                        Player viewer = requirePlayer(sender);
-                        boolean enabled = plugin.getPhysicalTableManager().toggleHandCardTrace(viewer);
-                        sender.sendMessage(enabled
-                            ? message("已开启手牌点击链路追踪。每次点牌会在聊天栏输出 [trace] 一行，"
-                                + "按方法名和关键值定位断点。只发给你自己，控制台不写。"
-                                + "同一份内容（纯文本、带时间戳）也会写进 "
-                                + PhysicalTableManager.TRACE_LOG_RELATIVE_PATH + "，可直接取文件排查。",
-                                NamedTextColor.GREEN)
-                            : message("已关闭手牌点击链路追踪。已写入的内容都已落盘，见 "
-                                + PhysicalTableManager.TRACE_LOG_RELATIVE_PATH + "。",
-                                NamedTextColor.YELLOW));
                         return true;
                     }
                     if (args[1].equalsIgnoreCase("hitbox")) {
@@ -341,13 +335,14 @@ public final class DoudizhuCommand implements TabExecutor {
                         int removed = removeDebugTables(player, args.length >= 3 ? args[2] : "1");
                         sender.sendMessage(message("已经移除了 " + removed + " 张观察桌。", NamedTextColor.YELLOW));
                     } else {
-                        throw new IllegalArgumentException("用法: /muz debug <add|remove|bot|hitbox|trace|web> ...");
+                        throw new IllegalArgumentException("用法: /muz debug <add|remove|bot|hitbox|web> ...");
                     }
                 }
                 default -> help(sender);
             }
-        } catch (RuntimeException exception) {
-            sender.sendMessage(message(exception.getMessage(), NamedTextColor.RED));
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            String detail = exception.getMessage();
+            sender.sendMessage(message(detail == null || detail.isBlank() ? "筹码操作失败。" : detail, NamedTextColor.RED));
         }
         return true;
     }
@@ -385,7 +380,7 @@ public final class DoudizhuCommand implements TabExecutor {
             return filter(List.of("remove"), args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("debug")) {
-            return filter(List.of("add", "remove", "bot", "hitbox", "trace", "web"), args[1]);
+            return filter(List.of("add", "remove", "bot", "hitbox", "web"), args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("debug") && args[1].equalsIgnoreCase("remove")) {
             return filter(List.of("1", "5", "10", "20", "50", "all"), args[2]);
@@ -459,8 +454,8 @@ public final class DoudizhuCommand implements TabExecutor {
         lines.add("/muz set <牌桌id> <high|mid|low|fun> - 修改牌桌场次倍率");
         lines.add("/muz history [玩家] [页码] - 查看玩家历史战绩");
         lines.add("/muz chip mode <gold|chip> - 切换全局金币/筹码支付");
-        lines.add("/muz chip setitem - 把主手物品设为全局筹码");
-        lines.add("/muz chip balance <玩家> [数量] - 查看或设置玩家筹码");
+        lines.add("/muz chip setitem - 保存主手物品为实体筹码匹配模板，不自动兑换或发放");
+        lines.add("/muz chip balance <玩家> [数量] - 查看或设置在线玩家的非负筹码余额");
         lines.add("/muz remove <牌桌名> - 移除实体牌桌");
         lines.add("/muz bot <add|remove> [名字|数字id] - 添加机器人，或按数字 id 移除");
         lines.add("/muz list - 查看当前牌桌");

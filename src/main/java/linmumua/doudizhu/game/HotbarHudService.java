@@ -5,12 +5,12 @@ import linmumua.doudizhu.assets.HotbarFontMetrics;
 import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -52,7 +52,10 @@ public final class HotbarHudService {
     private final Map<String, Long> diagnosticLogAt = new HashMap<>();
 
     /** 周期任务引用，{@code null} 表示尚未启动或已停止。 */
-    private BukkitTask task;
+    private MuzScheduler.TaskHandle task;
+
+    /** 周期调度入口由构造器注入，业务层不直接接触 Bukkit 定时器 API。 */
+    private final MuzScheduler scheduler;
 
     /**
      * 上一轮 tick 实际收到过自定义三道具 HUD 的玩家。
@@ -115,7 +118,7 @@ public final class HotbarHudService {
     private int pendingHeldSlot;
 
     public HotbarHudService(DoudizhuPlugin plugin, CraftEngineOffsetService offsetService) {
-        this(plugin, offsetService, new ActionBarOverlayService(plugin));
+        this(plugin, offsetService, new ActionBarOverlayService(plugin), plugin.scheduler());
     }
 
     public HotbarHudService(
@@ -123,11 +126,24 @@ public final class HotbarHudService {
         CraftEngineOffsetService offsetService,
         ActionBarOverlayService actionBarOverlay
     ) {
-        this.plugin = plugin;
-        this.offsetService = offsetService;
+        this(plugin, offsetService, actionBarOverlay, plugin.scheduler());
+    }
+
+    /**
+     * 测试及装配入口：周期任务通过注入的调度器创建，服务本身不直接调用 Bukkit 定时器。
+     */
+    public HotbarHudService(
+        DoudizhuPlugin plugin,
+        CraftEngineOffsetService offsetService,
+        ActionBarOverlayService actionBarOverlay,
+        MuzScheduler scheduler
+    ) {
+        this.plugin = java.util.Objects.requireNonNull(plugin, "plugin");
+        this.offsetService = java.util.Objects.requireNonNull(offsetService, "offsetService");
         this.actionBarOverlay = actionBarOverlay == null
             ? new ActionBarOverlayService(plugin)
             : actionBarOverlay;
+        this.scheduler = java.util.Objects.requireNonNull(scheduler, "scheduler");
     }
 
     /** 兼容主类装配及牌桌路由共用的普通 ActionBar 服务。 */
@@ -272,7 +288,7 @@ public final class HotbarHudService {
         if (task != null) {
             return;
         }
-        task = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 2L, 2L);
+        task = scheduler.runTimer(2L, 2L, this::tick);
     }
 
     /**

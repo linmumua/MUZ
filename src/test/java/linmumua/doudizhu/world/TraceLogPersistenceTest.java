@@ -152,18 +152,20 @@ class TraceLogPersistenceTest {
     }
 
     /**
-     * 开关提示必须告诉玩家文件在哪。
+     * trace 命令退役后不再显示开关提示，内部日志路径契约仍须保留。
      *
-     * <p>守的风险：落盘了但没人知道路径，等于没落盘——用户还是会来问「文件在哪」，
-     * 这个功能的全部价值就是让人能直接把文件取走。
+     * <p>原测试守护提示与落盘位置一致；用户明确删除命令后，改为防止命令入口复活，
+     * 并继续守护内部日志常量与真实写入位置，不能因为删命令而弱化日志收尾测试。
      *
-     * <p>失败条件：提示文案里的路径被删掉，或代码里另写一份字面量路径导致两处漂移。
+     * <p>失败条件：命令恢复追踪开关或路径提示，或者内部常量和写入位置漂移。
      */
     @Test
-    void toggleFeedbackTellsThePlayerWhereTheFileIs() throws IOException {
+    void removedCommandKeepsInternalLogPathContract() throws IOException {
         String command = Files.readString(COMMAND);
-        assertTrue(command.contains("PhysicalTableManager.TRACE_LOG_RELATIVE_PATH"),
-            "trace 开关提示没带日志路径常量：用户不知道去哪儿拿文件，或路径改动后提示会过期");
+        org.junit.jupiter.api.Assertions.assertFalse(command.contains("PhysicalTableManager.TRACE_LOG_RELATIVE_PATH"),
+            "退役命令不得再显示追踪日志开关提示");
+        org.junit.jupiter.api.Assertions.assertFalse(command.contains("toggleHandCardTrace"),
+            "退役命令不得再启用追踪");
 
         String manager = Files.readString(MANAGER);
         assertTrue(manager.contains("\"plugins/MUZ/debug/trace.log\""),

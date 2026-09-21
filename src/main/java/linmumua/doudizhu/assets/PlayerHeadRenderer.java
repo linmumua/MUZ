@@ -16,6 +16,7 @@ import java.util.function.IntFunction;
 import javax.imageio.ImageIO;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import org.bukkit.entity.Player;
 import org.bukkit.profile.PlayerTextures;
 
@@ -334,6 +335,20 @@ public final class PlayerHeadRenderer {
 
     private final DoudizhuPlugin plugin;
     private final CraftEngineOffsetService offsetService;
+    private final Scheduler scheduler;
+
+    /**
+     * 皮肤加载使用的调度入口。
+     *
+     * <p>下载和 PNG 解析必须在异步线程执行；缓存、失败退避以及 pending 状态的收尾必须回到
+     * 主线程，避免异步线程触碰运行期渲染状态。生产环境由 {@link DoudizhuPlugin#scheduler()}
+     * 提供实现，测试可注入受控实现而不需要直接碰 Bukkit Scheduler。
+     */
+    public interface Scheduler {
+        void runAsync(Runnable task);
+
+        void runSync(Runnable task);
+    }
 
     /** 玩家 -> 已渲染好的头像。key 里带皮肤 URL 与倍数，换皮肤或改 config 会自动失效。 */
     private final Map<String, String> cache = new ConcurrentHashMap<>();
@@ -346,8 +361,29 @@ public final class PlayerHeadRenderer {
     private final Map<String, Long> failedUntil = new ConcurrentHashMap<>();
 
     public PlayerHeadRenderer(DoudizhuPlugin plugin, CraftEngineOffsetService offsetService) {
-        this.plugin = plugin;
-        this.offsetService = offsetService;
+        this(plugin, offsetService, plugin.scheduler());
+    }
+
+    public PlayerHeadRenderer(
+        DoudizhuPlugin plugin, CraftEngineOffsetService offsetService, MuzScheduler scheduler) {
+        this(plugin, offsetService, new Scheduler() {
+            @Override
+            public void runAsync(Runnable task) {
+                scheduler.runAsync(task);
+            }
+
+            @Override
+            public void runSync(Runnable task) {
+                scheduler.runSync(task);
+            }
+        });
+    }
+
+    public PlayerHeadRenderer(
+        DoudizhuPlugin plugin, CraftEngineOffsetService offsetService, Scheduler scheduler) {
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.offsetService = Objects.requireNonNull(offsetService, "offsetService");
+        this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
     }
 
     /**
@@ -443,28 +479,45 @@ public final class PlayerHeadRenderer {
             failedUntil.remove(key, retryAt);
         }
         if (pending.putIfAbsent(key, Boolean.TRUE) == null) {
-            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                try {
-                    BufferedImage skin = downloadSkin(skinUrl);
-                    if (skin == null) {
-                        throw new IllegalArgumentException("皮肤图片无法解析");
+            try {
+                scheduler.runAsync(() -> {
+                    String rendered = null;
+                    Exception failure = null;
+                    try {
+                        BufferedImage skin = downloadSkin(skinUrl);
+                        if (skin == null) {
+                            throw new IllegalArgumentException("皮肤图片无法解析");
+                        }
+                        int[][] head = extractHead(skin);
+                        // 【描边只作用于脸】：王冠现在是独立字形家族，画在脸上方，
+                        // 不参与这个矩阵。两者互不干扰，不再有先后顺序的讲究。
+                        if (outlineArgb != 0) {
+                            head = withOutline(head, outlineArgb);
+                        }
+                        rendered = renderMiniMessage(
+                            head, scale, offsetService::offset, downOffsetTier, crowned, continuousFont);
+                    } catch (Exception exception) {
+                        failure = exception;
                     }
-                    int[][] head = extractHead(skin);
-                    // 【描边只作用于脸】：王冠现在是独立字形家族，画在脸上方，
-                    // 不参与这个矩阵。两者互不干扰，不再有先后顺序的讲究。
-                    if (outlineArgb != 0) {
-                        head = withOutline(head, outlineArgb);
-                    }
-                    cache.put(key, renderMiniMessage(
-                        head, scale, offsetService::offset, downOffsetTier, crowned, continuousFont));
-                    failedUntil.remove(key);
-                } catch (Exception exception) {
-                    failedUntil.put(key, System.currentTimeMillis() + FAILURE_BACKOFF_MILLIS);
-                    plugin.getLogger().warning("Failed to render player head: " + exception.getMessage());
-                } finally {
-                    pending.remove(key);
-                }
-            });
+                    String completed = rendered;
+                    Exception failed = failure;
+                    scheduler.runSync(() -> {
+                        if (failed == null) {
+                            cache.put(key, completed);
+                            failedUntil.remove(key);
+                        } else {
+                            failedUntil.put(key, System.currentTimeMillis() + FAILURE_BACKOFF_MILLIS);
+                            plugin.getLogger().warning(
+                                "Failed to render player head: " + failed.getMessage());
+                        }
+                        pending.remove(key);
+                    });
+                });
+            } catch (RuntimeException exception) {
+                // 调度器拒绝任务时不能把 key 永久卡在 pending，下一次 HUD 刷新仍应允许重试。
+                pending.remove(key);
+                throw exception;
+            }
         }
         return null;
     }

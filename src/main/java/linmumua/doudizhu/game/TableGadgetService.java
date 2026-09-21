@@ -10,6 +10,7 @@ import java.util.UUID;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.listener.TableGadgetLifecycleListener;
+import linmumua.doudizhu.ui.VirtualGadgetBar;
 import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
@@ -28,6 +29,7 @@ public final class TableGadgetService {
     private final DoudizhuPlugin plugin;
     private final TableGadgetEffectService effects;
     private final Map<UUID, ItemStack> selectedItems = new HashMap<>();
+    private final Map<UUID, Integer> selectedSlots = new HashMap<>();
     private final Map<UUID, Integer> lastUseTicks = new HashMap<>();
     private final Map<UUID, Integer> lastAttemptTicks = new HashMap<>();
     private final Map<UUID, TargetState> targets = new HashMap<>();
@@ -53,17 +55,23 @@ public final class TableGadgetService {
         return settings;
     }
 
-    /** 兼容既有渲染查询；实际选择不再由固定枚举映射。 */
+    /** 返回当前虚拟道具槽位；没有选择时回到首个槽位。 */
     public int selectedIndex(UUID playerId) {
-        return 0;
+        return selectedSlots.getOrDefault(playerId, 0);
     }
 
     /** 选择一份独立快照；调用方后续修改原 ItemStack 不会影响本次选择。 */
     public void select(UUID playerId, ItemStack item) {
+        select(playerId, selectedIndex(playerId), item);
+    }
+
+    /** 选择指定虚拟槽位及其独立 ItemStack 快照。 */
+    public void select(UUID playerId, int slot, ItemStack item) {
         if (playerId == null || item == null || item.getType().isAir()) {
             clear(playerId);
             return;
         }
+        selectedSlots.put(playerId, Math.max(0, Math.min(VirtualGadgetBar.SLOT_COUNT - 1, slot)));
         selectedItems.put(playerId, item.clone());
     }
 
@@ -169,6 +177,7 @@ public final class TableGadgetService {
             return;
         }
         selectedItems.remove(playerId);
+        selectedSlots.remove(playerId);
         lastUseTicks.remove(playerId);
         lastAttemptTicks.remove(playerId);
         clearPlayerTarget(playerId);

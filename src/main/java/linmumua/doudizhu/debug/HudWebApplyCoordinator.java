@@ -86,7 +86,7 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             return thread;
         }) : timeoutExecutor;
         this.mainExecutor = mainExecutor == null
-            ? command -> plugin.getServer().getScheduler().runTask(plugin, command)
+            ? command -> plugin.scheduler().runSync(command)
             : mainExecutor;
         HudWebApplyLease sharedLease;
         if (lease != null) {

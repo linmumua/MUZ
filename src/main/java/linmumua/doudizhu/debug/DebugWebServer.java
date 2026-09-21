@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Base64;
@@ -55,11 +56,18 @@ public final class DebugWebServer {
      * {@code /api/resource/<资源名>} 请求。值是 JAR classpath 内嵌路径。
      * 只暴露牌面、头像和记牌器三层真实 PNG，不开放任意路径。
      */
+    private static final Map<String, String> GADGET_PREVIEW_RESOURCE_WHITELIST = Map.of(
+        "minecraft:item/egg.png", "debug-gadget-icons/egg.png",
+        "minecraft:item/water_bucket.png", "debug-gadget-icons/water_bucket.png",
+        "muz:item/table_gadget_tomato.png",
+        "craftengine/muz/resourcepack/assets/muz/textures/item/table_gadget_tomato.png"
+    );
     private static final Map<String, String> RESOURCE_WHITELIST = buildResourceWhitelist();
     /** Debug Web 页面专用资源清单；只暴露当前构建 profile 的真实 PNG。 */
     private static final Map<String, PreviewResource> PREVIEW_RESOURCE_WHITELIST = buildPreviewResourceWhitelist();
     /** 离线可用的固定世界背景；不进入 CraftEngine bundle 或 Minecraft 字体。 */
     private static final String BACKGROUND_RESOURCE = "debug-world-background.png";
+    /** 道具预览只允许固定白名单资源，不接受任意模型路径；必须先于组合白名单初始化。 */
 
     private static Map<String, String> buildResourceWhitelist() {
         // 构建期产物的 classpath 根路径；与 build.gradle.kts 的 outputAssetsRoot 对应
@@ -71,6 +79,7 @@ public final class DebugWebServer {
         for (String name : previewTextureNames()) {
             map.put("muz:" + name, "craftengine/muz/resourcepack/assets/muz/textures/" + name);
         }
+        map.putAll(GADGET_PREVIEW_RESOURCE_WHITELIST);
         return Map.copyOf(map);
     }
 
@@ -145,6 +154,13 @@ public final class DebugWebServer {
                 classpathBase + texture.substring("muz:font/".length()),
                 PackAssets.COUNTER_CELL_WIDTH, PackAssets.COUNTER_FRAME_HEIGHT, PackAssets.COUNTER_CELL_ADVANCE, counterScale);
         }
+        // 道具箱只读预览使用同源固定资源；未知自定义模型不在此清单内，不能伪装成准确图标。
+        addPreviewResource(map, "gadget:egg", "gadget", "minecraft:item/egg.png",
+            "debug-gadget-icons/egg.png", 16, 16, 16, 1);
+        addPreviewResource(map, "gadget:water_bucket", "gadget", "minecraft:item/water_bucket.png",
+            "debug-gadget-icons/water_bucket.png", 16, 16, 16, 1);
+        addPreviewResource(map, "gadget:tomato", "gadget", "muz:item/table_gadget_tomato.png",
+            "craftengine/muz/resourcepack/assets/muz/textures/item/table_gadget_tomato.png", 16, 16, 16, 1);
 
         return Map.copyOf(map);
     }
@@ -214,6 +230,7 @@ public final class DebugWebServer {
     private final Runnable onStop;
     private final DebugHudConfigController controller;
     private final HudWebApplyCoordinator applyCoordinator;
+    private final GadgetPreviewSnapshotService gadgetPreviewService;
     private final boolean ownsCoordinator;
     private final String token;
 
@@ -230,17 +247,25 @@ public final class DebugWebServer {
      * @param onStop  停止回调；用于退出 Debug Web 接管状态并恢复 bundle 固定字形
      */
     public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop) {
-        this(plugin, onStart, onStop, new DebugHudConfigController(plugin), null, true);
+        this(plugin, onStart, onStop, new DebugHudConfigController(plugin), null, null, true);
     }
 
     /** 使用插件级共享 controller/coordinator；恢复服务与 Web 请求共用同一份租约。 */
     public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop,
                           DebugHudConfigController controller, HudWebApplyCoordinator coordinator) {
-        this(plugin, onStart, onStop, controller, coordinator, false);
+        this(plugin, onStart, onStop, controller, coordinator, null, false);
+    }
+
+    /** 使用插件级道具快照服务；HTTP 线程只读取其不可变 DTO。 */
+    public DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop,
+                          DebugHudConfigController controller, HudWebApplyCoordinator coordinator,
+                          GadgetPreviewSnapshotService gadgetPreviewService) {
+        this(plugin, onStart, onStop, controller, coordinator, gadgetPreviewService, false);
     }
 
     private DebugWebServer(DoudizhuPlugin plugin, Runnable onStart, Runnable onStop,
                            DebugHudConfigController controller, HudWebApplyCoordinator coordinator,
+                           GadgetPreviewSnapshotService gadgetPreviewService,
                            boolean ownsCoordinator) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.onStart = onStart;
@@ -248,6 +273,7 @@ public final class DebugWebServer {
         this.controller = Objects.requireNonNull(controller, "controller");
         this.applyCoordinator = coordinator == null
             ? new HudWebApplyCoordinator(plugin, controller) : coordinator;
+        this.gadgetPreviewService = gadgetPreviewService;
         this.ownsCoordinator = ownsCoordinator;
         this.token = newToken();
     }
@@ -276,6 +302,7 @@ public final class DebugWebServer {
             httpServer.createContext("/api/preview-resources", this::handlePreviewResources);
             httpServer.createContext("/api/preview-resource/", this::handlePreviewResource);
             httpServer.createContext("/api/preview-background", this::handlePreviewBackground);
+            httpServer.createContext("/api/gadget-preview", this::handleGadgetPreview);
             httpServer.createContext("/api/state", this::handleState);
             // 守护线程：随 JVM 退出自动终止，不阻塞 shutdown
             executor = Executors.newFixedThreadPool(2, r -> {
@@ -286,6 +313,9 @@ public final class DebugWebServer {
             httpServer.setExecutor(executor);
             httpServer.start();
             activePort = port;
+            if (gadgetPreviewService != null) {
+                gadgetPreviewService.start();
+            }
             plugin.getLogger().info("Debug Web 调试面板已启动，端口 " + port
                 + "，访问 http://localhost:" + port + "（仅监听本机回环地址）");
             if (onStart != null) {
@@ -314,6 +344,9 @@ public final class DebugWebServer {
             if (executor != null) {
                 executor.shutdownNow();
                 executor = null;
+            }
+            if (gadgetPreviewService != null) {
+                gadgetPreviewService.stop();
             }
             plugin.getLogger().info("Debug Web 调试面板已停止");
             if (onStop != null) {
@@ -555,6 +588,23 @@ public final class DebugWebServer {
         }
     }
 
+    private void handleGadgetPreview(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        if (!hasValidReadAccess(exchange)) {
+            sendJson(exchange, 403, Map.of("ok", false, "messages", List.of("道具预览鉴权失败。")));
+            return;
+        }
+        GadgetPreviewSnapshotService service = gadgetPreviewService;
+        if (service == null) {
+            sendJson(exchange, 503, Map.of("ok", false, "messages", List.of("道具预览服务尚未初始化。")));
+            return;
+        }
+        sendJson(exchange, 200, Map.of("ok", true, "players", service.snapshot().players()));
+    }
+
     private void handleState(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "GET");
@@ -568,11 +618,15 @@ public final class DebugWebServer {
      *
      * <p>前缀 {@code /api/resource/} 之后的整段作为白名单键查找，
      * 仅允许 {@link #RESOURCE_WHITELIST} 中列出的当前 profile 固定条目。
-     * 不需要 Token——资源不含敏感数据，且服务器仅监听回环地址。
+     * 使用页面 Token 或严格同源来源授权；no-referrer 页面通过带 Token 的 fetch 读取。
      */
     private void handleResource(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendMethodNotAllowed(exchange, "GET");
+            return;
+        }
+        if (!hasValidReadAccess(exchange)) {
+            sendJson(exchange, 403, Map.of("ok", false, "messages", List.of("资源读取鉴权失败。")));
             return;
         }
         String path = exchange.getRequestURI().getPath();
@@ -636,6 +690,55 @@ public final class DebugWebServer {
         return token.equals(exchange.getRequestHeaders().getFirst("X-MUZ-Token"));
     }
 
+    /** GET 只接受页面令牌，或来自本机 Debug Web 页面可信来源的同源请求。 */
+    private boolean hasValidReadAccess(HttpExchange exchange) {
+        if (hasValidToken(exchange)) {
+            return true;
+        }
+        // 显式错误令牌不可退回来源授权；回环客户端地址本身不是页面来源凭据。
+        if (exchange.getRequestHeaders().containsKey("X-MUZ-Token")) {
+            return false;
+        }
+        String origin = exchange.getRequestHeaders().getFirst("Origin");
+        String referer = exchange.getRequestHeaders().getFirst("Referer");
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        if ((origin == null && referer == null)
+            || (origin != null && !trustedLocalOrigin(origin, host, true))
+            || (referer != null && !trustedLocalOrigin(referer, host, false))) {
+            return false;
+        }
+        return exchange.getRemoteAddress() != null
+            && exchange.getRemoteAddress().getAddress() != null
+            && exchange.getRemoteAddress().getAddress().isLoopbackAddress();
+    }
+
+    private boolean trustedLocalOrigin(String value, String requestHost, boolean originHeader) {
+        try {
+            if (requestHost == null || activePort <= 0) {
+                return false;
+            }
+            URI uri = URI.create(value);
+            URI target = URI.create("http://" + requestHost);
+            String host = uri.getHost();
+            int port = uri.getPort() < 0 ? 80 : uri.getPort();
+            int targetPort = target.getPort() < 0 ? 80 : target.getPort();
+            return "http".equalsIgnoreCase(uri.getScheme())
+                && uri.getRawUserInfo() == null && target.getRawUserInfo() == null
+                && (!originHeader || (uri.getRawPath().isEmpty()
+                    && uri.getRawQuery() == null && uri.getRawFragment() == null))
+                && target.getRawQuery() == null && target.getRawFragment() == null
+                && target.getRawPath().isEmpty()
+                && port == activePort && targetPort == activePort
+                && host != null && host.equalsIgnoreCase(target.getHost())
+                && ("localhost".equalsIgnoreCase(host)
+                    || "127.0.0.1".equals(host)
+                    || "[::1]".equalsIgnoreCase(host)
+                    || "::1".equals(host));
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
     private static String readBody(HttpExchange exchange) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[1024];
@@ -673,7 +776,7 @@ public final class DebugWebServer {
         headers.set("X-Frame-Options", "DENY");
         headers.set("Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; "
-                + "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'");
+                + "img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'");
     }
 
     /** 测试用：返回白名单键集合（同源资源路由允许的文件名）。 */
@@ -745,7 +848,7 @@ public final class DebugWebServer {
             + ".preview-panel .screen{left:50%;top:50%;margin:0;transform:translate(-50%,-50%) translate(var(--view-pan-x,0px),var(--view-pan-y,0px)) scale(var(--screen-zoom,1));transform-origin:center center;--screen-zoom:1;--view-pan-x:0px;--view-pan-y:0px;background:linear-gradient(#7ea4a9 0 46%,#506b69 46% 52%,#35453f 52% 100%);overflow:hidden;outline:4px solid #080909;box-shadow:0 0 0 2px #67736a,8px 8px 0 #080909;touch-action:none}"
             + ".preview-panel .screen:before{content:'';position:absolute;inset:0;box-sizing:border-box;border:2px solid #f2c75c;pointer-events:none;background-image:linear-gradient(#ffffff12 1px,transparent 1px),linear-gradient(90deg,#ffffff12 1px,transparent 1px);background-size:16px 16px;mix-blend-mode:screen}.preview-panel .screen:after{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 48%,#0008 100%);z-index:18}"
             + ".mc-crosshair{position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);z-index:19;pointer-events:none}.mc-crosshair:before,.mc-crosshair:after{content:'';position:absolute;background:#fff;box-shadow:1px 1px #111}.mc-crosshair:before{left:6px;top:0;width:2px;height:14px}.mc-crosshair:after{left:0;top:6px;width:14px;height:2px}"
-            + ".mc-bossbar{position:absolute;left:50%;top:12px;transform:translateX(-50%);width:52%;min-width:220px;z-index:17;color:#fff;text-align:center;font-size:11px;text-shadow:1px 1px #111;pointer-events:none}.mc-bossbar .boss-track{height:8px;margin-top:4px;background:#17191bcc;border:2px solid #080909;box-shadow:inset 0 0 0 1px #515651}.mc-bossbar .boss-fill{height:100%;width:76%;background:linear-gradient(#d96262,#8b2727);box-shadow:inset 0 1px #ffb0a0}.mc-actionbar{position:absolute;left:50%;bottom:42px;transform:translateX(-50%);z-index:17;padding:4px 10px;background:#1119;color:#fff;font-size:11px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}.mc-coordinate{position:fixed;z-index:40;display:none;min-width:150px;padding:7px 9px;background:#111e;color:#fff;border:2px solid #d5a63b;box-shadow:3px 3px #080909;font-size:11px;line-height:1.45;pointer-events:none}.mc-coordinate.show{display:block}.mc-world-label{position:absolute;left:12px;bottom:12px;z-index:17;color:#f1c75b;font-size:10px;text-shadow:1px 1px #111;pointer-events:none}.mc-screen-legend{position:absolute;left:50%;top:calc(50% + 190px);transform:translateX(-50%);z-index:17;color:#d8d7ce;font-size:10px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}"
+            + ".mc-bossbar{position:absolute;left:50%;top:12px;transform:translateX(-50%);width:52%;min-width:220px;z-index:17;color:#fff;text-align:center;font-size:11px;text-shadow:1px 1px #111;pointer-events:none}.mc-bossbar .boss-track{height:8px;margin-top:4px;background:#17191bcc;border:2px solid #080909;box-shadow:inset 0 0 0 1px #515651}.mc-bossbar .boss-fill{height:100%;width:76%;background:linear-gradient(#d96262,#8b2727);box-shadow:inset 0 1px #ffb0a0}.mc-actionbar{position:absolute;left:50%;bottom:42px;transform:translateX(-50%);z-index:17;padding:4px 10px;background:#1119;color:#fff;font-size:11px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}.mc-coordinate{position:fixed;z-index:40;display:none;min-width:150px;padding:7px 9px;background:#111e;color:#fff;border:2px solid #d5a63b;box-shadow:3px 3px #080909;font-size:11px;line-height:1.45;pointer-events:none}.mc-coordinate.show{display:block}.mc-world-label{position:absolute;left:12px;bottom:12px;z-index:17;color:#f1c75b;font-size:10px;text-shadow:1px 1px #111;pointer-events:none}.mc-screen-legend{position:absolute;left:50%;top:calc(50% + 190px);transform:translateX(-50%);z-index:17;color:#d8d7ce;font-size:10px;text-shadow:1px 1px #111;white-space:nowrap;pointer-events:none}.gadget-preview{position:fixed;left:16px;top:68px;z-index:26;width:280px;max-height:calc(100dvh - 96px);overflow:auto;background:#303438ee;border:3px solid #17191b;border-right-color:#62666a;border-bottom-color:#62666a;padding:10px;box-shadow:5px 5px 0 #111}.gadget-preview.collapsed{max-height:42px;overflow:hidden}.gadget-header{display:flex;align-items:center;justify-content:space-between;gap:8px}.gadget-header h2{margin:0;color:#f1c75b;font-size:14px}.gadget-collapse{padding:4px 7px;font-size:11px}.gadget-preview select{width:100%;margin-top:8px;padding:5px;background:#1c1f21;color:#fff;border:2px solid #111}.gadget-status{min-height:18px;margin:8px 0;color:#d8d7ce;font-size:11px}.gadget-items{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.gadget-item{min-width:0;padding:5px;background:#25282a;border:2px solid #17191b;text-align:center}.gadget-item-icon{width:32px;height:32px;margin:0 auto 4px;display:flex;align-items:center;justify-content:center;color:#e6aa63}.gadget-item-icon img{width:100%;height:100%;object-fit:contain;image-rendering:pixelated}.gadget-item-name{display:block;overflow-wrap:anywhere;font-size:10px;line-height:1.2}.gadget-item.unavailable .gadget-item-icon{border:1px dashed #e6aa63}@media(max-width:500px){.gadget-preview{left:8px;top:60px;width:calc(100vw - 16px)}}"
             // 窄屏：900px 以下降为单列堆叠，字段网格缩窄但保持三列；
             // 500px 以下字段堆叠为标签在上、输入在下的两行布局，适配手机。
             + "@media(max-width:900px){.field{grid-template-columns:minmax(80px,140px) minmax(0,1fr) auto;gap:6px}}"
@@ -758,6 +861,7 @@ public final class DebugWebServer {
             + "<button type='button' class='header-btn' id='topSaveBtn'>保存</button><button type='button' class='header-btn' id='topReloadBtn'>重载</button>"
             + "<button type='button' class='header-btn' id='panelToggle' aria-expanded='false'>配置</button><button type='button' class='header-btn' id='fullscreenBtn'>全屏</button>"
             + "<button type='button' class='header-btn' id='resetViewBtn'>重置视图</button></header>"
+            + "<section class='gadget-preview collapsed' id='gadgetPreview' aria-label='只读道具箱预览'><div class='gadget-header'><h2>只读道具箱预览</h2><button type='button' class='gadget-collapse' id=\"gadgetCollapse\" aria-expanded='false'>展开</button></div><div class='gadget-body' id='gadgetBody'><label for='gadgetPlayerSelect'>在线玩家</label><select id='gadgetPlayerSelect' aria-label='选择在线玩家'><option value=''>加载中…</option></select><div class='gadget-status' id='gadgetStatus'>正在加载玩家道具箱…</div><div class='gadget-items' id='gadgetItems' aria-live='polite'></div></div></section>"
             + "<main class='mc-editor'><section class='panel preview-panel' id='previewPanel'><div class='mc-coordinate' id='mcCoordinate'></div>"
             + "<div class='preview'><div id='screen' class='screen'></div></div>"
             + "<p class='msg' id='dragHint'>提示：预览按 Minecraft 像素绘制，宽度取自服务端 geometry；左键拖动，Shift+空白拖动平移视图，右键查看坐标。</p></section>"
@@ -954,6 +1058,10 @@ public final class DebugWebServer {
             function nudgeActive(dx,dy){if(busy||dragging||resizing||panning||document.activeElement&&['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName))return;const keys=DRAG_KEYS[activeLayer],vals=collectAll(),b=staticBoxes(vals).boxes[activeLayer],v=viewport();if(!keys||!b)return;setField(keys[0],Number(vals[keys[0]]||0)+clampDelta(b.x,b.w,v.width,dx));if(keys[1])setField(keys[1],Number(vals[keys[1]]||0)+clampDelta(b.y,b.h,v.height,dy));scheduleRender()}
             window.addEventListener('keydown',e=>{if(e.key==='Escape'){hideCoordinate();finishStaticPointer();return}if(e.shiftKey&&/^Arrow/.test(e.key)&&!e.target.closest('input,select,textarea,button,[contenteditable=true]')){const d={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];if(d){e.preventDefault();nudgeActive(d[0],d[1])}}});
             """
+            + "const gadgetPlayers=[];let gadgetAbort=null;let gadgetDisposed=false;const gadgetManifest=new Set();const gadgetInlineUrls=new Set();"
+            + "function renderGadgetInline(players){const select=document.getElementById('gadgetPlayerSelect'),host=document.getElementById('gadgetItems'),status=document.getElementById('gadgetStatus');if(!select||!host||!status)return;const list=Array.isArray(players)?players.filter(p=>p&&typeof p.uuid==='string'):[];select.replaceChildren();list.forEach(p=>{const o=document.createElement('option');o.value=p.uuid;o.textContent=String(p.name||p.uuid);select.append(o)});if(!list.length){const o=document.createElement('option');o.value='';o.textContent='暂无在线玩家';select.append(o);status.textContent='暂无在线玩家';host.replaceChildren();return}const p=list[0];select.value=p.uuid;status.textContent=String(p.status||'loading');host.replaceChildren();(Array.isArray(p.items)?p.items:[]).filter(item=>Number.isInteger(item?.slot)&&item.slot>=0&&item.slot<=7).forEach(item=>{const card=document.createElement('div');card.className='gadget-item';const icon=document.createElement('div');icon.className='gadget-item-icon';const url=typeof item.textureUrl==='string'?item.textureUrl:'';if(item.iconStatus==='available'&&url.startsWith('/api/resource/')&&gadgetManifest.has(url.slice('/api/resource/'.length))){const image=document.createElement('img');image.alt='';icon.append(image);fetch(url,{headers:{'X-MUZ-Token':token}}).then(r=>{if(!r.ok)throw new Error('图标请求失败');return r.blob()}).then(blob=>{if(gadgetDisposed||!card.isConnected)return;const source=URL.createObjectURL(blob);gadgetInlineUrls.add(source);image.src=source}).catch(()=>{if(card.isConnected){icon.textContent='?';card.classList.add('unavailable')}})}else{icon.textContent='?';card.classList.add('unavailable')}const name=document.createElement('span');name.className='gadget-item-name';name.textContent=String(item.name||'未命名道具');card.append(icon,name);host.append(card)})}"
+            + "async function loadGadgetInline(){if(gadgetDisposed||gadgetAbort)return;gadgetAbort=new AbortController();try{const manifest=await fetch('/api/preview-resources',{cache:'no-store',headers:{'X-MUZ-Token':token},signal:gadgetAbort.signal}).then(r=>r.json());(manifest.resources||[]).forEach(r=>{if(r&&typeof r.texture==='string')gadgetManifest.add(r.texture)});const data=await fetch('/api/gadget-preview',{cache:'no-store',headers:{'X-MUZ-Token':token},signal:gadgetAbort.signal}).then(r=>r.json());if(data.ok!==true)throw new Error((data.messages||['道具箱预览失败']).join('；'));renderGadgetInline(data.players)}catch(e){if(e?.name!=='AbortError'){const status=document.getElementById('gadgetStatus');if(status)status.textContent='加载失败：'+e.message}}finally{gadgetAbort=null}}"
+            + "document.getElementById('gadgetCollapse')?.addEventListener('click',()=>{const panel=document.getElementById('gadgetPreview'),button=document.getElementById('gadgetCollapse'),collapsed=panel.classList.toggle('collapsed');button.textContent=collapsed?'展开':'收起';button.setAttribute('aria-expanded',collapsed?'false':'true')});window.addEventListener('pagehide',()=>{gadgetDisposed=true;if(gadgetAbort)gadgetAbort.abort();gadgetInlineUrls.forEach(url=>URL.revokeObjectURL(url));gadgetInlineUrls.clear()});loadGadgetInline();"
             + "function showFatal(e){const text='Debug Web 前端错误：'+(e&&e.message?e.message:String(e));msg.className='msg error';msg.textContent=text;dragHint.textContent=text;screen.textContent=text;screen.style.color='#ff8a8a';screen.style.padding='16px';screen.style.whiteSpace='pre-wrap'}window.addEventListener('error',e=>showFatal(e.error||e.message));window.addEventListener('unhandledrejection',e=>showFatal(e.reason));try{renderForm();selectLayer(activeLayer);renderWarnings()}catch(e){showFatal(e)}"
             + "</script></body></html>";
     }

@@ -287,9 +287,9 @@ public final class HandGuiService {
                 inventory.setItem(24, item(Material.PLAYER_HEAD, "头像组件", List.of("顶栏名字。")));
             }
             case GLOBAL_ECONOMY -> {
-                inventory.setItem(10, item(Material.GOLD_INGOT, "支付模式 · " + plugin.paymentModeLabel(), List.of("左键直接切换金币或筹码支付。", "金币走服务器经济插件，筹码走插件自带余额。")));
-                inventory.setItem(12, item(Material.GRAVEL, "主手设为全局筹码", List.of("把你主手物品设置成筹码外观。")));
-                inventory.setItem(14, item(Material.BRUSH, "恢复默认筹码", List.of("改回默认的石子筹码外观。")));
+                inventory.setItem(10, item(Material.GOLD_INGOT, "支付模式 · " + plugin.paymentModeLabel(), List.of("左键直接切换金币或实体筹码支付。", "筹码按主手物品的完整元数据匹配，1 件物品计 1 筹码。")));
+                inventory.setItem(12, item(Material.GRAVEL, "设置实体筹码匹配模板", List.of("使用主手物品的完整元数据作为匹配模板。", "不会自动兑换、扣除或发放已有物品。")));
+                inventory.setItem(14, item(Material.BRUSH, "恢复默认实体筹码模板", List.of("改回默认石子筹码匹配模板。", "不会改变已有物品。")));
                 inventory.setItem(19, roomLevelItem(Material.COPPER_INGOT, linmumua.doudizhu.room.TableLevel.LOW));
                 inventory.setItem(20, roomLevelItem(Material.IRON_INGOT, linmumua.doudizhu.room.TableLevel.MID));
                 inventory.setItem(21, roomLevelItem(Material.GOLD_INGOT, linmumua.doudizhu.room.TableLevel.HIGH));
@@ -697,7 +697,7 @@ public final class HandGuiService {
         }
         pendingInputs.put(viewer.getUniqueId(), new InputSession(HandInventoryHolder.EditorTarget.ADMIN_CHIP_BALANCE, -1, target.getUniqueId(), null));
         viewer.closeInventory();
-        viewer.sendMessage(component("准备修改 " + target.getName() + " 的筹码，直接输入数字就行，可填负数。", NamedTextColor.AQUA));
+        viewer.sendMessage(component("准备修改 " + target.getName() + " 的筹码，直接输入非负整数。", NamedTextColor.AQUA));
         viewer.sendMessage(component("当前筹码是 " + plugin.getChipBalance(target.getUniqueId()) + "。", NamedTextColor.YELLOW));
         viewer.sendMessage(component("如果只是看看，输入 `cancel` 或 `取消` 就能返回。", NamedTextColor.YELLOW));
     }
@@ -735,6 +735,7 @@ public final class HandGuiService {
         }
 
         try {
+            Integer actualChipBalance = null;
             switch (session.target()) {
                 case ADMIN_SELECTION_SOUND -> plugin.setSelectionSoundProfileDefinition(session.profileIndex(), selectionProfileFromSpec(trimmed));
                 case ADMIN_PLAY_ACTION -> plugin.setPlayActionProfileDefinition(session.actionKind(), session.profileIndex(), parseProfileInput(trimmed, false));
@@ -749,13 +750,22 @@ public final class HandGuiService {
                     if (session.targetPlayerId() == null) {
                         throw new IllegalArgumentException("我没找到这位玩家，先重新打开面板再试一次吧。");
                     }
-                    int value = Integer.parseInt(trimmed);
-                    plugin.setChipBalance(session.targetPlayerId(), value);
+                    int value;
+                    try {
+                        value = Integer.parseInt(trimmed);
+                    } catch (NumberFormatException exception) {
+                        throw new IllegalArgumentException("筹码数量必须是非负整数。", exception);
+                    }
+                    if (value < 0) {
+                        throw new IllegalArgumentException("筹码数量不能为负数。");
+                    }
+                    actualChipBalance = plugin.setChipBalance(session.targetPlayerId(), value);
                 }
                 default -> {
                 }
             }
             pendingInputs.remove(player.getUniqueId());
+            final Integer savedChipBalance = actualChipBalance;
             notifySettingSaved(player, switch (session.target()) {
                 case ADMIN_SELECTION_SOUND -> "选牌音效方案 " + (session.profileIndex() + 1) + " 已更新";
                 case ADMIN_PLAY_ACTION -> normalizeActionKind(session.actionKind()).label() + " 动作 " + (session.profileIndex() + 1) + " 已更新";
@@ -766,7 +776,7 @@ public final class HandGuiService {
                 case ADMIN_AI_KEY -> "DeepSeek 密钥已更新";
                 case ADMIN_AI_MODEL -> "DeepSeek 模型已更新";
                 case ADMIN_AI_SYSTEM_PROMPT -> "全局人设词已更新";
-                case ADMIN_CHIP_BALANCE -> "筹码数量已更新";
+                case ADMIN_CHIP_BALANCE -> "筹码数量已更新为 " + savedChipBalance;
                 default -> "设置已更新";
             }, session.target() != HandInventoryHolder.EditorTarget.ADMIN_PLAY_ACTION);
             if (session.target() == HandInventoryHolder.EditorTarget.ADMIN_SELECTION_SOUND) {
@@ -786,8 +796,9 @@ public final class HandGuiService {
                 return;
             }
             reopenAfterInput(player, session.target());
-        } catch (IllegalArgumentException exception) {
-            player.sendMessage(component(exception.getMessage(), NamedTextColor.RED));
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            String detail = exception.getMessage();
+            player.sendMessage(component(detail == null || detail.isBlank() ? "这次没有记上。" : detail, NamedTextColor.RED));
             player.sendMessage(component("这次没有记上，再输一次，或者输入 `cancel` 先退出。", NamedTextColor.YELLOW));
         }
     }
@@ -1492,7 +1503,7 @@ public final class HandGuiService {
         String display = meta != null && meta.hasDisplayName()
             ? PlainTextComponentSerializer.plainText().serialize(meta.displayName())
             : itemStack.getType().name();
-        return display + " x1";
+        return "匹配模板：" + display + "（完整元数据，1件=1筹码；不会自动兑换或发放物品）";
     }
 
     private List<Player> onlinePlayersForEconomyPage() {

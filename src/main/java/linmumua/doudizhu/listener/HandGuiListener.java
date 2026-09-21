@@ -95,8 +95,9 @@ public final class HandGuiListener implements Listener {
                 case ADMIN_MODELS ->
                     handleAdminClick(player, holder.adminPage(), rawSlot, event.isLeftClick(), event.isRightClick(), event.getClick() == ClickType.MIDDLE, event.isShiftClick());
             }
-        } catch (RuntimeException exception) {
-            player.sendMessage(message(exception.getMessage()));
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            String detail = exception.getMessage();
+            player.sendMessage(message(detail == null || detail.isBlank() ? "筹码操作失败。" : detail));
             plugin.getHandGuiService().refreshSettingsIfOpen(player);
         }
     }
@@ -536,7 +537,7 @@ public final class HandGuiListener implements Listener {
                     throw new IllegalStateException("请先把要作为筹码的物品拿在主手。");
                 }
                 plugin.setChipPaymentItem(item);
-                notifySettingSaved(player, "全局筹码外观已经换成主手物品");
+                notifySettingSaved(player, "实体筹码匹配模板已保存；不会自动兑换或发放物品");
             }
             case 14 -> {
                 plugin.setChipPaymentItem(null);

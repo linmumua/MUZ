@@ -375,9 +375,6 @@ public final class HudResourcePackVerifier {
             byte[] metadata = readEntry(zip, index, PACK_META, MAX_JSON_BYTES, budget);
             index.selected.put(PACK_META, metadata);
             index.overlayPrefixes.addAll(overlayPrefixes(metadata));
-            if (index.overlayPrefixes.isEmpty()) {
-                throw new IOException("资源包缺少连续 HUD overlay 声明");
-            }
             verifyPackMetadata(index);
 
             // 连续 overlay 不能取代既有 bundle 契约：先独立校验根字体、真实 bundle PNG、
@@ -391,6 +388,7 @@ public final class HudResourcePackVerifier {
                     readEntry(zip, index, required,
                         required.endsWith(".json") ? MAX_JSON_BYTES : MAX_PNG_BYTES, budget));
             }
+            Set<String> baselineFontPaths = new HashSet<>(rootFontJsonPaths(baseline.bundle).values());
             Set<String> expectedFontPaths = new LinkedHashSet<>();
             Set<String> expectedRootFontPaths = new LinkedHashSet<>();
             for (HudOverlayLayout.Glyph glyph : glyphs) {
@@ -408,8 +406,11 @@ public final class HudResourcePackVerifier {
                 }
             }
 
+            Set<String> expectedTexturePaths = expectedTextures.keySet();
+            rejectUndeclaredContinuousResources(names, index.overlayPrefixes,
+                expectedFontPaths, expectedTexturePaths);
+
             Map<String, String> actualPaths = new LinkedHashMap<>();
-            Set<String> baselineFontPaths = new HashSet<>(rootFontJsonPaths(baseline.bundle).values());
             Map<String, ImageDeclaration> rootContinuous = new LinkedHashMap<>();
             for (String logical : expectedFontPaths) {
                 String actual = selectContinuousPath(logical, names, index.overlayPrefixes,
@@ -433,7 +434,6 @@ public final class HudResourcePackVerifier {
             Set<String> actualKeys = new HashSet<>();
             Set<String> actualFontPaths = new LinkedHashSet<>();
             Set<String> actualTexturePaths = new LinkedHashSet<>();
-            Set<String> expectedTexturePaths = expectedTextures.keySet();
             for (String logical : expectedFontPaths) {
                 String actual = selectContinuousPath(logical, names, index.overlayPrefixes,
                     actualPaths, baselineFontPaths.contains(logical));
@@ -507,12 +507,50 @@ public final class HudResourcePackVerifier {
             return false;
         }
         String name = path.substring(FONT_ROOT.length(), path.length() - ".json".length());
-        // 任何 overlay 中的 MUZ 字体都纳入集合比较：旧 base font 或未知分页必须被当作多余映射拒绝。
+        // 根目录/声明目录中的 MUZ 字体均纳入集合边界，避免未知分页或旧字体绕过校验。
         return name.startsWith("muz_");
     }
 
     private boolean isContinuousTexturePath(String path) {
         return path.startsWith("assets/muz/textures/font/continuous/");
+    }
+
+    private void rejectUndeclaredContinuousResources(Set<String> names, Set<String> prefixes,
+                                                       Set<String> expectedFontPaths,
+                                                       Set<String> expectedTexturePaths) throws IOException {
+        for (String name : names) {
+            if (name.endsWith("/") || prefixes.stream().anyMatch(name::startsWith)) {
+                continue;
+            }
+            String assetPath = pathAfterAssets(name);
+            if (assetPath == null) {
+                continue;
+            }
+            if (isContinuousFontPath(assetPath) && assetPath.contains("_continuous")) {
+                if (name.startsWith("assets/") && expectedFontPaths.contains(assetPath)) {
+                    continue;
+                }
+                throw new IOException(name.startsWith("assets/")
+                    ? "连续 HUD 出现当前请求未声明的根目录资源：" + name
+                    : "连续 HUD 资源位于未声明目录：" + name);
+            }
+            if (isContinuousTexturePath(assetPath)) {
+                if (name.startsWith("assets/") && expectedTexturePaths.contains(assetPath)) {
+                    continue;
+                }
+                throw new IOException(name.startsWith("assets/")
+                    ? "连续 HUD 出现当前请求未声明的根目录资源：" + name
+                    : "连续 HUD 资源位于未声明目录：" + name);
+            }
+        }
+    }
+
+    private String pathAfterAssets(String name) {
+        if (name.startsWith("assets/")) {
+            return name;
+        }
+        int index = name.indexOf("/assets/");
+        return index >= 0 ? name.substring(index + 1) : null;
     }
 
     private void verifyContinuousFontJson(byte[] bytes, String relative, String source,

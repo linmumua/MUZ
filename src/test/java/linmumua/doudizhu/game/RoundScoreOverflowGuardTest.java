@@ -1,6 +1,7 @@
 package linmumua.doudizhu.game;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -103,5 +104,16 @@ class RoundScoreOverflowGuardTest {
         assertEquals(0, Math.clamp(-1, 0, limit), "负数必须归 0，否则输赢方向会反");
         assertEquals(limit, Math.clamp(Integer.MAX_VALUE, 0, limit), "超限值必须夹到上限");
         assertEquals(32_000, Math.clamp(32_000, 0, limit), "正常量级不能被改动");
+    }
+
+    /** 核心倍率链必须拒绝 int 溢出，而不是静默回绕成负分。 */
+    @Test
+    void coreScoreMultiplicationRejectsIntegerOverflow() {
+        assertEquals(48, GameTable.coreScoreFor(3, 2, 4, 2));
+        assertThrows(
+            ArithmeticException.class,
+            () -> GameTable.coreScoreFor(Integer.MAX_VALUE, 2, Integer.MAX_VALUE, 2),
+            "核心分乘法溢出必须显式失败"
+        );
     }
 }

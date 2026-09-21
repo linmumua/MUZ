@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -30,7 +31,11 @@ public class DebugWebBrowserContract {
     void formalPageRunsRealBrowserContracts() throws Exception {
         Path root = Path.of("").toAbsolutePath().normalize();
         Path page = root.resolve("src/main/resources/debug-hud-preview.html");
+        Path rootPage = root.resolve("debug-hud-preview.html");
         assertTrue(Files.isRegularFile(page), "正式 Debug Web 页面不存在：" + page);
+        assertTrue(Files.isRegularFile(rootPage), "根目录 Debug Web 页面不存在：" + rootPage);
+        assertArrayEquals(Files.readAllBytes(rootPage), Files.readAllBytes(page),
+            "根目录与正式资源目录 Debug Web 页面必须字节一致");
 
         Map<String, Object> values = new LinkedHashMap<>();
         values.put("trick-hud.enabled", true);
@@ -59,6 +64,14 @@ public class DebugWebBrowserContract {
             .toList();
         DebugHudConfigController.Snapshot snapshot = new DebugHudConfigController.Snapshot(values, List.of(), fields);
         String built = DebugWebServer.buildHtml(snapshot, TOKEN);
+        assertTrue(built.contains("id=\"gadgetCollapse\""), "正式页面必须提供可收起道具面板入口");
+        assertTrue(built.contains("new AbortController()"), "道具预览请求必须支持取消");
+        assertTrue(built.contains("window.addEventListener('pagehide'"), "页面离开时必须清理道具轮询和图片资源");
+        assertTrue(built.contains("item.slot>=0&&item.slot<=7"), "道具预览必须限制为 0..7 槽位");
+        assertTrue(built.contains("fetch('/api/gadget-preview',{cache:'no-store',headers:{'X-MUZ-Token':token}"),
+            "正式页面道具 GET 必须携带 X-MUZ-Token");
+        assertTrue(Files.readString(page).contains("fetch(url,{cache:'force-cache',headers:{'X-MUZ-Token':token}"),
+            "正式页面图标 GET 必须携带 X-MUZ-Token");
         String marker = "<script type='application/json' id='muz-state'>";
         int stateStart = built.indexOf(marker);
         int stateEnd = built.indexOf("</script>", stateStart);
@@ -69,6 +82,23 @@ public class DebugWebBrowserContract {
         apiState.addProperty("ok", true);
         apiState.add("snapshot", snapshotJson);
         apiState.add("previewResources", new Gson().toJsonTree(previewResourceManifest()));
+        // 使用生产方法导出响应头，不在 Node 中复制 CSP，避免夹具漏掉真实浏览器限制。
+        com.sun.net.httpserver.Headers headers = new com.sun.net.httpserver.Headers();
+        try {
+            java.lang.invoke.MethodHandles.privateLookupIn(DebugWebServer.class, java.lang.invoke.MethodHandles.lookup())
+                .findStatic(DebugWebServer.class, "addSecurityHeaders",
+                    java.lang.invoke.MethodType.methodType(void.class, com.sun.net.httpserver.Headers.class))
+                .invoke(headers);
+        } catch (Throwable failure) {
+            throw new AssertionError("无法导出正式安全响应头", failure);
+        }
+        Map<String, String> securityHeaders = new LinkedHashMap<>();
+        headers.forEach((key, entries) -> securityHeaders.put(key, String.join(", ", entries)));
+        assertEquals("no-referrer", headers.getFirst("Referrer-Policy"),
+            "正式页面 fixture 必须使用生产 Referrer-Policy");
+        assertTrue(headers.getFirst("Content-Security-Policy").contains("img-src 'self' data: blob:"),
+            "正式页面 fixture 的生产 CSP 必须允许 blob 图片");
+        apiState.add("securityHeaders", new Gson().toJsonTree(securityHeaders));
 
         Path tempDir = Files.createTempDirectory("muz-debug-web-browser-");
         Process process = null;

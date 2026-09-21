@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -37,6 +39,21 @@ class PlayerHeadRendererTest {
     /** 匹配一次偏移，或一个「带颜色的方块字形」。 */
     private static final Pattern TOKEN =
         Pattern.compile("\\{(-?\\d+)}|<color:#([0-9a-f]{6})>(.)</color>");
+
+    @Test
+    void 皮肤加载必须通过可注入调度入口并把结果回主线程() throws Exception {
+        String source = Files.readString(Path.of(
+            "src/main/java/linmumua/doudizhu/assets/PlayerHeadRenderer.java"));
+
+        assertTrue(source.contains("public interface Scheduler"),
+            "皮肤渲染器必须暴露可注入的调度入口");
+        assertTrue(source.contains("scheduler.runAsync(() ->"),
+            "皮肤下载必须通过注入的异步调度入口执行");
+        assertTrue(source.contains("scheduler.runSync(() ->"),
+            "皮肤结果与失败收尾必须通过注入的主线程调度入口执行");
+        assertFalse(source.contains("getServer().getScheduler()"),
+            "PlayerHeadRenderer 不得直接调用 Bukkit Scheduler");
+    }
 
     @Test
     void outlineWrapsHeadWithoutOverwritingAnySkinPixel() {

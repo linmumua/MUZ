@@ -61,6 +61,8 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 | `paper-26.1.2` | Paper / Purpur 26.1.2 |
 | `paper-26.2` | Paper / Purpur 26.2（默认构建目标） |
 
+Folia 支持正在迁移中：三个目标已建立 `MuzScheduler` 的 global、region、entity/player 与 async 调度接缝，并收敛了预览、Web、皮肤渲染和旧 Hotbar 的直接 Bukkit 调度调用；牌桌、实体生命周期、跨区域玩家输出、麻将和真实 Folia 服务端验收尚未完成。当前工作区只有 Leaf 26.1.2 测试服，没有 Folia 核心；Leaf/Paper 验证不能替代真实 Folia 验收。当前版本仍保持 `folia-supported: false`，不能直接安装到 Folia。
+
 ## 依赖
 
 | 依赖 | 类型 | 说明 |
@@ -92,6 +94,10 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 | `/muz debug remove [1-50\|all]` | 移除观察桌 |
 | `/muz debug web [start\|stop]` | 管理 Debug Web HUD 编辑器 |
 | `/muz give debug` | 发放个人 HUD 调试棒 |
+| `/muz chip setitem` | 将主手物品设为实体筹码匹配模板，不兑换或发放物品 |
+| `/muz chip balance <玩家> [数量]` | 查询实际筹码；指定数量则真实增删至该非负数量，容量不足则拒绝 |
+
+`/muz debug trace` 已移除，不再提供执行入口和命令补全。
 
 ## Debug Web HUD 编辑器
 
@@ -105,7 +111,13 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 
 ## 构建
 
-当前源码版本为 `1.10.38`。该版本已完成三个支持目标的 JAR、资源包与 CraftEngine bundle 构建，以及 SnakeYAML 重定位校验；实服 CraftEngine 重载、客户端下载和游戏内显示仍需人工确认。
+当前源码版本为 `1.10.46`。筹码按玩家实际持有的匹配物品计数，不再使用独立虚拟余额；独立 `muz_gadget_bar` 九格图标额外栏与私有语音面板保持不变。本轮新增 `MuzScheduler` 的 global、region、entity/player 与 async 调度抽象，并将预览、Web、皮肤渲染和旧 Hotbar 的直接 Bukkit 调度调用收敛到门面；牌桌、实体生命周期、跨区域玩家输出、麻将和真实 Folia 服务端验收尚未完成，因此仍保持 `folia-supported: false`。本轮已强制编译与资源处理，定向调度测试结果见交付摘要；未打包部署或进行 Folia 实服验证。
+
+历史 `1.10.43`：移除 `/muz debug trace`；26.1.2 强制编译通过，命令移除、调试棒与内部日志契约定向测试 10/10 通过；未运行全仓测试，未打包部署。
+
+历史 `1.10.42`：道具预览及牌行、头像、记牌器和道具图标统一复用带 Token 的图片加载与 Object URL 缓存，保留 `no-referrer` 和严格 GET 鉴权，CSP 仅在图片来源中补充 `blob:`；正式两份页面与兼容模板同步。26.1.2 强制编译通过；全量后端 889/889、最终浏览器与后端专项联合 52/52 通过，无失败、跳过或中止。浏览器使用生产安全响应头与严格 Token 夹具，确认无来源头请求带 Token、blob 图标实际加载；不是实服 CE 联调。未打包发布、未部署，其他目标和客户端显示未验收。
+
+历史 1.10.41：收紧道具预览的同源访问校验，并隔离保存后的预览通知异常；新增可控调度的异步快照回归与保存通知异常注入测试，26.1.2 强制编译及专项测试 50/50 通过，无失败、跳过或中止（GUI 续接为源码契约，非实服交互验收）。1.10.41 未运行全仓和浏览器回归、未打包发布或部署，仍有 Unsafe/API 与独立测试启动器注解依赖警告。Origin 必须为精确 HTTP 同源且不含路径，Referer 可包含页面路径。以下验证结果属于 1.10.40：新增与游戏内道具箱同源的 Web 只读预览，不恢复旧 Hotbar HUD。保留 1.10.39 根目录连续字体无需 `overlays` 声明的修复，字形、PNG 与资源格式校验保持严格。26.1.2 强制编译、定向回归 54/54、全量 JUnit 881/881 与真实 Chromium 契约 2/2（含进程清理）通过，无跳过、中止或失败；JAR、资源包与 CraftEngine bundle 已构建，并通过 SnakeYAML 重定位、归档 CRC、页面及图标一致性检查。其它目标本轮未构建，未部署或重启实服。道具预览以 SnakeYAML 严格只读方式读取玩家文件，损坏时提示失败而不重命名或补写原文件；实服保存、客户端下载和游戏内显示仍需独立验证。头像重叠警告只是布局建议，本版未去重该警告。
 
 ```bash
 ./gradlew.bat -PmuzTarget=paper-26.1.2 clean shadowJar zipResourcePack zipCraftEngineBundle verifyRelocatedSnakeYaml

@@ -295,10 +295,11 @@ public final class TableSpeechPanelService {
             display.setTextOpacity((byte) 255);
             display.setBrightness(new Display.Brightness(15, 15));
             display.setViewRange((float) Math.max(8.0, config.maxDistance() + 2.0));
-            float scaleX = (float) (panel.width() / PANEL_BASE_WIDTH);
-            float scaleY = (float) (panel.height() / PANEL_BASE_HEIGHT);
+            // panel.width/height 只描述视觉盒与命中范围；文字保持固定比例，不能因面板宽度变化被横向拉伸。
+            // 统一使用行高对应的文本缩放，命中矩形仍由 Panel.width/height 提供，避免显示与交互几何脱节。
+            float textScale = (float) (panel.height() / PANEL_BASE_HEIGHT);
             display.setTransformation(new Transformation(
-                new Vector3f(), new AxisAngle4f(), new Vector3f(scaleX, scaleY, 1.0f), new AxisAngle4f()));
+                new Vector3f(), new AxisAngle4f(), new Vector3f(textScale, textScale, 1.0f), new AxisAngle4f()));
             owner.showEntity(plugin, display);
         });
     }

@@ -426,6 +426,10 @@ hints:
   max-groups: 0  # 默认 6
 
 debug:
+  # 是否输出 Trick HUD 的布局诊断（例如头像与牌行重叠提示）。
+  # 默认关闭；开启只增加诊断告警，不修改任何 HUD 偏移、不关闭正式 HUD，
+  # 资源未就绪或其它非法配置错误仍会照常提示。
+  enabled: false
   # /muz debug add 生成多张观察桌时，桌与桌之间的间距
   table-spacing: 0  # 默认 6.50
 
@@ -460,9 +464,12 @@ debug:
 
 economy:
   payment:
-    # false=默认金币结算；true=改用全局筹码结算
+    # false=默认金币结算；true=改用实体筹码结算。
+    # 开启后按玩家背包与副手中、完整元数据匹配 chip-item-stack 的物品计数；一件匹配物品计 1 筹码。
+    # 余额必须保持为非负数；数量不足、空间不足、玩家离线或异步存储失败时，操作会明确失败且不改余额。
     use-chip: false
-    # 全局筹码物品建议使用命令 /muz chip setitem 直接设置主手物品
+    # 实体筹码匹配模板由命令 /muz chip setitem 或管理菜单读取主手物品的完整元数据保存，数量固定按 1 件匹配。
+    # 设置模板只改变后续匹配规则，不会自动兑换、扣除、发放或改写玩家已有物品。
   vault:
     # 是否尝试接入 Vault；未安装 Vault 或经济插件时会自动回退
     enabled: true

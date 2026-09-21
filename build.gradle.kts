@@ -23,7 +23,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.38"
+version = "1.10.46"
 
 data class MuzTarget(
     val id: String,
@@ -116,6 +116,18 @@ val botAvatarDownCodepointStart = 0xF910
 val cardGlyphFont = "minecraft:${resourceNamespace}_cards"
 val avatarPixelFont = "minecraft:${resourceNamespace}_avatar"
 val botAvatarFont = "minecraft:${resourceNamespace}_bot_avatar"
+/** 桌内九格道具栏独立字体；不复用已退役的 minecraft:muz_hotbar。 */
+val gadgetBarFont = "minecraft:${resourceNamespace}_gadget_bar"
+val gadgetBarBaseCodepoint = 0xF700
+val gadgetBarSelectCodepoint = 0xF701
+val gadgetBarIconCodepointStart = 0xF702
+val gadgetBarIconKinds = listOf("egg", "water", "tomato", "speech")
+val gadgetBarCellWidth = 22
+val gadgetBarCellHeight = 22
+val gadgetBarCellAdvance = 22
+val gadgetBarIconWidth = 16
+val gadgetBarIconHeight = 16
+val gadgetBarSlotCount = 9
 
 // ============================================================================
 // 字体切分
@@ -849,6 +861,58 @@ fun writeCounterGlyph(target: File, image: BufferedImage) {
     ImageIO.write(image, "png", target)
 }
 
+/** 九格 MUZ 道具栏底图：不含图标与选框，运行期按槽位叠加。 */
+fun renderGadgetBarBase(selected: Boolean): BufferedImage {
+    val out = BufferedImage(gadgetBarCellWidth, gadgetBarCellHeight, BufferedImage.TYPE_INT_ARGB)
+    val g = out.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
+    g.color = if (selected) Color(0x4E, 0x42, 0x16, 0xF2) else Color(0x18, 0x18, 0x20, 0xE8)
+    g.fillRect(1, 1, gadgetBarCellWidth - 2, gadgetBarCellHeight - 2)
+    g.color = Color(0xA0, 0xA8, 0xB8, 0xD0)
+    g.drawRect(0, 0, gadgetBarCellWidth - 1, gadgetBarCellHeight - 1)
+    g.dispose()
+    return out
+}
+
+fun renderGadgetBarSelect(): BufferedImage {
+    val out = BufferedImage(gadgetBarCellWidth, gadgetBarCellHeight, BufferedImage.TYPE_INT_ARGB)
+    val g = out.createGraphics()
+    g.color = Color(0xFF, 0xE0, 0x40, 0xFF)
+    g.stroke = BasicStroke(2f)
+    g.drawRect(1, 1, gadgetBarCellWidth - 3, gadgetBarCellHeight - 3)
+    g.dispose()
+    return out
+}
+
+fun renderGadgetBarIcon(kind: String): BufferedImage {
+    val icon = when (kind) {
+        "egg" -> ImageIO.read(project.file("src/main/resources/debug-gadget-icons/egg.png"))
+        "water" -> ImageIO.read(project.file("src/main/resources/debug-gadget-icons/water_bucket.png"))
+        "tomato" -> BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB).also { drawTomatoIcon(it, 1, 0, 14, 16) }
+        "speech" -> BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB).also { image ->
+            val fill = 0xFFE8F1FF.toInt(); val edge = 0xFF3A526E.toInt()
+            for (y in 2..11) for (x in 2..13) image.setRGB(x, y, if (x == 2 || x == 13 || y == 2 || y == 11) edge else fill)
+            for (x in 4..6) image.setRGB(x, 12, edge)
+            for (x in 5..6) image.setRGB(x, 13, edge)
+        }
+        else -> error("未知九格图标：$kind")
+    }
+    // 图标字形本身也必须保持 22px advance，运行期才能用负空格叠回同一槽位。
+    return BufferedImage(gadgetBarCellWidth, gadgetBarCellHeight, BufferedImage.TYPE_INT_ARGB).also { canvas ->
+        val x = (gadgetBarCellWidth - icon.width) / 2
+        val y = (gadgetBarCellHeight - icon.height) / 2
+        canvas.createGraphics().also { graphics ->
+            graphics.drawImage(icon, x, y, null)
+            graphics.dispose()
+        }
+    }
+}
+
+fun writeGadgetBarGlyph(target: File, image: BufferedImage) {
+    target.parentFile.mkdirs()
+    ImageIO.write(image, "png", target)
+}
+
 fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {
     val height = (headPixels - row) * scale
     val out = BufferedImage(scale, height, BufferedImage.TYPE_INT_ARGB)
@@ -1282,6 +1346,20 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                     ${javaArray(counterScaleTiers)}
                 };
 
+                /** 桌内九格道具栏字体族；与运行期 PackAssets 同源。 */
+                public static final String GADGET_BAR_FONT = "${gadgetBarFont}";
+                public static final int GADGET_BAR_BASE_CODEPOINT = ${gadgetBarBaseCodepoint};
+                public static final int GADGET_BAR_SELECT_CODEPOINT = ${gadgetBarSelectCodepoint};
+                public static final int GADGET_BAR_ICON_CODEPOINT_START = ${gadgetBarIconCodepointStart};
+                public static final int GADGET_BAR_SLOT_COUNT = ${gadgetBarSlotCount};
+                public static final int GADGET_BAR_CELL_WIDTH = ${gadgetBarCellWidth};
+                public static final int GADGET_BAR_CELL_HEIGHT = ${gadgetBarCellHeight};
+                public static final int GADGET_BAR_CELL_ADVANCE = ${gadgetBarCellAdvance};
+                public static final int GADGET_BAR_ICON_WIDTH = ${gadgetBarIconWidth};
+                public static final int GADGET_BAR_ICON_HEIGHT = ${gadgetBarIconHeight};
+                public static final int GADGET_BAR_ICON_ADVANCE = ${gadgetBarIconWidth + 1};
+                public static final int GADGET_BAR_ICON_KIND_COUNT = ${gadgetBarIconKinds.size};
+
                 /** Hotbar 兼容缩放档；仅保留旧 API 所需常量，构建不再发布 Hotbar provider。 */
                 public static final int[] HOTBAR_SCALE_TIERS = {100};
 
@@ -1480,6 +1558,15 @@ val generateResourcePack = tasks.register("generateResourcePack") {
         }
 
 
+
+        // 桌内九格道具栏使用独立 MUZ 字形族；底图、图标和选框分层生成。
+        // 运行期通过 CraftEngine 偏移字形叠加，净前进量固定为 22px，不拼接文字，也不依赖原版 hotbar sprite。
+        val gadgetBarTextureDir = outputAssetsRoot.resolve("textures/font/gadget_bar")
+        writeGadgetBarGlyph(gadgetBarTextureDir.resolve("base.png"), renderGadgetBarBase(false))
+        writeGadgetBarGlyph(gadgetBarTextureDir.resolve("select.png"), renderGadgetBarSelect())
+        gadgetBarIconKinds.forEach { kind ->
+            writeGadgetBarGlyph(gadgetBarTextureDir.resolve("$kind.png"), renderGadgetBarIcon(kind))
+        }
 
         // 桌内道具模型全部使用独立 item 纹理，不再复用已退役的 Hotbar 字形贴图。
         val tomatoTexture = "$resourceNamespace:item/$tableGadgetTomatoId"
@@ -1851,14 +1938,32 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 char: $botAvatarFarmerCharEscape
         """.trimIndent() + "\n" + botAvatarDownImages
 
-        // Hotbar 三图标与选框字形已退役；不再生成 hotbar_hud*.yml 或任何 Hotbar provider。
+        val gadgetBarImages = buildString {
+            appendLine("images:")
+            val layers = listOf(
+                "base" to gadgetBarBaseCodepoint,
+                "select" to gadgetBarSelectCodepoint
+            ) + gadgetBarIconKinds.mapIndexed { index, kind -> kind to gadgetBarIconCodepointStart + index }
+            layers.forEach { (name, codepoint) ->
+                checkGlyphCodepoint(codepoint, "gadget-bar", codepoint)
+                appendLine("  $resourceNamespace:gadget_bar_$name:")
+                appendLine("    height: $gadgetBarCellHeight")
+                appendLine("    ascent: $gadgetBarCellHeight")
+                appendLine("    font: $gadgetBarFont")
+                appendLine("    file: $resourceNamespace:font/gadget_bar/$name.png")
+                appendLine("    char: \\u${codepoint.toString(16).padStart(4, '0')}")
+            }
+        }
+
+        // 旧 Hotbar 三图标与选框字形仍不生成；九格道具栏使用独立 gadget_bar 字体族。
         // 保留 PackTiers/PackAssets 的旧常量仅供并行代码编译迁移，不能据此生成客户端资源。
 
         // 每份都要自带 `images:` 根键——它们是独立文档，不是被拼起来的片段。
 
         val imageParts = linkedMapOf(
             "bot_avatar" to botAvatarBaseImages,
-            "avatar_crown" to "images:\n" + avatarCrownImages
+            "avatar_crown" to "images:\n" + avatarCrownImages,
+            "gadget_bar" to gadgetBarImages
         ).apply {
             putAll(counterImagesByScale)
         }

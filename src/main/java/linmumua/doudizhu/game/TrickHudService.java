@@ -182,9 +182,12 @@ final class TrickHudService {
      *
      * <p>越界值一律回退而不是照用：avatarScale 超出资源包预生成范围会让头像整片
      * 变成豆腐块，cardStep 非正会让牌倒着排或全叠成一张，两种都是纯粹的配置笔误。
+     * 头像与牌行重叠属于布局诊断，只在 {@code debug.enabled=true} 时提示，不改变任何
+     * 偏移值，也不影响正式 HUD 或资源/非法配置错误的告警。
      */
     static Settings readSettings(MuzYamlConfig config, Consumer<String> warn) {
         boolean enabled = config.getBoolean("trick-hud.enabled", true);
+        boolean debugEnabled = config.getBoolean("debug.enabled", false);
 
         int avatarScale = config.getInt("trick-hud.avatar-scale", DEFAULT_AVATAR_SCALE);
         if (PackAssets.avatarPixelScaleTierOf(avatarScale) < 0) {
@@ -218,12 +221,14 @@ final class TrickHudService {
             "trick-hud.offset-down", warn, PackAssets::cardGlyphDownOffsetAt);
 
         // 头像行的偏移【独立于牌行】，查的是头像自己那张档位表。两行能各自随便调是刻意的，
-        // 代价是配歪了两行会重叠 —— 那由下面的 warnIfRowsOverlap 出警告，不在这里拦。
+        // 代价是配歪了两行会重叠 —— 仅在 debug.enabled=true 时由下面的诊断提示，不在这里拦。
         int avatarOffsetDown = config.getInt("trick-hud.avatar-offset-down", DEFAULT_AVATAR_OFFSET_DOWN);
         int avatarDownOffsetTier = rawOffsetTier(
             avatarOffsetDown, PackAssets.nearestAvatarDownOffsetTier(avatarOffsetDown),
             "trick-hud.avatar-offset-down", warn, PackAssets::avatarDownOffsetAt);
-        warnIfRowsOverlap(offsetDown, avatarOffsetDown, avatarScale, warn);
+        if (debugEnabled) {
+            warnIfRowsOverlap(offsetDown, avatarOffsetDown, avatarScale, warn);
+        }
 
         // offset-x 不校验：任意整数都合法（正右负左），靠负空格实现，不依赖预生成字形。
         int offsetX = config.getInt("trick-hud.offset-x", 0);
@@ -317,8 +322,8 @@ final class TrickHudService {
      * 两行配歪了会重叠，重叠就留警告。
      *
      * <p>【这是「两行位置完全自由」方案的已知代价】：牌行与头像行各有独立档位表、各自随便调，
-     * 结构上不再保证不重叠，只能靠警告拦。所以这条警告必须真的有 —— 静默重叠的表现是
-     * 「头像糊在牌上」，服主完全没法把这个现象和自己改的那行配置联系起来。
+     * 结构上不再保证不重叠；开启 {@code debug.enabled} 后才通过这条警告提示。正式 HUD 仍按
+     * 用户配置渲染，不自动改成建议值，也不因这条诊断关闭。
      *
      * <p>几何依据：位图字形占基线上方 {@code [ascent - height, ascent]}，两族都取
      * {@code ascent = height - d}，于是字形盒是「基线下方 d 到基线上方 height - d」。

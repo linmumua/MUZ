@@ -12,9 +12,11 @@ import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.GamePhase;
+import linmumua.doudizhu.game.PhysicalChipService;
 import linmumua.doudizhu.game.ActionBarOverlayService;
 import linmumua.doudizhu.debug.DebugHudConfigController;
 import linmumua.doudizhu.debug.DebugWebServer;
+import linmumua.doudizhu.debug.GadgetPreviewSnapshotService;
 import linmumua.doudizhu.debug.HudResourceRecoveryService;
 import linmumua.doudizhu.debug.HudWebApplyCoordinator;
 import linmumua.doudizhu.game.HotbarHudService;
@@ -22,6 +24,7 @@ import linmumua.doudizhu.game.HudOverlayRuntimeState;
 import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.game.TableGadgetSettings;
 import linmumua.doudizhu.game.TableGadgetEffectService;
+import linmumua.doudizhu.game.TableGadgetBarHudService;
 import linmumua.doudizhu.game.TableSpeechPanelService;
 import linmumua.doudizhu.ui.GadgetBoxGuiService;
 import linmumua.doudizhu.ui.TableGadgetGuiService;
@@ -59,6 +62,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.math.BigDecimal;
 import java.time.format.DateTimeFormatter;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
@@ -178,6 +182,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private TableGadgetService tableGadgetService;
     private TableGadgetSettings tableGadgetSettings;
     private VirtualGadgetBarStore tableGadgetLoadoutStore;
+    private GadgetPreviewSnapshotService gadgetPreviewSnapshotService;
+    private TableGadgetBarHudService tableGadgetBarHudService;
     private TableGadgetGuiService tableGadgetGuiService;
     private TableSpeechPanelService tableSpeechPanelService;
     /** Debug Web 调试面板；仅 debug.web-ui.enabled=true 时非 null。 */
@@ -190,6 +196,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private HudOverlayRuntimeState hudOverlayRuntimeState;
     private PlayerHeadRenderer playerHeadRenderer;
     private VaultEconomyBridge vaultEconomyBridge;
+    private PhysicalChipService physicalChipService;
     private AiChatGateway aiChatGateway;
     private AiChatGateway.ProviderConfig aiProviderConfig;
     private HookSnapshot lastVaultHookSnapshot;
@@ -308,7 +315,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private final Map<UUID, EnumMap<PlayActionKind, Integer>> playerPlayActionKindProfileSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerHoverGlowColorSettings = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerSelectedGlowColorSettings = new ConcurrentHashMap<>();
-    private final Map<UUID, Integer> playerChipBalances = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerHandOffsets> playerHandOffsets = new ConcurrentHashMap<>();
 
     /** HUD 调试棒给单个玩家临时覆盖的三行可见组合；不存在时默认三行全开。 */
@@ -439,6 +445,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         tableManager = new TableManager(this);
         tableGadgetSettings = TableGadgetSettings.load(yamlConfig());
         tableGadgetLoadoutStore = new VirtualGadgetBarStore(playerSettingsFile.toPath());
+        gadgetPreviewSnapshotService = new GadgetPreviewSnapshotService(this, tableGadgetLoadoutStore);
         tableGadgetGuiService = new TableGadgetGuiService(
             tableGadgetLoadoutStore,
             action -> {
@@ -472,6 +479,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
                     default -> { }
                 }
             },
+            playerId -> {
+                if (gadgetPreviewSnapshotService != null) {
+                    gadgetPreviewSnapshotService.onSaved(playerId);
+                }
+                if (tableGadgetBarHudService != null) {
+                    tableGadgetBarHudService.onSaved(playerId);
+                }
+            },
             tableGadgetSettings.gui().title(),
             tableGadgetSettings.gui().bubbleName()
         );
@@ -487,6 +502,19 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hudResourceRecoveryService = new HudResourceRecoveryService(this, hudWebApplyCoordinator);
         tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this), tableGadgetSettings);
         tableSpeechPanelService = createTableSpeechPanelService(tableGadgetSettings);
+        tableGadgetBarHudService = new TableGadgetBarHudService(
+            this,
+            tableGadgetLoadoutStore,
+            tableGadgetService,
+            actionBarOverlayService,
+            craftEngineOffsetService,
+            player -> {
+                GameTable table = tableManager.getTableOf(player);
+                if (table != null && tableSpeechPanelService != null) {
+                    tableSpeechPanelService.open(table, player.getUniqueId());
+                }
+            }
+        );
         // Debug Web 调试面板：仅在 debug.web-ui.enabled=true 时启动，生产环境默认关闭。
         // 面板只负责 HUD 配置与资源恢复，不再接管已退役的正式 Hotbar 运行期服务。
         syncDebugWebServerRuntime();
@@ -494,6 +522,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // 预览复用正式 TrickHudService，但不挂到任何牌桌；它只服务 HUD 调试棒和配置对照。
         trickHudPreview = new TrickHudPreview(this);
         vaultEconomyBridge = new VaultEconomyBridge(this);
+        physicalChipService = new PhysicalChipService(this::chipPaymentItem, getLogger());
         physicalTableManager = new PhysicalTableManager(this);
         initializePersistence();
 
@@ -501,8 +530,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new WorldTableInteractionListener(this), this);
         getServer().getPluginManager().registerEvents(new CraftEngineLifecycleListener(this), this);
         getServer().getPluginManager().registerEvents(new HandGuiListener(this), this);
-        if (tableGadgetGuiService != null) {
-            getServer().getPluginManager().registerEvents(tableGadgetGuiService, this);
+        if (tableGadgetBarHudService != null) {
+            getServer().getPluginManager().registerEvents(tableGadgetBarHudService, this);
+            tableGadgetBarHudService.start();
+        }
+        if (gadgetPreviewSnapshotService != null) {
+            getServer().getPluginManager().registerEvents(gadgetPreviewSnapshotService, this);
         }
         registerMuzCommand();
         ensureCraftEngineProtectionListenerRegistered();
@@ -533,6 +566,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (debugWebServer != null) {
             debugWebServer.close();
         }
+        if (gadgetPreviewSnapshotService != null) {
+            gadgetPreviewSnapshotService.close();
+        }
         if (hudResourceRecoveryService != null) {
             hudResourceRecoveryService.close();
         }
@@ -541,6 +577,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         if (tableSpeechPanelService != null) {
             tableSpeechPanelService.shutdown();
+        }
+        if (tableGadgetBarHudService != null) {
+            tableGadgetBarHudService.shutdown();
         }
         if (tableGadgetGuiService != null) {
             tableGadgetGuiService.shutdown();
@@ -595,7 +634,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         return tableGadgetService;
     }
 
-    /** 道具箱 GUI 服务；世界按钮只通过此 getter 打开，不重复持有 GUI 状态。 */
+    /** 牌桌对局中的屏幕额外道具栏；不打开 Inventory GUI。 */
+    public TableGadgetBarHudService getTableGadgetBarHudService() {
+        return tableGadgetBarHudService;
+    }
+
+    /** 道具箱 GUI 服务；保留兼容入口，但牌桌按钮不再打开九格 Inventory GUI。 */
     public TableGadgetGuiService getTableGadgetGuiService() {
         return tableGadgetGuiService;
     }
@@ -1006,19 +1050,25 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public String placeholderChipValue(String rawTarget, @org.jetbrains.annotations.Nullable OfflinePlayer viewer) {
+        if (!Bukkit.isPrimaryThread()) {
+            return "不可查询（实体筹码仅支持在线主线程查询）";
+        }
         String target = linmumua.doudizhu.placeholder.MuzHeadPlaceholderFormat.normalizeTargetValue(rawTarget, viewer);
+        Player player;
         if (isBlank(target)) {
-            return viewer == null ? "0" : String.valueOf(getChipBalance(viewer.getUniqueId()));
+            player = viewer == null ? null : viewer.getPlayer();
+        } else {
+            player = Bukkit.getPlayerExact(target);
         }
-        Player online = Bukkit.getPlayerExact(target);
-        if (online != null) {
-            return String.valueOf(getChipBalance(online.getUniqueId()));
+        if (player == null || !player.isOnline()) {
+            return "不可查询（实体筹码仅支持在线主线程查询）";
         }
-        OfflinePlayer offline = Bukkit.getOfflinePlayer(target);
-        if (offline != null && offline.getName() != null && offline.getUniqueId() != null) {
-            return String.valueOf(getChipBalance(offline.getUniqueId()));
+        try {
+            return String.valueOf(getChipBalance(player.getUniqueId()));
+        } catch (RuntimeException exception) {
+            getLogger().log(java.util.logging.Level.WARNING, "实体筹码占位符查询失败: " + player.getUniqueId(), exception);
+            return "不可查询（实体筹码查询失败）";
         }
-        return "0";
     }
 
     public List<PlayerHistoryEntry> loadPlayerHistory(UUID playerId, int limit, int offset) {
@@ -1043,18 +1093,25 @@ public final class DoudizhuPlugin extends JavaPlugin {
         );
         List<MatchParticipantRecord> participants = new ArrayList<>();
         for (UUID seat : table.getSeats()) {
+            int scoreDelta = scoreDeltas.getOrDefault(seat, 0);
             SettlementResult settlement = settlements.getOrDefault(seat, currentRoomStatus(table.getRoomLevel(), seat));
+            // 实体筹码失败/不可查询时，战绩只保留积分；不得把 delta=0、余额=0 写成成功的筹码结算。
+            double settlementDelta = settlement.hasCurrencySnapshot() ? settlement.delta() : scoreDelta;
+            String settlementUnit = settlement.hasCurrencySnapshot() ? settlement.unitLabel() : "分";
+            double debtAfter = settlement.hasCurrencySnapshot() ? settlement.debt() : 0.0;
+            double balanceAfter = settlement.hasCurrencySnapshot() ? settlement.postBalance() : 0.0;
+            boolean bankrupt = settlement.hasCurrencySnapshot() && settlement.bankrupt();
             participants.add(new MatchParticipantRecord(
                 seat,
                 resolvePlayerName(seat) == null ? table.displayName(seat) : resolvePlayerName(seat),
                 table.getRole(seat) == null ? "无" : table.getRole(seat).displayName(),
                 winners.contains(seat) ? "WIN" : "LOSE",
-                scoreDeltas.getOrDefault(seat, 0),
-                settlement.delta(),
-                settlement.unitLabel(),
-                settlement.debt(),
-                settlement.postBalance(),
-                settlement.bankrupt()
+                scoreDelta,
+                settlementDelta,
+                settlementUnit,
+                debtAfter,
+                balanceAfter,
+                bankrupt
             ));
         }
         databaseManager.insertMatch(record, participants);
@@ -1183,6 +1240,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public void setChipPaymentEnabled(boolean enabled) {
+        ensureEconomyMutationAllowed("切换筹码支付模式");
         chipPaymentEnabled = enabled;
         yamlConfig().set("economy.payment.use-chip", enabled);
         saveYamlConfig();
@@ -1194,6 +1252,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public void setChipPaymentItem(ItemStack itemStack) {
+        ensureEconomyMutationAllowed("修改实体筹码模板");
         ItemStack copy = itemStack == null ? defaultChipItem() : itemStack.clone();
         copy.setAmount(1);
         yamlConfig().set("economy.payment.chip-item-stack", copy);
@@ -1201,29 +1260,34 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public int getChipBalance(UUID playerId) {
-        return playerChipBalances.getOrDefault(playerId, 0);
+        if (physicalChipService == null || playerId == null) {
+            throw new IllegalStateException("实体筹码服务尚未就绪或玩家 UUID 为空");
+        }
+        return physicalChipService.balance(playerId);
     }
 
     public int setChipBalance(UUID playerId, int amount) {
-        if (playerId == null) {
-            return 0;
+        if (physicalChipService == null || playerId == null) {
+            throw new IllegalStateException("实体筹码服务尚未就绪或玩家 UUID 为空");
         }
-        playerChipBalances.put(playerId, amount);
-        savePlayerSettings();
-        return amount;
+        return physicalChipService.setBalance(playerId, amount);
     }
 
     public int adjustChipBalance(UUID playerId, int delta) {
-        if (playerId == null || delta == 0) {
-            return getChipBalance(playerId);
+        if (physicalChipService == null || playerId == null) {
+            throw new IllegalStateException("实体筹码服务尚未就绪或玩家 UUID 为空");
         }
-        int next = playerChipBalances.getOrDefault(playerId, 0) + delta;
-        playerChipBalances.put(playerId, next);
-        savePlayerSettings();
-        return next;
+        return physicalChipService.adjustBalance(playerId, delta);
+    }
+
+    public PhysicalChipService physicalChipService() {
+        return physicalChipService;
     }
 
     public int roomEntryRequirement(TableLevel level) {
+        if (isChipPaymentEnabled() && level != null && isRoomEconomyEnabled(level)) {
+            return exactChipDelta(level, 1);
+        }
         return Math.max(0, (int) Math.round(roomMultiplier(level)));
     }
 
@@ -1232,7 +1296,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return true;
         }
         if (isChipPaymentEnabled()) {
-            return getChipBalance(playerId) >= roomEntryRequirement(level);
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                return false;
+            }
+            try {
+                return getChipBalance(playerId) >= roomEntryRequirement(level);
+            } catch (RuntimeException exception) {
+                getLogger().log(java.util.logging.Level.WARNING, "实体筹码资格查询失败: " + playerId, exception);
+                return false;
+            }
         }
         if (!isVaultEconomyEnabled()) {
             return false;
@@ -1246,6 +1319,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         int required = roomEntryRequirement(level);
         if (isChipPaymentEnabled()) {
+            Player online = playerId == null ? null : Bukkit.getPlayer(playerId);
+            if (online == null || !online.isOnline()) {
+                return "实体筹码只支持在线玩家查询，请重新上线后再试。";
+            }
             int balance = getChipBalance(playerId);
             if (balance < 0) {
                 return "你已破产，当前欠筹码 " + Math.abs(balance) + "，还清后才能参与" + roomDisplayLabel(level) + "。";
@@ -1321,6 +1398,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public void setRoomLevelMultiplier(TableLevel level, double multiplier) {
+        ensureEconomyMutationAllowed("修改房间倍率");
         if (level == null) {
             return;
         }
@@ -1332,6 +1410,7 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public boolean toggleRoomLevelEconomy(TableLevel level) {
+        ensureEconomyMutationAllowed("切换房间经济");
         if (level == null) {
             return false;
         }
@@ -1344,17 +1423,14 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public SettlementResult settleDoudizhuCurrency(TableLevel level, UUID playerId, int scoreDelta) {
+        if (isChipPaymentEnabled()) {
+            throw new IllegalStateException("实体筹码正常结算必须使用批量 transfer；禁止单人结算入口直接增删筹码。");
+        }
         if (playerId == null || !isRoomEconomyEnabled(level)) {
             return currentRoomStatus(level, playerId);
         }
         if (scoreDelta == 0) {
             return currentRoomStatus(level, playerId);
-        }
-        if (isChipPaymentEnabled()) {
-            int chipDelta = (int) Math.round(scoreDelta * roomMultiplier(level));
-            int postBalance = adjustChipBalance(playerId, chipDelta);
-            double debt = postBalance < 0 ? -postBalance : 0.0;
-            return settlementResult(level, chipDelta, debt, postBalance, true);
         }
         if (!isDoudizhuRoomEconomyEnabled(level)) {
             return currentRoomStatus(level, playerId);
@@ -1364,9 +1440,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
             return currentRoomStatus(level, playerId);
         }
         vaultEconomyBridge.ensureAccount(player);
-        double amount = Math.abs(scoreDelta) * doudizhuCurrencyPerPoint(level);
-        if (amount <= 0.0) {
-            return currentRoomStatus(level, playerId);
+        double amount = Math.abs((long) scoreDelta) * doudizhuCurrencyPerPoint(level);
+        if (!Double.isFinite(amount) || amount <= 0.0) {
+            throw new IllegalArgumentException("斗地主货币金额溢出或无效: 分差=" + scoreDelta + " 金币倍率=" + doudizhuCurrencyPerPoint(level));
         }
         if (scoreDelta > 0) {
             EconomyResponse response = vaultEconomyBridge.deposit(player, amount);
@@ -1410,12 +1486,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public SettlementResult currentRoomStatus(TableLevel level, UUID playerId) {
         if (playerId == null) {
-            return settlementResult(level, 0.0, 0.0, 0.0, isChipPaymentEnabled());
+            return unavailableSettlement(isChipPaymentEnabled() ? "筹码" : "金币");
         }
         if (isChipPaymentEnabled()) {
+            Player online = Bukkit.getPlayer(playerId);
+            if (physicalChipService == null || online == null || !online.isOnline()) {
+                return unavailableSettlement("筹码");
+            }
             int postBalance = getChipBalance(playerId);
-            double debt = postBalance < 0 ? -postBalance : 0.0;
-            return settlementResult(level, 0.0, debt, postBalance, true);
+            return settlementResult(level, 0.0, 0.0, postBalance, true);
         }
         if (!isVaultEconomyEnabled()) {
             return settlementResult(level, 0.0, 0.0, 0.0, false);
@@ -1429,7 +1508,54 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     public double doudizhuCurrencyPerPoint(TableLevel level) {
-        return vaultDoudizhuCurrencyPerPoint * roomMultiplier(level);
+        double value = vaultDoudizhuCurrencyPerPoint * roomMultiplier(level);
+        if (!Double.isFinite(value) || value < 0.0) {
+            throw new IllegalArgumentException("斗地主货币倍率溢出或无效: " + value);
+        }
+        return value;
+    }
+
+    /** 实体筹码结算只接受可精确表示的整数倍率，避免 double/round 破坏零和。 */
+    public int exactChipDelta(TableLevel level, int scoreDelta) {
+        if (scoreDelta == 0) {
+            return 0;
+        }
+        BigDecimal multiplier = BigDecimal.valueOf(roomMultiplier(level));
+        try {
+            return multiplier.multiply(BigDecimal.valueOf(scoreDelta)).intValueExact();
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException("实体筹码倍率必须产生精确整数: 分差=" + scoreDelta + " 倍率=" + roomMultiplier(level), exception);
+        }
+    }
+
+    /** 一局实体筹码只允许单次批量转移；服务失败时不产生任何欠账快照。 */
+    public Map<UUID, SettlementResult> settlePhysicalChips(TableLevel level, Map<UUID, Integer> scoreDeltas) {
+        if (!isChipPaymentEnabled() || scoreDeltas == null || scoreDeltas.isEmpty()) {
+            return Map.of();
+        }
+        if (!isRoomEconomyEnabled(level)) {
+            return Map.of();
+        }
+        Map<UUID, Integer> chipDeltas = new LinkedHashMap<>();
+        for (Map.Entry<UUID, Integer> entry : scoreDeltas.entrySet()) {
+            UUID playerId = Objects.requireNonNull(entry.getKey(), "实体筹码结算玩家为空");
+            if (isRegisteredBot(playerId)) {
+                throw new IllegalStateException("实体筹码付费房禁止机器人参与: " + playerId);
+            }
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                throw new IllegalStateException("实体筹码结算要求所有玩家在线: " + playerId);
+            }
+            chipDeltas.put(playerId, exactChipDelta(level, entry.getValue()));
+        }
+        Map<UUID, Integer> postBalances = physicalChipService.transfer(chipDeltas);
+        Map<UUID, SettlementResult> result = new LinkedHashMap<>();
+        for (Map.Entry<UUID, Integer> entry : scoreDeltas.entrySet()) {
+            int delta = chipDeltas.get(entry.getKey());
+            int postBalance = postBalances.getOrDefault(entry.getKey(), 0);
+            result.put(entry.getKey(), settlementResult(level, delta, 0.0, postBalance, true));
+        }
+        return result;
     }
 
     /**
@@ -1445,30 +1571,51 @@ public final class DoudizhuPlugin extends JavaPlugin {
      * @param scoreDelta 原始分差，正数是该拿钱，负数是该扣钱
      */
     public SettlementResult failedSettlement(TableLevel level, UUID playerId, int scoreDelta) {
-        boolean chipMode = isChipPaymentEnabled();
-        double owed = chipMode
-            ? Math.abs(Math.round(scoreDelta * roomMultiplier(level)))
-            : Math.abs(scoreDelta) * doudizhuCurrencyPerPoint(level);
+        if (isChipPaymentEnabled()) {
+            return failedChipSettlement();
+        }
+        double owed = Math.abs((long) scoreDelta) * doudizhuCurrencyPerPoint(level);
         double balance = 0.0;
         try {
             SettlementResult current = currentRoomStatus(level, playerId);
-            balance = current.postBalance();
+            if (current.status() == SettlementStatus.SETTLED) {
+                balance = current.postBalance();
+            }
         } catch (RuntimeException ignored) {
-            // 连查余额都失败时余额按 0 记：这里已经在异常兜底路径上，
-            // 再抛一次会把整局结算重新带崩，那正是这个方法要避免的事。
+            // 失败路径不能再次把整局结算带崩。
         }
-        return new SettlementResult(0.0, owed, balance, true, true, chipMode ? "筹码" : "金币");
+        return new SettlementResult(0.0, owed, balance, true, true, "金币", SettlementStatus.FAILED);
     }
 
     private SettlementResult settlementResult(TableLevel level, double delta, double debt, double postBalance, boolean chipMode) {
         int requirement = roomEntryRequirement(level);
         boolean bankrupt = postBalance <= 0.0 || debt > 0.0;
         boolean insufficient = level != null && level != TableLevel.FUN && isRoomEconomyEnabled(level) && postBalance < requirement;
-        return new SettlementResult(delta, debt, postBalance, bankrupt, insufficient, chipMode ? "筹码" : "金币");
+        return new SettlementResult(delta, debt, postBalance, bankrupt, insufficient, chipMode ? "筹码" : "金币", SettlementStatus.SETTLED);
+    }
+
+    public SettlementResult unavailableSettlement(String unitLabel) {
+        return new SettlementResult(0.0, 0.0, 0.0, false, false, unitLabel, SettlementStatus.UNAVAILABLE);
+    }
+
+    public SettlementResult failedChipSettlement() {
+        return new SettlementResult(0.0, 0.0, 0.0, false, false, "筹码", SettlementStatus.FAILED);
     }
 
     private String safeEconomyError(String raw) {
         return isBlank(raw) ? "经济插件未返回详细错误" : raw;
+    }
+
+    private void ensureEconomyMutationAllowed(String action) {
+        if (tableManager != null && tableManager.getTables().stream().anyMatch(table -> table.getPhase() != GamePhase.LOBBY)) {
+            throw new IllegalStateException(action + "只能在所有斗地主牌桌处于大厅时执行。");
+        }
+    }
+
+    public String economyFingerprint(TableLevel level) {
+        RoomLevelProfile profile = roomLevelProfile(level);
+        return chipPaymentEnabled + "|" + chipPaymentItem() + "|" + profile.multiplier()
+            + "|" + profile.economyEnabled() + "|" + vaultDoudizhuCurrencyPerPoint;
     }
 
     private RoomLevelProfile roomLevelProfile(TableLevel level) {
@@ -1814,6 +1961,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public Integer getBotNumericId(UUID botId) {
         return botNumericIdsByUuid.get(botId);
+    }
+
+    public boolean isRegisteredBot(UUID botId) {
+        return botId != null && botNumericIdsByUuid.containsKey(botId);
     }
 
     public BotHandle getBotHandle(int numericId) {
@@ -3618,7 +3769,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     }
 
     private DebugWebServer createDebugWebServer() {
-        return new DebugWebServer(this, null, null, hudWebConfigController, hudWebApplyCoordinator);
+        return new DebugWebServer(this, null, null, hudWebConfigController, hudWebApplyCoordinator,
+            gadgetPreviewSnapshotService);
     }
 
     /** 按新配置独立同步桌内道具、语音面板；不再借用 hotbar-hud.enabled 作为生命周期开关。 */
@@ -4628,7 +4780,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         playerPlayActionKindProfileSettings.clear();
         playerHoverGlowColorSettings.clear();
         playerSelectedGlowColorSettings.clear();
-        playerChipBalances.clear();
         playerHandOffsets.clear();
         if (playerSettingsFile == null) {
             return;
@@ -4666,9 +4817,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 if (playerSettingsConfig.contains(base + ".selected-glow-color")) {
                     playerSelectedGlowColorSettings.put(playerId, clampGlowColorIndex(playerSettingsConfig.getInt(base + ".selected-glow-color", 0)));
                 }
-                if (playerSettingsConfig.contains(base + ".chip-balance")) {
-                    playerChipBalances.put(playerId, playerSettingsConfig.getInt(base + ".chip-balance", 0));
-                }
                 if (playerSettingsConfig.contains(base + ".hand-offset.lateral")
                     || playerSettingsConfig.contains(base + ".hand-offset.vertical")
                     || playerSettingsConfig.contains(base + ".hand-offset.depth")
@@ -4701,7 +4849,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         configuration.set(base + ".hover-glow-color", null);
         configuration.set(base + ".selected-glow-color", null);
-        configuration.set(base + ".chip-balance", null);
         configuration.set(base + ".hand-offset.lateral", null);
         configuration.set(base + ".hand-offset.vertical", null);
         configuration.set(base + ".hand-offset.depth", null);
@@ -4725,7 +4872,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
         players.addAll(playerPlayActionKindProfileSettings.keySet());
         players.addAll(playerHoverGlowColorSettings.keySet());
         players.addAll(playerSelectedGlowColorSettings.keySet());
-        players.addAll(playerChipBalances.keySet());
         players.addAll(playerHandOffsets.keySet());
         for (String rawId : existingPlayerIds) {
             clearManagedPlayerSettings(configuration, "players." + rawId);
@@ -4755,9 +4901,6 @@ public final class DoudizhuPlugin extends JavaPlugin {
             }
             if (playerSelectedGlowColorSettings.containsKey(playerId)) {
                 configuration.set(base + ".selected-glow-color", playerSelectedGlowColorSettings.get(playerId));
-            }
-            if (playerChipBalances.containsKey(playerId)) {
-                configuration.set(base + ".chip-balance", playerChipBalances.get(playerId));
             }
             if (playerHandOffsets.containsKey(playerId)) {
                 PlayerHandOffsets offsets = playerHandOffsets.get(playerId).normalized();
@@ -5741,14 +5884,35 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private record RoomLevelProfile(TableLevel level, String label, double multiplier, boolean economyEnabled) {
     }
 
+    public enum SettlementStatus {
+        SETTLED,
+        FAILED,
+        UNAVAILABLE
+    }
+
     public record SettlementResult(
         double delta,
         double debt,
         double postBalance,
         boolean bankrupt,
         boolean insufficientForRoom,
-        String unitLabel
+        String unitLabel,
+        SettlementStatus status
     ) {
+        public SettlementResult(
+            double delta,
+            double debt,
+            double postBalance,
+            boolean bankrupt,
+            boolean insufficientForRoom,
+            String unitLabel
+        ) {
+            this(delta, debt, postBalance, bankrupt, insufficientForRoom, unitLabel, SettlementStatus.SETTLED);
+        }
+
+        public boolean hasCurrencySnapshot() {
+            return status == SettlementStatus.SETTLED;
+        }
     }
 
     private record RgbColor(int red, int green, int blue) {

@@ -112,6 +112,8 @@ public final class GameTable {
     private long lastLobbyWarningSoundAt;
     private long lobbyUiResumeAtMillis;
     private long delayedUnreadyReminderAtMillis;
+    private boolean roundSettlementInProgress;
+    private String roundEconomyFingerprint;
     private boolean debugAutoLoop;
     private String lastActionText = "等待加入";
     private Component lastActionComponent = Component.text("等待加入", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false);
@@ -399,12 +401,28 @@ public final class GameTable {
 
             @Override
             public void applyTotalScoreDelta(UUID playerId, int delta) {
-                totalScores.merge(playerId, delta, Integer::sum);
+                totalScores.merge(playerId, delta, (left, right) -> Math.addExact(left, right));
             }
 
             @Override
             public boolean isBot(UUID playerId) {
                 return GameTable.this.isBot(playerId);
+            }
+
+            @Override
+            public boolean economyFingerprintMatches() {
+                return roundEconomyFingerprint == null
+                    || roundEconomyFingerprint.equals(plugin.economyFingerprint(roomLevel));
+            }
+
+            @Override
+            public void notifySettlementFailure(String message) {
+                for (UUID seat : seats) {
+                    Player player = onlinePlayer(seat);
+                    if (player != null) {
+                        player.sendMessage(MuzTheme.danger(message));
+                    }
+                }
             }
         });
         this.roundOpeningCoordinator = new RoundOpeningCoordinator(new RoundOpeningCoordinator.Support() {
@@ -480,6 +498,9 @@ public final class GameTable {
     }
 
     public void setRoomLevel(TableLevel roomLevel) {
+        if (phase != GamePhase.LOBBY) {
+            throw new IllegalStateException("只有大厅阶段才能修改房间等级。");
+        }
         this.roomLevel = roomLevel == null ? TableLevel.FUN : roomLevel;
     }
 
@@ -731,6 +752,11 @@ public final class GameTable {
     }
 
     private void ensureSeatEntryEligibility() {
+        if (plugin.isChipPaymentEnabled()
+            && plugin.isRoomEconomyEnabled(roomLevel)
+            && seats.stream().anyMatch(this::isBot)) {
+            throw new IllegalStateException("实体筹码付费房不允许机器人开局，请改用娱乐场或 Vault 金币房。 ");
+        }
         for (UUID seat : seats) {
             if (!isBot(seat) && !plugin.canAffordEntry(seat, roomLevel)) {
                 throw new IllegalStateException(displayName(seat) + " 资格不足: " + plugin.insufficientEntryMessage(seat, roomLevel));
@@ -740,6 +766,7 @@ public final class GameTable {
 
     public void startRound(CommandSender sender) {
         ensureRoundCanStart();
+        roundEconomyFingerprint = plugin.economyFingerprint(roomLevel);
         dealFreshRound();
         broadcastActionBar(MuzTheme.field(
             "开局",
@@ -1215,6 +1242,9 @@ public final class GameTable {
         stopMusicAll();
         trickHud.hideAll();
         actionBarOverlay.clearTable(this);
+        if (plugin.getTableGadgetBarHudService() != null) {
+            plugin.getTableGadgetBarHudService().clearTable(this);
+        }
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
@@ -1399,22 +1429,39 @@ public final class GameTable {
     }
 
     private void finishRound(UUID winner) {
-        stopMusicAll();
-        RoundSettlementCoordinator.RoundSettlement settlement = roundSettlementCoordinator.settle(winner);
-        RoundSettlementView settlementView = settlementView(settlement);
-        Component summary = settlementView.summary(orderedPlayersComponent(settlement.winners()));
-        // IMPORTANT:
-        // Keep round-end chat on a single send path.
-        // `sendRoundChatBundles(...)` already includes the full multiplier block, so broadcasting summary here again
-        // would resend the same final multiplier text and cause duplicate settlement chat after a round ends.
-        setLastActionText(settlement.landlordWin() ? "地主阵营胜出" : "农民阵营胜出", summary);
-        plugin.recordDoudizhuMatch(this, settlement.winners(), settlement.scoreDeltas(), settlement.settlementSnapshots());
-        sendRoundChatBundles(settlement, settlementView);
-        broadcastStickyOutcomeActionBar(settlement.winners());
-        for (UUID seat : seats) {
-            playEffect(seat, (settlement.landlordWin() == seat.equals(landlord)) ? PackSounds.win() : PackSounds.lose());
+        if (roundSettlementInProgress || phase != GamePhase.PLAYING) {
+            return;
         }
-        resetRound();
+        roundSettlementInProgress = true;
+        try {
+            stopMusicAll();
+            RoundSettlementCoordinator.RoundSettlement settlement = roundSettlementCoordinator.settle(winner);
+            RoundSettlementView settlementView = settlementView(settlement);
+            Component summary = settlementView.summary(orderedPlayersComponent(settlement.winners()));
+            setLastActionText(settlement.landlordWin() ? "地主阵营胜出" : "农民阵营胜出", summary);
+            plugin.recordDoudizhuMatch(this, settlement.winners(), settlement.scoreDeltas(), settlement.settlementSnapshots());
+            sendRoundChatBundles(settlement, settlementView);
+            broadcastStickyOutcomeActionBar(settlement.winners());
+            for (UUID seat : seats) {
+                playEffect(seat, (settlement.landlordWin() == seat.equals(landlord)) ? PackSounds.win() : PackSounds.lose());
+            }
+        } catch (RuntimeException exception) {
+            plugin.getLogger().log(java.util.logging.Level.SEVERE, "牌局结算收尾失败，已终止本局并核查日志。牌桌=" + name, exception);
+            for (UUID seat : seats) {
+                Player player = onlinePlayer(seat);
+                if (player != null) {
+                    player.sendMessage(MuzTheme.danger("本局结算未完成，请核查日志与库存。"));
+                }
+            }
+        } finally {
+            try {
+                if (phase != GamePhase.LOBBY) {
+                    resetRound();
+                }
+            } finally {
+                roundSettlementInProgress = false;
+            }
+        }
     }
 
     private void broadcastStickyOutcomeActionBar(List<UUID> winners) {
@@ -1448,6 +1495,9 @@ public final class GameTable {
         trickHud.hideAll();
         // phase 切回 LOBBY 前主动清掉最后一帧 ActionBar，避免等待下一次周期 tick。
         actionBarOverlay.clearTable(this);
+        if (plugin.getTableGadgetBarHudService() != null) {
+            plugin.getTableGadgetBarHudService().clearTable(this);
+        }
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
@@ -1472,6 +1522,8 @@ public final class GameTable {
     }
 
     private void clearTableStateForForceClose() {
+        roundSettlementInProgress = false;
+        roundEconomyFingerprint = null;
         cancelPendingNoResponsePass();
         botActionEpoch++;
         if (roundOpeningCoordinator != null) {
@@ -1512,6 +1564,8 @@ public final class GameTable {
     }
 
     private void resetRoundStateForLobby() {
+        roundSettlementInProgress = false;
+        roundEconomyFingerprint = null;
         phase = GamePhase.LOBBY;
         readyPlayers.clear();
         bids.clear();
@@ -2174,6 +2228,16 @@ public final class GameTable {
         RoundSettlementView settlementView
     ) {
         DoudizhuPlugin.SettlementResult result = settlement.displayResultFor(seat, plugin, roomLevel);
+        if (result.status() == DoudizhuPlugin.SettlementStatus.FAILED) {
+            return MuzTheme.plain(identity(seat, NamedTextColor.WHITE)
+                .append(MuzTheme.divider(" · "))
+                .append(MuzTheme.danger("实体筹码结算未完成，请核查日志与库存")));
+        }
+        if (result.status() == DoudizhuPlugin.SettlementStatus.UNAVAILABLE) {
+            return MuzTheme.plain(identity(seat, NamedTextColor.WHITE)
+                .append(MuzTheme.divider(" · "))
+                .append(MuzTheme.warning("结算状态不可用，请核查日志")));
+        }
         return settlementView.playerLine(
             identity(seat, NamedTextColor.WHITE),
             getRole(seat),
@@ -2288,7 +2352,13 @@ public final class GameTable {
 
     static int coreScoreFor(int highestBid, int revealMultiplier, int bombMultiplier, int springMultiplier) {
         int publicFactor = Math.clamp(revealMultiplier, 1, 2);
-        return Math.max(1, highestBid) * publicFactor * Math.max(1, bombMultiplier) * Math.max(1, springMultiplier);
+        int bid = Math.max(1, highestBid);
+        int bombs = Math.max(1, bombMultiplier);
+        int spring = Math.max(1, springMultiplier);
+        return Math.multiplyExact(
+            Math.multiplyExact(Math.multiplyExact(bid, publicFactor), bombs),
+            spring
+        );
     }
 
     private int liveCoreScore() {

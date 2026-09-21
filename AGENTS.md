@@ -57,7 +57,7 @@
 
 ## 版本与发布约定
 
-- 版本号写在 `build.gradle.kts` 的 `version`，当前源码版本为 `1.10.38`（桌内九格道具箱、私有气泡语音实体面板、玩家道具栏持久化；退役三道具 Hotbar 资源链，Debug Web 收敛为牌行/头像/记牌器三层）。`paper-plugin.yml` 用 `${version}` 占位，不要手写。
+- 版本号写在 `build.gradle.kts` 的 `version`，当前源码版本为 `1.10.46`（实体筹码已改为按背包与副手实际物品计数；桌内道具改为九格图标额外栏，第九格为语音入口；本轮新增 Folia 调度抽象但尚未声明支持；本轮验证结果见下方记录）。`paper-plugin.yml` 用 `${version}` 占位，不要手写。
 - 构建目标由 `MuzTarget` 表驱动，通过 `-PmuzTarget=<id>` 选择，默认 `paper-26.2`。产物落在 `build/<targetId>/`，**不是** `build/`。
 - 禁止无版本号变化地替换已发布构建。改了行为就升版本。
 
@@ -129,7 +129,8 @@ messages:
 - `TableEffectCoordinator`（`game`）：桌内普通音效、出牌语音和倒计时统一从此出口播放；按玩家+音效做短窗口去重，倒计时按 16 tick 窗口抑制重复触发，避免重复事件造成音效叠加，不吞掉不同玩家或不同音效。
 - `TableMusicCoordinator`（`game`）：背景音乐独立维护活动会话、轮播任务句柄和实际收听者 UUID。只有合法开局才能激活；结束先禁用会话、递增 epoch 并取消轮播，再向实际收听者与当前座位停止 `PackSounds.bgmTracks()` 的五首曲目。停止后即使牌桌尚未切回 LOBBY，`updateState` 或迟到回调也不得重启；旧局任务不得影响新局。只停止本插件背景曲目，不使用 `stopAllSounds`，不影响胜负音效或其他玩家。同一活动会话的重复开局请求必须幂等；每次轮播消费都递增 epoch，已执行回调不得再切曲或取消新任务。每次播放前必须先停止五首 BGM，测试须记录调用顺序与模拟活跃曲目，不能仅断言调用总数。普通提示音允许与 BGM 混音；可配置提示音及动作不能配置为 MUZ BGM，否则会绕过本协调器，外部插件/命令的声音不属于本协调器的互斥范围。
 - `TrickHudService` / `TrickHudView`（`game`）：正式 Trick HUD 的数据组装与字形渲染分离，由牌桌对局状态、配置和玩家级调试棒行覆盖共同驱动；Service 产出 cell，View 负责 advance 宽度与居中算式。`/muz give debug` 保留为个人 HUD 调试棒：玩家未进牌桌时可显示与 Debug Web 对照的游戏内 Trick HUD；右键循环牌行、头像行、记牌行，Shift+右键隐藏。调试棒只影响持有者个人，不写入运行期正式配置；`/muz debug show|stick|hud` 继续移除。Debug Web 仅负责回环地址上的运行期 HUD 参数预览与配置。**记牌器行（counter row）显示本局累计已出张数**：固定 15 格，使用资源包分层位图 glyph 叠加牌类、矩形框和数字三层，不再使用纯文本 MiniMessage 作为正式记牌器渲染（详见「记牌器分层字形渲染」）。
-- `ActionBarOverlayService`（`game`）：承载对局普通 ActionBar 提示及短时叠加状态，不读取资源包或 CraftEngine。正式运行期不再构造 `HotbarHudService`；该旧类及部分 `PackAssets`/`HudResourceRequest` Hotbar 字段仅保留源码/二进制兼容边界，不得重新接回运行期装配或资源生成。
+- `PhysicalChipService`（`game`）：实体筹码唯一库存入口；以配置物品完整元数据匹配（忽略数量），统计主背包 0..35 与副手，不重复主手、不统计护甲/光标/容器内部。一件为一筹码，主线程实时读写，不持久化独立余额；设置模板不兑换旧物品或旧 `chip-balance`。增删与多人转移先预演全部槽位，批量转移必须零和并先扣后发；容量/数量不足时预检拒绝，写入异常按原槽位回滚，回滚失败必须明确提示库存需核查。`DoudizhuPlugin` 只委托；`RoundSettlementCoordinator` 对筹码使用批结算，不沿用 Vault 的逐人欠账语义；实体筹码付费局禁止机器人开局，正常结算具有单局防重入保护。离线/异步查询不返回伪造余额，旧余额不兑换成物品。
+- `ActionBarOverlayService`（`game`）：承载对局普通 ActionBar 提示及短时叠加状态，不读取资源包或 CraftEngine。正式运行期不再构造退役的三图标 `HotbarHudService`；桌内道具改由 `TableGadgetBarHudService` 消费独立 `muz_gadget_bar` 九格字体资源，前八格显示虚拟道具图标，第九格显示语音入口，不覆盖原版 `hotbar.png`。该服务仅在 PLAYING 阶段同桌在线真人显示，滚轮/数字键选择槽位，右键第九格打开私有语音面板；Bukkit 九格 Inventory GUI 仅保留配置/编辑用途，不作为对局显示入口。
 - `TableGadgetService`、`TableGadgetSettings`、`TableGadgetEffectService` 与 `model.TableGadget`：桌内三道具互动的选择、资格、目标、冷却、并发和效果边界。`GadgetBoxGuiService` / `TableGadgetGuiService` 提供九格道具箱，`VirtualGadgetBarStore` 使用 `MuzYamlConfig`/SnakeYAML 将八个玩家槽位持久化到 `player-settings.yml`；配置路径缺失表示默认鸡蛋/水桶/番茄，显式空列表表示玩家已清空。`TableSpeechPanelService` 通过仅对发起者可见的 Display Entity 构造气泡语音面板，第九格固定为入口，不写入玩家道具栏。仅服务 `PLAYING` 阶段同桌在线真人；机器人、旁观者、跨桌玩家和无效目标不参与。目标高亮使用对附近观察者全局可见的短时真实发光，带引用计数，记录并恢复既有状态，多引用和所有离桌/死亡/传送/断线/关桌路径必须清理；清理目标时同时删除指向该目标的旧 actor 状态，避免同 UUID 返回后被短路。CE `FurnitureInteractEvent` 在手牌仲裁之后进入同一道具右键路由。鸡蛋/番茄为短暂无伤害投掷，水桶为贴身短时透明水幕，不放置真实水方块、不造成伤害或扩散。水幕实体与头顶水桶按两个实体计入上限；效果实体/粒子必须统一登记、限额和清理，不得遗留。`clearAll()` 用于可恢复 stop/reload，`shutdown()` 仅用于插件最终关闭。PlayerItemHeldEvent 无法严格区分滚轮与数字键，统一按同一虚拟索引映射处理。
 - `DebugWebServer`（`debug/` 包）：内嵌 HTTP 服务只监听回环地址，正式页面与根目录原型均收敛为牌行、头像行、记牌器行三个可拖动图层；字段白名单固定 18 个 `trick-hud.*` 运行期键。页面只消费服务端下发的 `geometry.cards` / `avatars` / `counterTiers` 与白名单真实 PNG，不复算码位或字体宽度，不再下发 Hotbar geometry、图标或选中框。`/api/save` 与 `/api/reload` 继续通过 `HudWebApplyCoordinator` 串行执行异步 SnakeYAML 配置/三层 overlay、主线程 CE reload、异步生成并校验实际 ZIP、主线程发布快照；失败回滚三层自有资源并清 ready，客户端仍需重新下载资源包。
 - Web 保存与磁盘重载共用插件提供的 HUD 配置锁，形成 Web 自身的配置快照边界；配置文件 I/O 保持在异步线程，不放回主线程。该锁不等同于全局配置事务：现有管理菜单及其它非 Web 配置入口尚未全部接入，若它们并发改写共享 `MuzYamlConfig`，仍存在既有竞态，后续需统一配置层处理。
@@ -141,7 +142,8 @@ messages:
 - `HudResourcePackVerifier`（`compat`）：异步读取实际 ZIP 中央目录并校验长度、CRC、pack 格式、Trick 字体声明、当前 profile PNG 及桌内道具独立 item 资源；继续拒绝原版 `hotbar.png` / `hotbar_selection.png` 覆盖及旧 Hotbar provider。服务端内容校验、远端上传完成、客户端应用仍是三件事，后两者无回执时保持未确认。
 - `HudOverlayRuntimeState`（`game`）：保存 Trick 三层 `HudResourceRequest` 的已验证 ready 快照；任何资源流程失败都必须清除 ready，不能恢复先前 ready（CraftEngine 可能已经部分 reload）；连续非 profile Y 未 ready 时正式 HUD 必须隐藏并告警，不得 nearest，精确的旧 bundle 档位可兼容。Legacy offset-only Hotbar 写入口必须显式拒绝，只有完整 `HudResourceRequest` 才能写入/应用资源。`HudResourceRecoveryService`（`debug`）独立负责启动、`/muz reload` 与 CraftEngine enable 后的资源恢复，不受 Debug Web 开关影响；入口类只做装配委托，不堆业务逻辑。
 - `PackTiers`（构建期生成）：档位容量常量，插件侧只读引用，**不要手改**。
-- `MuzYamlConfig`（`config`）：SnakeYAML 读写封装。
+- `MuzYamlConfig`（`config`）：SnakeYAML 读写封装。`readOnlyRoot(Path)` 为预览提供严格只读解析：损坏文件报错，不触发隔离重命名或补写。
+- `GadgetPreviewSnapshotService`（`debug`）：异步读取 `VirtualGadgetBarStore.loadRaw`，主线程解码物品并发布不可变玩家快照，使用代次阻止旧读覆盖保存后状态；Web 只显示八槽内非空物品，顺序与重复项保留，不新增游戏 HUD。
 - `model`：`CardRank`、牌型定义等纯数据对象，不含 IO 与 Bukkit 依赖。
 - `storage`：存档读写，须异步执行。
 - `compat`：CraftEngine / Vault / PlaceholderAPI 桥接，必须做存在性判断与降级。
@@ -255,9 +257,9 @@ linmumua.doudizhu
 
 ## Folia 支持状态
 
-`folia-supported: false`（2026-08 起）。原先声明 `true` 但 `MuzScheduler` 五个方法全走 `BukkitScheduler`，Folia 已废弃该接口，调用即抛 `UnsupportedOperationException`——声明支持却跑不起来比不声明更糟，因此改为 `false`。
+`folia-supported: false`（2026-08 起，当前 1.10.46）。第一阶段已为 `MuzScheduler` 建立 `GlobalRegionScheduler`、`RegionScheduler`、`EntityScheduler` 与 `AsyncScheduler` 的 Paper 兼容后端，并将预览、Web、皮肤渲染和旧 Hotbar 的直接 Bukkit 调度调用收敛到门面；但牌桌、玩家输出、实体生命周期、跨区域副作用和麻将领域尚未完成 owner 路由，也没有真实 Folia 服务端矩阵验收，因此声明仍必须是 `false`。
 
-要恢复 `true`，必须先把 `MuzScheduler` 换成 `GlobalRegionScheduler` / `RegionScheduler` / `EntityScheduler` / `AsyncScheduler` 分发，并逐个确认实体操作跑在正确的区域线程上。`FoliaDeclarationMatchesSchedulerTest` 会把声明与调度层实现绑定校验，改一边不改另一边会红。
+要恢复 `true`，必须先完成牌桌锚点与区域线程、玩家/实体调度、跨区域状态消息、区块卸载/重载、关闭清理和麻将迁移，并在三个目标上使用真实 Folia 服务端验证。当前工作区只有 Leaf 26.1.2 测试服，没有 Folia 核心、世界目录或真实 Folia 验收记录；Leaf/Paper 验证不得替代 Folia 验收。`FoliaDeclarationMatchesSchedulerTest` 会检查 Paper 兼容后端、声明值和业务代码不得直接绕过 `MuzScheduler`；没有真实 Folia 验收前不得改为 `true`。
 
 注意 `TrickHudService` 的 `snapshot` 字段仍保留 `volatile` 与整份替换语义，那是为未来的区域线程读做的准备，不要因为现在不支持 Folia 就摘掉。
 
@@ -275,6 +277,64 @@ linmumua.doudizhu
 | 可选依赖 | CraftEngine 0.0.67、PlaceholderAPI 2.12.2、VaultAPI 1.7 | 全部 `compileOnly` |
 | 构建 | Gradle + Kotlin DSL + `com.gradleup.shadow:9.3.0` | 产物在 `build/<targetId>/` |
 | 测试 | JUnit 5（junit-bom 5.13.4），127 个测试类 | 仓库路径含中文时 Gradle 测试 worker 会报 `ClassNotFoundException`，需改用独立 JUnit Launcher 实跑（classpath 用 argfile 传，避免 MSYS2 搅坏 `;` 分隔符） |
+
+### 1.10.44（实体筹码收付与失败状态保护，定向验证通过）
+
+- 筹码余额改为实时统计玩家主背包 0..35 与副手中的匹配物品，每件物品按实际数量计一筹码；不统计护甲、光标或容器内部，不再读取或写入独立 `chip-balance` 虚拟余额。主手设置的 `chip-item-stack` 只作为完整物品元数据匹配模板，忽略数量，不自动兑换或发放旧物品。
+- 新增 `PhysicalChipService` 作为实体筹码唯一库存入口：所有库存读写限定主线程；设置、增减和多人转移先预演全部槽位，容量或数量不足整批拒绝，批量转移先扣后发，写入异常按槽位回滚，回滚失败明确提示库存需核查。实体筹码付费局禁止机器人开局，单局结算增加防重入保护。
+- 实体筹码结算不沿用 Vault 的逐人欠账语义；失败状态为 `FAILED`，聊天提示“实体筹码结算未完成，请核查日志与库存”，不可伪造持平、余额 0 或已回滚成功。异步/离线余额查询返回不可查询，不伪造缓存值；Placeholder 先做主线程门禁。
+- 对局冻结经济指纹，活动局修改支付模式、筹码模板、场次倍率或经济开关后拒绝结算，避免错扣/错付；非大厅经济设置入口拒绝修改。核心分乘法使用精确算术并由统一上限保护；结算收尾使用 `finally` 恢复状态并重置牌局。
+- 26.1.2 强制执行 `compileJava compileTestJava processResources processTestResources --rerun-tasks`，7 项任务成功；实体筹码、结算、入口、溢出和 HUD 定向回归 **61/61**，8 个容器成功，无失败、跳过或中止。保留既有 Unsafe/API 与独立启动器注解依赖警告。
+- 本轮未打包、未部署或重启实服；真实背包操作、CraftEngine 资源应用和客户端显示仍需人工确认。实体筹码保存失败/数据库兼容的现场升级路径未在实服验证。
+
+### 1.10.45（九格图标额外栏与语音面板等比修复，定向验证通过）
+
+- 桌内道具不再通过九格 Bukkit Inventory GUI 作为对局入口；新增独立 `muz_gadget_bar` 九格字体资源，前八格按 `VirtualGadgetBar` 显示真实道具图标，第九格显示语音入口，玩家通过滚轮/数字键选择，右键第九格打开私有实体语音面板。原版 `hotbar.png` / `hotbar_selection.png` 不被覆盖，退役三图标 Hotbar 字体链不重新接回。
+- `TableGadgetBarHudService` 仅向 PLAYING 阶段同桌在线真人发送额外栏，异步读取玩家道具配置并在主线程组合字形；空槽保留占位，选择状态和语音资格由同一服务维护。牌桌按钮只刷新额外栏，不打开配置 Inventory；配置 GUI 仅保留编辑用途。
+- `TableSpeechPanelService` 文字变换改为等比缩放，面板宽度只影响命中区域，不再按单空格基准横向放大中文语音文字。
+- `paper-26.1.2` 强制执行 `compileJava compileTestJava processResources processTestResources --rerun-tasks`，7 项任务成功；九格图标栏、语音面板、资源包与校验器定向回归 **83/83**，5 个容器成功，无失败、跳过或中止。保留既有 Unsafe/API 与独立启动器注解依赖警告。
+- 本轮未打包、未部署或重启实服；九格图标在客户端资源包中的最终显示、槽位对齐、语音面板实际宽度仍需进服并重新下载资源包确认。
+
+### 1.10.43（移除 trace 命令，定向验证通过）
+
+- 移除 `/muz debug trace` 执行分支、Tab 补全、参数用法提示及无用 import；不改其它 debug 子命令或 `/muz give debug`。内部追踪实现与日志收尾暂保留，不扩展为底层清理。
+- 26.1.2 强制编译及资源处理 7 项任务实际执行成功，三类定向测试 10/10、4 个容器成功，无失败、跳过、中止。原日志测试要求命令提示显示日志路径，现按明确的命令删除需求改为禁止入口与提示复活，内部日志路径及收尾断言保留。
+- 未跑全仓或其它目标测试，未打包部署；保留既有 Unsafe/API 与启动器注解依赖警告。
+
+### 1.10.42（预览令牌与图片 CSP 修复，本地回归通过）
+
+- 正式两份 HTML 的道具预览和全部 HUD/道具图标 fetch 显式传递 `X-MUZ-Token`，不依赖 `no-referrer` 页面不会发送的 Referer。保留严格 GET 来源授权，不增加查询参数令牌或关闭校验。
+- CSP 仅将 `blob:` 加入 `img-src`，其余脚本、连接和框架限制不变；图标继续复用 Object URL 并在页面退出时释放。Java 兼容模板同样带令牌读取图片并释放 Object URL。
+- 1.10.41 的后端专项未覆盖真实响应头组合；已确认旧页面请求缺 Token 且无来源头、旧 CSP 拒绝 blob 图片，不能将历史单测通过视为端到端可用。26.1.2 最终强制编译与资源处理 7 项任务实际执行成功；全量后端 889/889、130 个容器成功，最终浏览器及后端专项联合 52/52、5 个容器成功，均无失败、跳过或中止。
+- 浏览器夹具从生产 `addSecurityHeaders` 导出响应头，受保护 GET 在 Node 夹具中严格要求 Token（不是完整 Java HTTP 服务）；确认请求无 Origin/Referer 但带 Token、道具 blob 图片 naturalWidth 非零及无非预期浏览器错误。首次真实头回归还发现 HUD 图片直接 src 的 403，已统一复用认证图片缓存并同步两份页面；未削弱鉴权。新增源码断言曾误用 Java 兼容模板检测正式页面缓存调用，已改为读取正式 HTML，不放宽断言。
+- 保留既有 Unsafe/API、Gradle 和启动器注解依赖警告；本轮未打包发布、未部署、未构建其它目标，真实 CE 保存、资源包下发和客户端显示仍待单独验收。
+
+### 1.10.41（后端边界专项验证通过，未发布）
+
+- 道具预览 GET 使用有效页面令牌，或 HTTP 同源来源与 Host、监听端口精确匹配；无来源无令牌、显式错误令牌、其它本机端口和 HTTPS 来源不再由回环地址兜底放行。
+- 道具箱持久化成功后的预览监听异常记录堆栈，不再阻断游戏内快照、选择和重绘。没有新增命令、配置键或游戏 HUD。
+- `GadgetPreviewSnapshotService` 增加包内 `RuntimeAccess` 与读取执行器注入点；公开构造仍使用 Bukkit 主线程调度及公共异步池，测试可控制读取和发布队列的乱序。Origin 不接受路径、查询和片段，Referer 允许页面路径。
+- 26.1.2 强制编译与资源处理共 7 项任务实际执行成功；三个专项测试类合计 50/50、4 个容器成功，无失败、跳过或中止。覆盖保存后旧错误回调、停止后已排回调、停止再启动错代、关闭后迟到读取及来源边界。包内 `GadgetBoxGuiService.notifySaved(UUID)` 实际注入异常并检查日志和持久化；GUI 快照、选择和重绘的续接仍由源码契约校验，不代表实服库存交互验证。旧页面断言改为允许只读道具预览与可编辑 HUD 并存，HTTP 测试头改用合法 ASCII 值，未弱化来源边界。未部署实服。
+
+- 本轮未运行全仓与浏览器回归、未打包发布、未部署或重启实服；保留 Unsafe/API 及独立启动器注解依赖警告。专项结果仅覆盖上述后端边界，不代表真实 Bukkit 库存界面与客户端验收。
+
+### 1.10.40（道具箱同源 Web 只读预览，26.1.2 自动化通过）
+
+- 用户明确选择仅在 Web 预览既有游戏道具箱，不新增游戏屏幕 HUD，不恢复退役 Hotbar 字形资源或原版 sprite 覆盖。
+- 预览按在线玩家选择，0～8 个非空槽位顺序及重复物品与游戏快照一致；第九格语音入口不计投掷物品。缺失配置沿用默认道具，显式空列表仍为空栏。
+- 只读预览与 18 键 HUD 保存流程隔离，不将玩家道具数据写入 config.yml，不因预览图标缺失要求 CE 新增 provider。无法解析的复杂自定义模型明确显示缺图，不冒充真实客户端渲染。
+- 26.1.2 强制编译与资源处理成功；定向回归 54/54、独立全量 JUnit 881/881、真实 Chromium 契约 2/2（含进程清理）通过，无跳过、中止或失败。新增测试覆盖空栏、1/3/8 件、重复顺序、空洞、缺图、不可变快照与损坏 YAML 不改写；存储源码断言仅更新为新的 raw.present 缺失路径分支。首轮两项失败源于 Paper 注册表夹具缺失，补齐夹具后通过，未修改生产逻辑迁就测试。
+- 26.1.2 的 JAR、资源包与 CraftEngine bundle 强制构建及 SnakeYAML 重定位成功；三个归档 CRC、重复条目、禁止原版 Hotbar sprite、JAR 内正式页面与两张原版道具图标一致性检查通过。JAR SHA-256 为 `254127815d92814e2c2d32f21694082faf33a0a70580bd0cab883fb521e48093`。
+- 本轮未构建其它目标、未部署或重启实服。后端异步旧读/停止迟到回调、保存通知异常及 HTTP 来源边界仍需专项测试；实服保存和客户端应用仍需单独确认。
+
+### 1.10.39（根目录连续 HUD 校验修复，现场 ZIP 离线验证通过）
+
+- 现场启动日志确认 MUZ 1.10.38；保存失败不是头像重叠导致。CE 生成包的 `pack.mcmeta` 只有 `min_format/max_format`，五个连续字体均在根目录且 CRC 正常；验证器却在读取字体前强制要求非空 overlays 声明。
+- 连续资源允许根目录无 overlays 声明，后续 provider、ascent、PNG、CRC、重复路径与基础 bundle 校验仍严格执行；未声明目录及额外连续资源继续拒绝，不影响其它插件字体。未改 YAML 入口或现场配置。
+- 独立 agent 分别实施校验器回归及只读追查重复告警，主流程收紧误伤基础字体的检查后实跑四类定向 56/56、5 个容器成功，无跳过、中止或失败。首轮 51/56 暴露新增检查误伤基础 muz_cards.json，修的是检查实现，没有弱化原测试。
+- 旧 1.10.38 JAR 对真实 CE ZIP 复现同一错误；1.10.39 发布 JAR 按包内实际请求 81/78/1 完整验证通过。磁盘配置是回滚后的 75/78/1，严格拒绝其与生成 ZIP 的错代，不能把回滚配置等同于 ZIP 已恢复。
+- paper-26.1.2 强制编译、JAR/资源包/CE bundle 构建及 SnakeYAML 重定位成功，三个归档 CRC 通过；JAR 已复制到 C:\PluginLibs，SHA-256 为 `12386735497e53a2856435f13a71a5046ef05d7f3122407f32aa1de873455221`。
+- 头像告警由各桌及个人预览各自读取配置重复产生；本轮只定位原因，未实现去重，也未擅改玩家布局。未运行全仓测试、其他目标构建，未部署、重启或执行真实保存，客户端应用仍待确认。
 
 ### 1.10.38（桌内九格道具箱、私有气泡语音面板与三层 HUD，自动化通过）
 

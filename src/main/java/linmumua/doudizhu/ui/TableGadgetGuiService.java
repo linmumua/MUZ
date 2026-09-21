@@ -33,4 +33,14 @@ public class TableGadgetGuiService extends GadgetBoxGuiService {
     ) {
         super(store, actionConsumer, title, bubbleName);
     }
+
+    public TableGadgetGuiService(
+        VirtualGadgetBarStore store,
+        Consumer<GadgetBoxGuiService.Action> actionConsumer,
+        Consumer<java.util.UUID> saveListener,
+        String title,
+        String bubbleName
+    ) {
+        super(store, actionConsumer, saveListener, title, bubbleName);
+    }
 }

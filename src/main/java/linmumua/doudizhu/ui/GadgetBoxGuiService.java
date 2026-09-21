@@ -52,16 +52,17 @@ public class GadgetBoxGuiService implements Listener {
 
     private final VirtualGadgetBarStore store;
     private final Consumer<Action> actionConsumer;
+    private final Consumer<UUID> saveListener;
     private volatile String title;
     private volatile String bubbleName;
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
 
     public GadgetBoxGuiService(VirtualGadgetBarStore store) {
-        this(store, action -> { }, "MUZ | 道具箱", "语音气泡");
+        this(store, action -> { }, playerId -> { }, "MUZ | 道具箱", "语音气泡");
     }
 
     public GadgetBoxGuiService(VirtualGadgetBarStore store, Consumer<Action> actionConsumer) {
-        this(store, actionConsumer, "MUZ | 道具箱", "语音气泡");
+        this(store, actionConsumer, playerId -> { }, "MUZ | 道具箱", "语音气泡");
     }
 
     public GadgetBoxGuiService(
@@ -70,8 +71,19 @@ public class GadgetBoxGuiService implements Listener {
         String title,
         String bubbleName
     ) {
+        this(store, actionConsumer, playerId -> { }, title, bubbleName);
+    }
+
+    public GadgetBoxGuiService(
+        VirtualGadgetBarStore store,
+        Consumer<Action> actionConsumer,
+        Consumer<UUID> saveListener,
+        String title,
+        String bubbleName
+    ) {
         this.store = java.util.Objects.requireNonNull(store, "store");
         this.actionConsumer = java.util.Objects.requireNonNull(actionConsumer, "actionConsumer");
+        this.saveListener = java.util.Objects.requireNonNull(saveListener, "saveListener");
         this.title = title == null || title.isBlank() ? "MUZ | 道具箱" : title;
         this.bubbleName = bubbleName == null || bubbleName.isBlank() ? "语音气泡" : bubbleName;
     }
@@ -230,6 +242,7 @@ public class GadgetBoxGuiService implements Listener {
 
     private void saveAndRender(Player player, GadgetBoxInventoryHolder holder, VirtualGadgetBar next, int selected) {
         store.save(player.getUniqueId(), next);
+        notifySaved(player.getUniqueId());
         holder.setSnapshot(next);
         int normalized = normalizeSelection(selected, next);
         if (normalized < 0) {
@@ -238,6 +251,16 @@ public class GadgetBoxGuiService implements Listener {
             selectedSlots.put(player.getUniqueId(), normalized);
         }
         render(holder.getInventory(), next, normalized);
+    }
+
+    // 预览通知属于附属观察者：持久化成功后，它的失败不得阻断游戏内快照和重绘。
+    void notifySaved(UUID playerId) {
+        try {
+            saveListener.accept(playerId);
+        } catch (RuntimeException exception) {
+            java.util.logging.Logger.getLogger(GadgetBoxGuiService.class.getName()).log(
+                java.util.logging.Level.WARNING, "道具箱已保存，但预览通知失败：" + playerId, exception);
+        }
     }
 
     private void render(Inventory inventory, VirtualGadgetBar snapshot, int selected) {

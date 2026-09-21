@@ -74,6 +74,23 @@ class HotbarHudDiagnosticsTest {
     }
 
     @Test
+    void 周期调度通过可注入入口而不是业务层直调Bukkit() throws IOException {
+        String source = Files.readString(SERVICE);
+        assertTrue(source.contains("private MuzScheduler.TaskHandle task"),
+            "周期任务句柄必须使用统一调度器抽象");
+        assertTrue(source.contains("private final MuzScheduler scheduler"),
+            "调度器必须由服务持有并可注入");
+        assertTrue(source.contains("MuzScheduler scheduler"),
+            "必须提供带调度器参数的构造入口");
+        assertTrue(source.contains("task = scheduler.runTimer(2L, 2L, this::tick)"),
+            "周期任务必须通过注入的调度器创建");
+        assertTrue(!source.contains("runTaskTimer"),
+            "业务服务不得直接调用 Bukkit runTaskTimer");
+        assertTrue(!source.contains("getServer().getScheduler()"),
+            "业务服务不得直接访问 Bukkit 调度器");
+    }
+
+    @Test
     void 普通叠加职责已委托给独立服务() throws IOException {
         String source = Files.readString(SERVICE);
         assertTrue(source.contains("private final ActionBarOverlayService actionBarOverlay"),

@@ -3,6 +3,10 @@ package linmumua.doudizhu.debug;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpContext;
+import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.HudOverlayLayout;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.assets.PlayerHeadRenderer;
@@ -11,6 +15,13 @@ import linmumua.doudizhu.model.CardRank;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
+import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -26,6 +37,48 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class DebugWebServerTest {
+    @Test
+    void hasValidReadAccessRequiresTokenOrExactSameOriginLoopback() throws Throwable {
+        DebugWebServer server = newTestServer();
+        int port = 24731;
+        setPrivate(server, "activePort", port);
+        String token = (String) privateField(server, "token");
+
+        assertTrue(readAccess(server, exchange(token, null, null, "localhost:" + port,
+            "127.0.0.1")), "合法页面 Token 必须放行");
+        assertFalse(readAccess(server, exchange("invalid-token", "http://localhost:" + port, null, "localhost:" + port,
+            "127.0.0.1")), "错误 Token 不得退回来源授权");
+        assertFalse(readAccess(server, exchange(null, null, null, "localhost:" + port,
+            "127.0.0.1")), "无头 loopback 请求不能仅凭来源地址读取");
+
+        assertTrue(readAccess(server, exchange(null, "http://localhost:" + port,
+            null, "localhost:" + port, "127.0.0.1")), "精确同源 Origin 必须放行");
+        assertTrue(readAccess(server, exchange(null, null,
+            "http://localhost:" + port + "/", "localhost:" + port, "127.0.0.1")),
+            "精确同源 Referer（允许页面路径）必须放行");
+        assertFalse(readAccess(server, exchange(null, "http://localhost:" + (port + 1),
+            null, "localhost:" + port, "127.0.0.1")), "其它本机端口 Origin 必须拒绝");
+        assertFalse(readAccess(server, exchange(null, "http://evil.example:" + port,
+            null, "localhost:" + port, "127.0.0.1")), "恶意 Origin 必须拒绝");
+        assertFalse(readAccess(server, exchange(null, null,
+            "http://localhost.evil:" + port + "/", "localhost:" + port, "127.0.0.1")),
+            "恶意 Referer 主机必须拒绝");
+        assertFalse(readAccess(server, exchange(null, "https://localhost:" + port,
+            null, "localhost:" + port, "127.0.0.1")), "HTTPS 来源不得冒充 HTTP 同源页面");
+        assertFalse(readAccess(server, exchange(null, "http://localhost:" + port + "/evil",
+            null, "localhost:" + port, "127.0.0.1")), "带路径的伪造 Origin 必须拒绝");
+    }
+
+    @Test
+    void hasValidReadAccessRequiresLoopbackRemoteAddress() throws Throwable {
+        DebugWebServer server = newTestServer();
+        int port = 24732;
+        setPrivate(server, "activePort", port);
+        assertFalse(readAccess(server, exchange(null, "http://localhost:" + port,
+            null, "localhost:" + port, "192.168.1.20")),
+            "即使来源精确同源，非 loopback 客户端也必须拒绝");
+    }
+
     @Test
     void htmlIsEditableAndContainsSaveApis() {
         Map<String, Object> values = new LinkedHashMap<>();
@@ -58,7 +111,7 @@ public class DebugWebServerTest {
 
         // 18 个可编辑键：三层 HUD 白名单
         assertEquals(18, DebugHudConfigController.fields().size());
-        assertFalse(html.contains("只读"));
+        assertTrue(html.contains("只读道具箱预览"), "只读道具预览与可编辑 HUD 并存");
         assertTrue(html.contains("/api/save"));
         assertTrue(html.contains("保存并应用"));
         assertTrue(html.contains("重新读取"));
@@ -235,6 +288,10 @@ public class DebugWebServerTest {
             "必须按捕获事务、异步写资源、主线程 CE 重载、HUD 应用、发布快照的实际顺序执行");
         assertTrue(coordinator.contains("new HudOverlayWriter(plugin)"),
             "协调器必须使用三层 HUD writer");
+        assertTrue(coordinator.contains("plugin.scheduler().runSync(command)"),
+            "生产默认主线程执行器必须通过 MuzScheduler 派发");
+        assertFalse(coordinator.contains("plugin.getServer().getScheduler().runTask"),
+            "协调器不得直接调用 Bukkit Scheduler");
         assertTrue(coordinator.contains("resolveOnMainThread"));
         assertTrue(coordinator.contains("isTaskActive(task)"));
         assertTrue(coordinator.contains("executor.shutdownNow()"));
@@ -610,6 +667,63 @@ public class DebugWebServerTest {
         assertFalse(html.contains("snapEnabled=state.drag"),
             "页面吸附状态只属于当前页面，不得从服务端配置快照恢复");
         assertTrue(html.contains("#snapToggle"), "正式页面必须提供吸附切换按钮");
+    }
+
+    private static DebugWebServer newTestServer() throws Throwable {
+        var lookup = MethodHandles.lookup();
+        var unsafeLookup = MethodHandles.privateLookupIn(sun.misc.Unsafe.class, lookup);
+        var unsafeHandle = unsafeLookup.findStaticVarHandle(sun.misc.Unsafe.class, "theUnsafe", sun.misc.Unsafe.class);
+        sun.misc.Unsafe unsafe = (sun.misc.Unsafe) unsafeHandle.get();
+        DoudizhuPlugin plugin = (DoudizhuPlugin) unsafe.allocateInstance(DoudizhuPlugin.class);
+        DebugHudConfigController controller = new DebugHudConfigController(plugin);
+        HudWebApplyCoordinator coordinator = (HudWebApplyCoordinator) unsafe.allocateInstance(HudWebApplyCoordinator.class);
+        return new DebugWebServer(plugin, null, null, controller, coordinator);
+    }
+
+    private static Object privateField(Object target, String name) throws Throwable {
+        var lookup = MethodHandles.privateLookupIn(target.getClass(), MethodHandles.lookup());
+        VarHandle handle = lookup.findVarHandle(target.getClass(), name, target.getClass() == DebugWebServer.class ? String.class : int.class);
+        return handle.get(target);
+    }
+
+    private static void setPrivate(Object target, String name, int value) throws Throwable {
+        var lookup = MethodHandles.privateLookupIn(target.getClass(), MethodHandles.lookup());
+        lookup.findVarHandle(target.getClass(), name, int.class).set(target, value);
+    }
+
+    private static boolean readAccess(DebugWebServer server, HttpExchange exchange) throws Throwable {
+        var lookup = MethodHandles.privateLookupIn(DebugWebServer.class, MethodHandles.lookup());
+        return (boolean) lookup.findVirtual(DebugWebServer.class, "hasValidReadAccess",
+            MethodType.methodType(boolean.class, HttpExchange.class)).invoke(server, exchange);
+    }
+
+    private static HttpExchange exchange(String token, String origin, String referer,
+                                         String host, String remoteHost) {
+        Headers headers = new Headers();
+        if (token != null) headers.set("X-MUZ-Token", token);
+        if (origin != null) headers.set("Origin", origin);
+        if (referer != null) headers.set("Referer", referer);
+        if (host != null) headers.set("Host", host);
+        InetSocketAddress remote = new InetSocketAddress(remoteHost, 45555);
+        return new HttpExchange() {
+            @Override public Headers getRequestHeaders() { return headers; }
+            @Override public Headers getResponseHeaders() { return new Headers(); }
+            @Override public URI getRequestURI() { return URI.create("/api/gadget-preview"); }
+            @Override public String getRequestMethod() { return "GET"; }
+            @Override public HttpContext getHttpContext() { return null; }
+            @Override public void close() { }
+            @Override public InputStream getRequestBody() { return InputStream.nullInputStream(); }
+            @Override public OutputStream getResponseBody() { return OutputStream.nullOutputStream(); }
+            @Override public void sendResponseHeaders(int status, long length) { }
+            @Override public InetSocketAddress getRemoteAddress() { return remote; }
+            @Override public InetSocketAddress getLocalAddress() { return new InetSocketAddress("127.0.0.1", 45555); }
+            @Override public int getResponseCode() { return -1; }
+            @Override public String getProtocol() { return "HTTP/1.1"; }
+            @Override public Object getAttribute(String name) { return null; }
+            @Override public void setAttribute(String name, Object value) { }
+            @Override public void setStreams(InputStream i, OutputStream o) { }
+            @Override public com.sun.net.httpserver.HttpPrincipal getPrincipal() { return null; }
+        };
     }
 
     /** 从内联脚本中提取函数声明到下一个函数声明之间的源码片段。 */

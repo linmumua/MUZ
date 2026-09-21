@@ -242,8 +242,8 @@ class TrickHudSettingsTest {
      *
      * <p>bot 图标一并验：它画在头像行，档位必须跟头像表。跟错表在这里会直接越界抛异常。
      *
-     * <p>不断言「无警告」：浅档（0/40/50 配默认 6 倍头像）本来就会与牌行重叠并留警告，
-     * 那是「完全自由」方案的预期行为。这里只断言没有【回退】警告 —— 回退才意味着档位没被放行。
+     * <p>不断言「无布局警告」：浅档（0/40/50 配默认 6 倍头像）本来就会与牌行重叠；
+     * 该诊断只有 debug.enabled=true 才输出。这里只断言没有【回退】警告 —— 回退才意味着档位没被放行。
      */
     @Test
     void everyAcceptedAvatarTierHasGlyphs() {
@@ -657,7 +657,8 @@ class TrickHudSettingsTest {
                 configWith(Map.of(
                     "trick-hud.offset-down", testCase.cardOffset(),
                     "trick-hud.avatar-offset-down", testCase.avatarOffset(),
-                    "trick-hud.avatar-scale", testCase.scale()
+                    "trick-hud.avatar-scale", testCase.scale(),
+                    "debug.enabled", true
                 )),
                 warnings::add
             );
