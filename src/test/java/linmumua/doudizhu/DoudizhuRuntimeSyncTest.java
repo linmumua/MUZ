@@ -161,11 +161,17 @@ class DoudizhuRuntimeSyncTest {
             assertTrue(route.contains("dispatchActionBar"),
                 "ActionBar 必须交给统一阶段分流助手，不能绕回裸 sendActionBar");
         }
-        int onlineAt = source.indexOf("private Player onlinePlayer(UUID playerId)");
-        assertTrue(onlineAt >= 0, "GameTable 必须集中提供在线玩家查询");
-        String online = source.substring(onlineAt, source.indexOf("    private void playSoundAll", onlineAt));
-        assertTrue(online.contains("player != null && player.isOnline()"),
-            "GameTable 的 ActionBar 路由必须显式排除离线玩家");
+        // 机制变更（非弱化）：离线排除已从 GameTable 内部的 onlinePlayer(UUID) 访问器迁到
+        // player lane 门面。GameTable 现在只把 UUID 交给叠加服务，离线判断由 PlayerOutputDispatcher
+        // 负责，因此断言改为：GameTable 必须委托叠加服务，且门面里确实存在在线门禁。
+        assertTrue(source.contains("private void dispatchActionBar(UUID playerId, Component message, int durationTicks)"),
+            "GameTable 必须集中提供 ActionBar 分流助手");
+        assertTrue(source.contains("actionBarOverlay.showOverlay(playerId, message, durationTicks);"),
+            "GameTable 的 ActionBar 必须委托叠加服务，不能绕回裸 sendActionBar");
+        String dispatcher = Files.readString(Path.of(
+            "src/main/java/linmumua/doudizhu/game/PlayerOutputDispatcher.java"));
+        assertTrue(dispatcher.contains("player == null || !player.isOnline()"),
+            "player lane 门面必须显式排除离线玩家");
     }
 
     @Test

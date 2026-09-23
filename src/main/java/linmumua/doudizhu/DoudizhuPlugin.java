@@ -13,6 +13,7 @@ import linmumua.doudizhu.config.MuzYamlConfig;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.PhysicalChipService;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.game.ActionBarOverlayService;
 import linmumua.doudizhu.debug.DebugHudConfigController;
 import linmumua.doudizhu.debug.DebugWebServer;
@@ -31,9 +32,12 @@ import linmumua.doudizhu.ui.TableGadgetGuiService;
 import linmumua.doudizhu.ui.VirtualGadgetBarStore;
 import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.game.TableManager;
+import linmumua.doudizhu.mahjong.EmbeddedMahjongRuntime;
+import linmumua.doudizhu.mahjong.MahjongTableManager;
 import linmumua.doudizhu.listener.CraftEngineLifecycleListener;
 import linmumua.doudizhu.listener.HandGuiListener;
 import linmumua.doudizhu.listener.PlayerConnectionListener;
+import linmumua.doudizhu.listener.TableWorldLifecycleListener;
 import linmumua.doudizhu.listener.WorldTableInteractionListener;
 import linmumua.doudizhu.placeholder.MuzPlaceholderExpansion;
 import linmumua.doudizhu.room.TableLevel;
@@ -159,6 +163,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     );
 
     private TableManager tableManager;
+    /** 仅在 integration.mahjong.enabled=true 时装配；默认关闭时保持 null。 */
+    private EmbeddedMahjongRuntime embeddedMahjongRuntime;
 
     private HandGuiService handGuiService;
     private MuzPlaceholderExpansion placeholderExpansion;
@@ -178,6 +184,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private CraftEngineOffsetService craftEngineOffsetService;
     /** 普通 ActionBar 叠加服务；Hotbar HUD 不再进入正式运行期链路。 */
     private ActionBarOverlayService actionBarOverlayService;
+    /** 玩家输出统一门面；生产构造先经 global UUID 查找再进入 player owner lane。 */
+    private PlayerOutputDispatcher playerOutputDispatcher;
     /** 桌内道具状态与效果由专用服务管理，入口仅负责装配。 */
     private TableGadgetService tableGadgetService;
     private TableGadgetSettings tableGadgetSettings;
@@ -342,12 +350,28 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private volatile String persistedTableRestoreSummary = "未开始";
     private volatile int persistedTableRestorePasses;
     private volatile boolean postRestoreRebuildQueued;
+    /**
+     * 存档牌桌恢复的跨 lane 结算边界。
+     *
+     * <p>恢复不再在调用线程原地动世界：{@code restoreTable} 现在是异步 stage，
+     * 完成回调可能落在锚点 region 线程上，与发起恢复的 global lane（onEnable / 5 秒重试定时器）
+     * 并发。因此 {@link #pendingPersistedTables} 的读改写必须串行化，不能再用裸 volatile List
+     * 在回调里直接改。
+     */
+    private final Object persistedTableRestoreLock = new Object();
+    /** 正在飞行中的恢复请求（按桌名归一化后的 key 去重），保证同一张桌不会被重复派发、重复生成实体。 */
+    private final Set<String> persistedTableRestoreInFlight = ConcurrentHashMap.newKeySet();
+    /** 本次启动累计恢复成功的张数，供完成文案使用（异步下成功分散在多个回调里）。 */
+    private final AtomicInteger persistedTableRestoredCount = new AtomicInteger();
     private boolean craftEngineProtectionListenerRegistered;
     private static final DateTimeFormatter HISTORY_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
 
     public MuzScheduler scheduler() {
         if (scheduler == null) {
-            scheduler = new MuzScheduler(this);
+            // 关闭中不再注册新任务：谓词用自制的 shuttingDown 而不是 Bukkit 的 isEnabled()。
+            // isEnabled() 在 onEnable 装配早期仍可能为 false，据此拒绝会误伤启动期注册的周期任务，
+            // 属灾难性回归；shuttingDown 只在 onDisable 首行置位，时序完全可控。
+            scheduler = new MuzScheduler(this, this::isShuttingDown);
         }
         return scheduler;
     }
@@ -420,7 +444,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // 关服时保存玩家设置会输出空映射，那条 FLOW 分支的 Emitter 内部类必须在此刻加载好：
         // onDisable 阶段 Paper 已不再为插件 ClassLoader 提供新类。
         MuzYamlConfig.warmUpFlowEmitter();
-        scheduler = new MuzScheduler(this);
+        // 与 scheduler() 工厂保持一致：注入 shuttingDown 谓词，关闭阶段由门面拒绝新任务注册，
+        // 否则 onEnable 直接建出的实例会用默认 () -> false 谓词覆盖工厂语义。
+        scheduler = new MuzScheduler(this, this::isShuttingDown);
+        playerOutputDispatcher = new PlayerOutputDispatcher(this);
         saveDefaultYamlConfig();
         ensureConfigIntegrity();
         optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
@@ -466,16 +493,16 @@ public final class DoudizhuPlugin extends JavaPlugin {
                             tableGadgetService.select(action.viewerId(), selected);
                         }
                     }
-                    case BUBBLE -> {
-                        Player viewer = Bukkit.getPlayer(action.viewerId());
-                        if (viewer != null && tableSpeechPanelService != null) {
-                            GameTable table = tableManager.getTableOf(viewer);
-                            if (table != null) {
-                                tableGadgetGuiService.close(viewer);
-                                tableSpeechPanelService.open(table, action.viewerId());
-                            }
+                    case BUBBLE -> playerOutputDispatcher.runPlayer(action.viewerId(), viewer -> {
+                        if (tableSpeechPanelService == null) {
+                            return;
                         }
-                    }
+                        GameTable table = tableManager.getTableOf(viewer);
+                        if (table != null) {
+                            tableGadgetGuiService.close(viewer);
+                            tableSpeechPanelService.open(table, action.viewerId());
+                        }
+                    });
                     default -> { }
                 }
             },
@@ -488,7 +515,8 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 }
             },
             tableGadgetSettings.gui().title(),
-            tableGadgetSettings.gui().bubbleName()
+            tableGadgetSettings.gui().bubbleName(),
+            playerOutputDispatcher
         );
         databaseManager = new DatabaseManager(this);
         craftEngineBundleExporter = new CraftEngineBundleExporter(this);
@@ -500,7 +528,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         hudWebConfigController = new DebugHudConfigController(this);
         hudWebApplyCoordinator = new HudWebApplyCoordinator(this, hudWebConfigController);
         hudResourceRecoveryService = new HudResourceRecoveryService(this, hudWebApplyCoordinator);
-        tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this), tableGadgetSettings);
+        tableGadgetService = new TableGadgetService(this, new TableGadgetEffectService(this), tableGadgetSettings,
+            // 道具目标高亮的玩家级工作统一经门面投递到 player lane，见 TableGadgetService.tick。
+            playerOutputDispatcher);
         tableSpeechPanelService = createTableSpeechPanelService(tableGadgetSettings);
         tableGadgetBarHudService = new TableGadgetBarHudService(
             this,
@@ -524,10 +554,15 @@ public final class DoudizhuPlugin extends JavaPlugin {
         vaultEconomyBridge = new VaultEconomyBridge(this);
         physicalChipService = new PhysicalChipService(this::chipPaymentItem, getLogger());
         physicalTableManager = new PhysicalTableManager(this);
+        if (isMahjongIntegrationEnabled()) {
+            // 只按显式配置装配内嵌运行时；默认 false 时不创建麻将功能。
+            embeddedMahjongRuntime = new EmbeddedMahjongRuntime(this);
+        }
         initializePersistence();
 
         getServer().getPluginManager().registerEvents(new PlayerConnectionListener(this), this);
         getServer().getPluginManager().registerEvents(new WorldTableInteractionListener(this), this);
+        getServer().getPluginManager().registerEvents(new TableWorldLifecycleListener(this), this);
         getServer().getPluginManager().registerEvents(new CraftEngineLifecycleListener(this), this);
         getServer().getPluginManager().registerEvents(new HandGuiListener(this), this);
         if (tableGadgetBarHudService != null) {
@@ -539,13 +574,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         registerMuzCommand();
         ensureCraftEngineProtectionListenerRegistered();
+        // 牌桌世界实体由各自的 owner region 周期任务刷新；这里仅保留语音面板的独立生命周期。
         scheduler().runTimer(1L, 1L, () -> {
-            physicalTableManager.tick();
             if (tableSpeechPanelService != null) {
                 tableSpeechPanelService.tick();
             }
         });
-        scheduler().runTimer(1L, 10L, () -> tableManager.tick());
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
         HookSnapshot vaultHook = ensureVaultEconomyHookReadyInternal();
         CraftEngineBundleExporter.BundleExportResult exportResult = craftEngineBundleExporter.exportIfAvailable();
@@ -561,53 +595,98 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // 先封住所有新入口并推进代次；旧的 global/region/player/async 回调只能在门面中止。
         shuttingDown = true;
-        // Debug Web 面板先停，避免关闭过程中仍有请求进来
-        if (debugWebServer != null) {
-            debugWebServer.close();
-        }
-        if (gadgetPreviewSnapshotService != null) {
-            gadgetPreviewSnapshotService.close();
-        }
-        if (hudResourceRecoveryService != null) {
-            hudResourceRecoveryService.close();
-        }
-        if (hudWebApplyCoordinator != null) {
-            hudWebApplyCoordinator.close();
-        }
-        if (tableSpeechPanelService != null) {
-            tableSpeechPanelService.shutdown();
-        }
-        if (tableGadgetBarHudService != null) {
-            tableGadgetBarHudService.shutdown();
-        }
-        if (tableGadgetGuiService != null) {
-            tableGadgetGuiService.shutdown();
-        }
-        if (tableGadgetService != null) {
-            tableGadgetService.shutdown();
-        }
-        if (actionBarOverlayService != null) {
-            actionBarOverlayService.stop();
-        }
-        TrickHudPreview preview = trickHudPreview;
-        if (preview != null) {
-            preview.hideAll();
-        }
-        hudRowOverrides.clear();
-        savePlayerSettings();
-        logShutdownDiagnostics();
-        if (placeholderExpansion != null && placeholderExpansion.isRegistered()) {
-            placeholderExpansion.unregister();
-        }
-        if (tableManager != null) {
-            tableManager.shutdown();
-        }
-        if (physicalTableManager != null) {
-            physicalTableManager.shutdown();
-        }
-        if (databaseManager != null) {
-            databaseManager.close();
+        runShutdownStep("推进关闭代次", () -> {
+            if (scheduler != null) {
+                scheduler.newGeneration();
+            }
+        });
+
+        // Debug Web 和业务输出先停，但 scheduler 仍保持可用，给 owner 清理与已入队数据库任务留窗口。
+        runShutdownStep("关闭 Debug Web", () -> {
+            if (debugWebServer != null) {
+                debugWebServer.close();
+            }
+        });
+        runShutdownStep("关闭预览与 HUD 恢复", () -> {
+            if (gadgetPreviewSnapshotService != null) {
+                gadgetPreviewSnapshotService.close();
+            }
+            if (hudResourceRecoveryService != null) {
+                hudResourceRecoveryService.close();
+            }
+            if (hudWebApplyCoordinator != null) {
+                hudWebApplyCoordinator.close();
+            }
+        });
+        runShutdownStep("关闭桌内业务入口", () -> {
+            if (tableSpeechPanelService != null) {
+                tableSpeechPanelService.shutdown();
+            }
+            if (tableGadgetBarHudService != null) {
+                tableGadgetBarHudService.shutdown();
+            }
+            if (tableGadgetGuiService != null) {
+                tableGadgetGuiService.shutdown();
+            }
+            if (tableGadgetService != null) {
+                tableGadgetService.shutdown();
+            }
+            if (actionBarOverlayService != null) {
+                actionBarOverlayService.stop();
+            }
+            TrickHudPreview preview = trickHudPreview;
+            if (preview != null) {
+                preview.hideAll();
+            }
+            hudRowOverrides.clear();
+        });
+
+        // 牌桌、麻将和实体清理必须在 scheduler/backend 关闭前发往各自合法 owner。
+        runShutdownStep("关闭内嵌麻将", () -> {
+            if (embeddedMahjongRuntime != null) {
+                embeddedMahjongRuntime.shutdown();
+            }
+        });
+        runShutdownStep("关闭斗地主牌桌", () -> {
+            if (tableManager != null) {
+                tableManager.shutdown();
+            }
+        });
+        runShutdownStep("清理斗地主实体", () -> {
+            if (physicalTableManager != null) {
+                physicalTableManager.shutdown();
+            }
+        });
+        runShutdownStep("保存玩家设置", this::savePlayerSettings);
+        runShutdownStep("收尾诊断日志", this::logShutdownDiagnostics);
+        runShutdownStep("注销 PlaceholderAPI", () -> {
+            if (placeholderExpansion != null && placeholderExpansion.isRegistered()) {
+                placeholderExpansion.unregister();
+            }
+        });
+
+        // 数据库必须先 flush 已入队 I/O；最后才关闭 scheduler/backend。
+        // 关服阶段落盘由 DatabaseManager.runWrite 的同步回退保证（宁可短暂阻塞调用线程，也要保住关服那一刻提交的写库），
+        // 异步段仍保留，仅用于「插件仍启用但调度器已关闭」的残余窗口兜底。
+        runShutdownStep("关闭数据库", () -> {
+            if (databaseManager != null) {
+                databaseManager.close();
+            }
+        });
+        runShutdownStep("关闭调度器", () -> {
+            if (scheduler != null) {
+                scheduler.close();
+            }
+        });
+    }
+
+    private void runShutdownStep(String label, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.SEVERE, "MUZ 关闭阶段失败: " + label, failure);
         }
     }
 
@@ -1209,6 +1288,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public PhysicalTableManager getPhysicalTableManager() {
         return physicalTableManager;
+    }
+
+    /**
+     * 麻将桌管理器；{@code integration.mahjong.enabled=false}（默认）时为 null。
+     *
+     * <p>共享保护链需要它来放行麻将入座 Interaction（见
+     * {@code WorldTableInteractionListener.shouldCancelProtectedInteract}），
+     * 因此调用方必须做 null 判断，不能假定麻将已启用。
+     */
+    public MahjongTableManager getMahjongTableManager() {
+        return embeddedMahjongRuntime == null ? null : embeddedMahjongRuntime.tableManager();
     }
 
     public CraftEngineBundleExporter getCraftEngineBundleExporter() {
@@ -2692,9 +2782,21 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 // Some startup cases still miss TextDisplay or furniture visuals on the first rebuild pass.
                 getLogger().info("执行视觉预热重建: reason=" + reason + " pass=" + pass);
                 attemptPersistedTableRestore();
-                if (physicalTableManager != null && physicalTableManager.placedTableCount() > 0) {
-                    physicalTableManager.rebuildAllTables();
-                    physicalTableManager.repairIncompleteTables(reason + "-ddz-pass-" + pass);
+                // 门禁用 hasPlacedOrRebuildingTables 而不是 placedTableCount：重建已改为异步 stage 流水线，
+                // 只看瞬时 placed 数量会在"恢复/重建尚未提交"的窗口里误判成没有桌可重建，把后续 pass 整批跳过。
+                // 该判据同时覆盖"已放置"与"重建在飞"，多 pass 语义保持不变。
+                if (physicalTableManager != null && physicalTableManager.hasPlacedOrRebuildingTables()) {
+                    // 机制变更：重建已改为异步 stage 流水线。修复扫描会读改写 placedTables，必须等
+                    // 重建整批收口完成（完成线程是 global lane，与扫描同 lane）再执行；照旧原地串行会在
+                    // 旧实体刚被清掉、新桌尚未生成时扫出一整批"不完整桌"并重复重建。
+                    physicalTableManager.rebuildAllTables()
+                        .thenCompose(ignored -> physicalTableManager.repairIncompleteTables(
+                            reason + "-ddz-pass-" + pass))
+                        .exceptionally(failure -> {
+                            getLogger().warning("视觉预热重建失败: reason=" + reason + " pass=" + pass
+                                + "，原因=" + failure.getMessage());
+                            return null;
+                        });
                 }
 
             });
@@ -3068,7 +3170,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 loadRenderSettings();
                 double shift = next - current;
                 if (physicalTableManager != null) {
-                    physicalTableManager.shiftAllAnchors(shift);
+                    // 机制变更：位移重建现在是异步流水线。失败必须记录日志，不能静默丢弃，
+                    // 否则整批桌子会停在"未放置"状态而看不出原因。
+                    physicalTableManager.shiftAllAnchors(shift).exceptionally(failure -> {
+                        getLogger().warning("牌桌锚点位移重建失败: deltaY=" + shift
+                            + "，原因=" + failure.getMessage());
+                        return null;
+                    });
                 }
 
                 return;
@@ -3717,7 +3825,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         int ddzStageIndex = exportBundle ? 3 : 2;
         feedback.update(stageProgress(ddzStageIndex, totalStages), "刷新斗地主牌桌", rebuildDetail("斗地主牌桌", doudizhuTables));
         if (physicalTableManager != null) {
-            physicalTableManager.rebuildAllTables();
+            // 机制变更：重建已改为异步 stage 流水线，不再阻塞 reload 流程；失败记录日志而非静默丢弃。
+            physicalTableManager.rebuildAllTables().exceptionally(failure -> {
+                getLogger().warning("斗地主牌桌重建失败: " + failure.getMessage());
+                return null;
+            });
         }
         ReloadSummary summary = new ReloadSummary(exportResult, detectSupportedHooks(placeholderHook, vaultHook), doudizhuTables);
         feedback.complete(summary);
@@ -3811,7 +3923,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
             (table, ownerId, targetId, entry) -> {
                 TableGadgetSettings current = tableGadgetSettings == null ? initial : tableGadgetSettings;
                 executeSpeechAction(table, ownerId, targetId, entry, current);
-            }
+            },
+            // 语音面板的每 owner 工作必须落在玩家 owner lane：global 扫描线程既没有 ticking
+            // region（getCurrentTick 直接抛），也无权访问面板实体。见 TableSpeechPanelService.tick。
+            playerOutputDispatcher
         );
     }
 
@@ -4130,7 +4245,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
             }
             loaded.add(record);
         }
-        pendingPersistedTables = List.copyOf(loaded);
+        synchronized (persistedTableRestoreLock) {
+            pendingPersistedTables = List.copyOf(loaded);
+        }
+        // 恢复改为异步派发后，本方法仍是唯一的初始化入口：在这里把上一轮的 in-flight/计数清干净，
+        // 避免 reload 场景残留上一代的飞行中 key 把新记录误判成「已在恢复中」。
+        persistedTableRestoreInFlight.clear();
+        persistedTableRestoredCount.set(0);
         persistedTableRestorePasses = 0;
         if (loaded.isEmpty()) {
             sqlTablesLoaded = true;
@@ -4142,55 +4263,127 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * 派发一轮存档牌桌恢复。
+     *
+     * <p>真实 Folia 上不能原地拉区块、更不能在 global lane 上动世界，所以每条记录只做「派发」
+     * （{@code restoreTable} 现在返回异步 stage），实际世界体在锚点 region 里执行。派发用过
+     * {@link #persistedTableRestoreInFlight} 按桌名去重：已在飞行中的桌直接跳过，这就是
+     * 「不重复生成实体」的保证；同名的 {@code restoreTable} 内部还有一次 placed 表早退兜底。
+     *
+     * <p>回调结算：成功从 {@link #pendingPersistedTables} 摘除该记录并移出 in-flight；
+     * 失败只移出 in-flight，记录留在 pending，交给下一个 5 秒 pass 重试。
+     *
+     * @return 是否「所有待恢复记录的 pending 与 in-flight 都已清空」，语义等同原来的 sqlTablesLoaded
+     */
     private boolean restorePendingSqlTables() {
         if (databaseManager == null || !databaseManager.isInitialized()) {
             persistedTableRestoreSummary = "数据库尚未就绪";
             return false;
         }
-        if (pendingPersistedTables.isEmpty()) {
-            persistedTableRestoreSummary = "没有待恢复牌桌";
-            return true;
+        List<PersistedTableRecord> snapshot;
+        synchronized (persistedTableRestoreLock) {
+            snapshot = pendingPersistedTables;
+            if (snapshot.isEmpty()) {
+                // pending 为空并不等于完成：上一轮派发的恢复可能还在飞行中，必须等回调结算。
+                boolean inFlightEmpty = persistedTableRestoreInFlight.isEmpty();
+                persistedTableRestoreSummary = inFlightEmpty ? "没有待恢复牌桌" : "牌桌恢复仍在进行";
+                return inFlightEmpty;
+            }
         }
 
-        int restored = 0;
         int waitingWorld = 0;
-        int failed = 0;
-        List<PersistedTableRecord> remaining = new ArrayList<>();
-
-        for (PersistedTableRecord record : pendingPersistedTables) {
+        for (PersistedTableRecord record : snapshot) {
             org.bukkit.World world = Bukkit.getWorld(record.worldName());
             if (world == null) {
+                // 世界尚未加载：保留在 pending，等世界建出来后的下一轮。
                 waitingWorld++;
-                remaining.add(record);
+                continue;
+            }
+            if (!"DOUDIZHU".equalsIgnoreCase(record.gameType())) {
+                // 德州玩法已移除，遗留的旧牌桌记录直接清理掉，避免每次启动都尝试恢复。
+                databaseManager.deleteTable(record.gameType(), record.tableName());
+                removePendingPersistedTable(record);
+                continue;
+            }
+            String key = persistedTableRestoreKey(record.tableName());
+            if (!persistedTableRestoreInFlight.add(key)) {
+                // 同一张桌的恢复已在飞行中（上一轮派发、回调尚未结算），跳过以免重复生成实体。
                 continue;
             }
             org.bukkit.Location anchor = new org.bukkit.Location(world, record.x(), record.y(), record.z(), record.yaw(), 0.0f);
+            // 回调在派发之后才跑，passes 会被后续 pass 递增；先冻结派发时的 pass，保证「首轮才打失败日志」的节流语义。
+            final int dispatchPass = persistedTableRestorePasses;
             try {
-                if ("DOUDIZHU".equalsIgnoreCase(record.gameType())) {
-                    physicalTableManager.restoreTable(record.tableName(), record.roomLevel(), anchor, record.yaw(), parseNullableUuid(record.ownerUuid()), record.ownerName());
-                } else {
-                    // 德州玩法已移除，遗留的旧牌桌记录直接清理掉，避免每次启动都尝试恢复。
-                    databaseManager.deleteTable(record.gameType(), record.tableName());
-                    continue;
-                }
-                restored++;
+                physicalTableManager
+                    .restoreTable(record.tableName(), record.roomLevel(), anchor, record.yaw(),
+                        parseNullableUuid(record.ownerUuid()), record.ownerName())
+                    .whenComplete((table, failure) -> {
+                        if (failure == null) {
+                            // 先摘 pending 再移出 in-flight：反过来的话，两者之间的一轮 pass 会因为
+                            // in-flight 已空而把这条已成功的记录重新派发一遍。
+                            removePendingPersistedTable(record);
+                            persistedTableRestoreInFlight.remove(key);
+                            persistedTableRestoredCount.incrementAndGet();
+                        } else {
+                            // 失败只移出 in-flight，记录留在 pending，等下个 5 秒 pass 重试。
+                            persistedTableRestoreInFlight.remove(key);
+                            if (dispatchPass <= 1) {
+                                getLogger().warning("恢复牌桌失败 [" + record.gameType() + "/" + record.tableName() + "]: " + failure.getMessage());
+                            }
+                        }
+                    });
             } catch (RuntimeException exception) {
-                failed++;
-                remaining.add(record);
-                if (persistedTableRestorePasses <= 1) {
+                // 派发本身同步抛错（anchor/参数不合法）：移出 in-flight，留下个 pass 重试。
+                persistedTableRestoreInFlight.remove(key);
+                if (dispatchPass <= 1) {
                     getLogger().warning("恢复牌桌失败 [" + record.gameType() + "/" + record.tableName() + "]: " + exception.getMessage());
                 }
             }
         }
 
-        pendingPersistedTables = List.copyOf(remaining);
         persistedTableRestorePasses++;
-        if (remaining.isEmpty()) {
-            persistedTableRestoreSummary = "牌桌恢复完成，本次恢复 " + restored + " 张";
+        boolean done;
+        int pendingCount;
+        int inFlightCount;
+        synchronized (persistedTableRestoreLock) {
+            pendingCount = pendingPersistedTables.size();
+            inFlightCount = persistedTableRestoreInFlight.size();
+            done = pendingCount == 0 && inFlightCount == 0;
+        }
+        if (done) {
+            persistedTableRestoreSummary = "牌桌恢复完成，本次恢复 " + persistedTableRestoredCount.get() + " 张";
             return true;
         }
-        persistedTableRestoreSummary = "已恢复 " + restored + " 张，待世界加载 " + waitingWorld + " 张，待重试 " + failed + " 张";
+        // 「已恢复」用本次启动的累计成功数（异步下成功分散在各回调里，单轮派发数不等于成功数）。
+        // 「待重试」= pending 里既不在飞行中、也非世界未加载的残留，即上一轮失败等待重试的数量。
+        int failed = Math.max(0, pendingCount - inFlightCount - waitingWorld);
+        persistedTableRestoreSummary = "已恢复 " + persistedTableRestoredCount.get() + " 张，待世界加载 "
+            + waitingWorld + " 张，待重试 " + failed + " 张";
         return false;
+    }
+
+    /** in-flight 去重与 pending 摘除共用的桌名归一化；与 PhysicalTableManager 的 normalize 同口径（去空白+小写）。 */
+    private static String persistedTableRestoreKey(String tableName) {
+        return tableName == null ? "" : tableName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 从 {@link #pendingPersistedTables} 摘除一条已成功恢复的记录（不可变替换 + 锁保护）。
+     *
+     * <p>用 {@code record} 的值相等做摘除，重复调用是幂等的：成功回调与随后可能发生的
+     * 重复派发（restoreTable 幂等早退）都会经过这里。
+     */
+    private void removePendingPersistedTable(PersistedTableRecord record) {
+        synchronized (persistedTableRestoreLock) {
+            List<PersistedTableRecord> current = pendingPersistedTables;
+            if (!current.contains(record)) {
+                return;
+            }
+            List<PersistedTableRecord> next = new ArrayList<>(current);
+            next.remove(record);
+            pendingPersistedTables = List.copyOf(next);
+        }
     }
 
     private void schedulePersistedTableRestore() {
@@ -4227,8 +4420,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (postRestoreRebuildQueued || shuttingDown) {
             return;
         }
-        int doudizhuCount = physicalTableManager == null ? 0 : physicalTableManager.placedTableCount();
-        if (doudizhuCount <= 0) {
+        // 门禁用 hasPlacedOrRebuildingTables 而不是 placedTableCount：重建改为异步 stage 流水线后，
+        // 只看瞬时 placed 数量会在"尚未收口提交"的窗口里把预热 pass 整批跳过（判据见 PhysicalTableManager）。
+        if (physicalTableManager == null || !physicalTableManager.hasPlacedOrRebuildingTables()) {
             return;
         }
         postRestoreRebuildQueued = true;
@@ -4240,8 +4434,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 if (shuttingDown) {
                     return;
                 }
-                if (physicalTableManager != null && physicalTableManager.placedTableCount() > 0) {
-                    physicalTableManager.rebuildAllTables();
+                if (physicalTableManager != null && physicalTableManager.hasPlacedOrRebuildingTables()) {
+                    // 机制变更：异步流水线；每一轮预热都独立推进，失败记录日志而不静默丢弃。
+                    physicalTableManager.rebuildAllTables().exceptionally(failure -> {
+                        getLogger().warning("存档桌预热重建失败: delay=" + delay
+                            + "，原因=" + failure.getMessage());
+                        return null;
+                    });
                 }
             });
         }

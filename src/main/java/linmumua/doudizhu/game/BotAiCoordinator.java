@@ -3,6 +3,7 @@ package linmumua.doudizhu.game;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.model.DoudizhuCard;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -12,6 +13,9 @@ import java.util.stream.Collectors;
 final class BotAiCoordinator {
     interface Support {
         DoudizhuPlugin plugin();
+        default MuzScheduler.TaskHandle runTableNow(Runnable task) {
+            return plugin().scheduler().runSync(task);
+        }
         boolean canScheduleTasks();
         int botActionEpoch();
         GamePhase phase();
@@ -62,7 +66,7 @@ final class BotAiCoordinator {
                 80
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
+            .whenComplete((response, error) -> support.runTableNow(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.BIDDING)) {
                     return;
                 }
@@ -93,7 +97,7 @@ final class BotAiCoordinator {
                 100
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
+            .whenComplete((response, error) -> support.runTableNow(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.DOUBLING)) {
                     return;
                 }
@@ -124,7 +128,7 @@ final class BotAiCoordinator {
                 140
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
+            .whenComplete((response, error) -> support.runTableNow(() -> {
                 if (!isDecisionStillValid(botId, epoch, GamePhase.PLAYING)) {
                     return;
                 }

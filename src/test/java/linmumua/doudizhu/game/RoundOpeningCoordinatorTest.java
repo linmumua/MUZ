@@ -18,6 +18,9 @@ import java.util.Map;
 import java.util.Set;
 import java.lang.reflect.Proxy;
 import java.util.UUID;
+import io.papermc.paper.threadedregions.scheduler.GlobalRegionScheduler;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+import java.util.function.Consumer;
 import org.bukkit.Bukkit;
 import org.bukkit.Server;
 import org.bukkit.plugin.Plugin;
@@ -266,12 +269,43 @@ class RoundOpeningCoordinatorTest {
                     return defaultValue(method.getReturnType());
                 }
             );
+            GlobalRegionScheduler globalRegionScheduler = (GlobalRegionScheduler) Proxy.newProxyInstance(
+                GlobalRegionScheduler.class.getClassLoader(),
+                new Class<?>[] {GlobalRegionScheduler.class},
+                (proxy, method, args) -> {
+                    if (args != null && args.length > 1 && args[1] instanceof Consumer consumer) {
+                        ScheduledTask scheduledTask = (ScheduledTask) Proxy.newProxyInstance(
+                            ScheduledTask.class.getClassLoader(),
+                            new Class<?>[] {ScheduledTask.class},
+                            (taskProxy, taskMethod, taskArgs) -> {
+                                if (taskMethod.getName().equals("cancel")) {
+                                    cancelledTasks++;
+                                    return null;
+                                }
+                                if (taskMethod.getName().equals("isCancelled")) {
+                                    return cancelledTasks > 0;
+                                }
+                                return defaultValue(taskMethod.getReturnType());
+                            }
+                        );
+                        callbacks.add(() -> consumer.accept(scheduledTask));
+                        return scheduledTask;
+                    }
+                    return defaultValue(method.getReturnType());
+                }
+            );
             server = (Server) Proxy.newProxyInstance(
                 Server.class.getClassLoader(),
                 new Class<?>[] {Server.class},
-                (proxy, method, args) -> method.getName().equals("getScheduler")
-                    ? bukkitScheduler
-                    : defaultValue(method.getReturnType())
+                (proxy, method, args) -> {
+                    if (method.getName().equals("getScheduler")) {
+                        return bukkitScheduler;
+                    }
+                    if (method.getName().equals("getGlobalRegionScheduler")) {
+                        return globalRegionScheduler;
+                    }
+                    return defaultValue(method.getReturnType());
+                }
             );
             Plugin plugin = (Plugin) Proxy.newProxyInstance(
                 Plugin.class.getClassLoader(),
@@ -282,6 +316,41 @@ class RoundOpeningCoordinatorTest {
             );
             scheduler = new MuzScheduler(plugin);
         }
+    }
+
+    /**
+     * 实服现象：对局中途发牌动画停住并刷屏报错。调度门面在周期回调抛异常时会取消任务，
+     * 所以只要渲染异常能逃出 tick()，发牌 timer 就被永久取消、牌桌停在 DEALING。
+     * 这里让每一次渲染都抛异常，时间线仍必须走完发牌、翻转、明牌窗口并进入叫分，
+     * 且 tick() 不得向调度器抛出异常，失败日志必须限频。
+     */
+    @Test
+    void renderingFailuresNeverStopTheDealingTimeline() {
+        List<UUID> seats = List.of(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        FakeSupport support = new FakeSupport(seats);
+        support.failRendering = true;
+        RoundOpeningCoordinator coordinator = new RoundOpeningCoordinator(support);
+        RoundOpeningSettings settings = new RoundOpeningSettings(
+            4,
+            20,
+            60,
+            new RoundOpeningSettings.Messages("发牌", "翻转", "明牌 %seconds%", "明牌", "明牌 ×2", "结束", "已明", "机器人", "不可明")
+        );
+
+        coordinator.start(deckInDescendingIds(), settings);
+        boolean finished = false;
+        for (int tick = 0; tick < 400 && !finished; tick++) {
+            support.currentTick = tick;
+            finished = coordinator.tick();
+        }
+
+        assertTrue(finished, "渲染失败不得让发牌时间线停住");
+        assertEquals(GamePhase.BIDDING, support.phase, "明牌窗口结束后必须进入叫分");
+        assertEquals(17, support.hands.get(seats.get(0)).size());
+        assertEquals(3, support.bottomCards.size());
+        assertTrue(support.reportedFailures >= 1, "渲染失败必须留日志，不能静默吞掉");
+        assertTrue(support.reportedFailures <= 3,
+            "失败日志必须限频，实际记录 " + support.reportedFailures + " 次");
     }
 
     private static final class FakeSupport implements RoundOpeningCoordinator.Support {
@@ -296,6 +365,9 @@ class RoundOpeningCoordinatorTest {
         private int refreshes;
         private int actionBarTicks;
         private int currentTick;
+        /* 为 true 时每次渲染都抛异常，模拟实服刷屏报错。 */
+        private boolean failRendering;
+        private int reportedFailures;
 
         private FakeSupport(List<UUID> seats) {
             this(seats, null);
@@ -353,11 +425,22 @@ class RoundOpeningCoordinatorTest {
         @Override
         public void refreshPhysicalTable() {
             refreshes++;
+            if (failRendering) {
+                throw new IllegalStateException("模拟 Folia 跨 region 渲染失败");
+            }
+        }
+
+        @Override
+        public void reportRenderFailure(String step, RuntimeException failure, int count) {
+            reportedFailures++;
         }
 
         @Override
         public void tickOpeningActionBar() {
             actionBarTicks++;
+            if (failRendering) {
+                throw new IllegalStateException("模拟 ActionBar 渲染失败");
+            }
         }
 
         @Override

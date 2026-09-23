@@ -5,7 +5,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -53,6 +55,8 @@ public class GadgetBoxGuiService implements Listener {
     private final VirtualGadgetBarStore store;
     private final Consumer<Action> actionConsumer;
     private final Consumer<UUID> saveListener;
+    private final BiConsumer<UUID, Inventory> openInventory;
+    private final Consumer<UUID> closeInventory;
     private volatile String title;
     private volatile String bubbleName;
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
@@ -81,15 +85,60 @@ public class GadgetBoxGuiService implements Listener {
         String title,
         String bubbleName
     ) {
+        this(store, actionConsumer, saveListener, title, bubbleName,
+            GadgetBoxGuiService::openInventoryDirect,
+            GadgetBoxGuiService::closeInventoryDirect);
+    }
+
+    /** 生产装配入口：GUI 仍在主线程创建，最终开关窗口交给 player owner lane。 */
+    public GadgetBoxGuiService(
+        VirtualGadgetBarStore store,
+        Consumer<Action> actionConsumer,
+        Consumer<UUID> saveListener,
+        String title,
+        String bubbleName,
+        PlayerOutputDispatcher output
+    ) {
+        this(store, actionConsumer, saveListener, title, bubbleName,
+            (playerId, inventory) -> output.openInventory(playerId, inventory),
+            output::closeInventory);
+    }
+
+    private GadgetBoxGuiService(
+        VirtualGadgetBarStore store,
+        Consumer<Action> actionConsumer,
+        Consumer<UUID> saveListener,
+        String title,
+        String bubbleName,
+        BiConsumer<UUID, Inventory> openInventory,
+        Consumer<UUID> closeInventory
+    ) {
         this.store = java.util.Objects.requireNonNull(store, "store");
         this.actionConsumer = java.util.Objects.requireNonNull(actionConsumer, "actionConsumer");
         this.saveListener = java.util.Objects.requireNonNull(saveListener, "saveListener");
+        this.openInventory = java.util.Objects.requireNonNull(openInventory, "openInventory");
+        this.closeInventory = java.util.Objects.requireNonNull(closeInventory, "closeInventory");
         this.title = title == null || title.isBlank() ? "MUZ | 道具箱" : title;
         this.bubbleName = bubbleName == null || bubbleName.isBlank() ? "语音气泡" : bubbleName;
     }
 
-    /** 打开或重新创建道具箱 GUI。 */
+    private static void openInventoryDirect(UUID playerId, Inventory inventory) {
+        Player player = Bukkit.getPlayer(playerId);
+        if (player != null && player.isOnline()) {
+            player.openInventory(inventory);
+        }
+    }
+
+    private static void closeInventoryDirect(UUID playerId) {
+        Player player = Bukkit.getPlayer(playerId);
+        if (player != null && player.isOnline()) {
+            player.closeInventory();
+        }
+    }
+
+    /** 打开或重新创建道具箱 GUI；配置编辑 GUI 只允许在 Bukkit 主线程操作。 */
     public void open(Player player) {
+        requirePrimaryThread("open");
         java.util.Objects.requireNonNull(player, "player");
         VirtualGadgetBar snapshot = store.load(player.getUniqueId());
         int selected = normalizeSelection(player.getUniqueId(), snapshot);
@@ -97,11 +146,12 @@ public class GadgetBoxGuiService implements Listener {
         Inventory inventory = Bukkit.createInventory(holder, GUI_SIZE, title);
         holder.setInventory(inventory);
         render(inventory, snapshot, selected);
-        player.openInventory(inventory);
+        openInventory.accept(player.getUniqueId(), inventory);
     }
 
     /** 只刷新当前已打开的道具箱；未打开时不创建新窗口。 */
     public void refresh(Player player) {
+        requirePrimaryThread("refresh");
         if (player == null) {
             return;
         }
@@ -119,6 +169,7 @@ public class GadgetBoxGuiService implements Listener {
     /** 主装配可直接转发 InventoryClickEvent。所有道具箱点击都会被取消。 */
     @EventHandler
     public void handleClick(InventoryClickEvent event) {
+        requirePrimaryThread("handleClick");
         Inventory top = event.getView().getTopInventory();
         if (!(top.getHolder() instanceof GadgetBoxInventoryHolder holder)) {
             return;
@@ -146,6 +197,7 @@ public class GadgetBoxGuiService implements Listener {
     /** 道具箱打开期间禁止拖拽，避免 Bukkit 绕过单击路径修改上方快照。 */
     @EventHandler
     public void handleDrag(InventoryDragEvent event) {
+        requirePrimaryThread("handleDrag");
         if (event.getView().getTopInventory().getHolder() instanceof GadgetBoxInventoryHolder) {
             event.setCancelled(true);
         }
@@ -156,6 +208,7 @@ public class GadgetBoxGuiService implements Listener {
     }
 
     public ItemStack selectedItem(UUID playerId) {
+        requirePrimaryThread("selectedItem");
         int selected = selectedSlot(playerId);
         if (selected < 0 || selected >= VirtualGadgetBar.SLOT_COUNT) {
             return null;
@@ -176,8 +229,9 @@ public class GadgetBoxGuiService implements Listener {
     }
 
     public void close(Player player) {
+        requirePrimaryThread("close");
         if (player != null && player.getOpenInventory().getTopInventory().getHolder() instanceof GadgetBoxInventoryHolder) {
-            player.closeInventory();
+            closeInventory.accept(player.getUniqueId());
         }
     }
 
@@ -191,6 +245,7 @@ public class GadgetBoxGuiService implements Listener {
     }
 
     private void handleTopClick(Player player, GadgetBoxInventoryHolder holder, InventoryClickEvent event) {
+        requirePrimaryThread("handleTopClick");
         int slot = event.getRawSlot();
         if (slot == VirtualGadgetBar.BUBBLE_SLOT) {
             emit(new Action(event.isRightClick() ? ActionType.BUBBLE : ActionType.NOOP,
@@ -220,7 +275,7 @@ public class GadgetBoxGuiService implements Listener {
         }
         selectedSlots.put(player.getUniqueId(), slot);
         emit(new Action(ActionType.SELECTED, player.getUniqueId(), slot, selected, holder.snapshot()));
-        player.closeInventory();
+        closeInventory.accept(player.getUniqueId());
     }
 
     private void handleCopy(Player player, GadgetBoxInventoryHolder holder, ItemStack source) {
@@ -296,5 +351,12 @@ public class GadgetBoxGuiService implements Listener {
 
     private void emit(Action action) {
         actionConsumer.accept(action);
+    }
+
+    /** 配置编辑 GUI 的 Bukkit Inventory 读写必须由同步主线程完成。 */
+    private static void requirePrimaryThread(String operation) {
+        if (!Bukkit.isPrimaryThread()) {
+            throw new IllegalStateException("道具箱 GUI 操作必须在 Bukkit 主线程执行：" + operation);
+        }
     }
 }

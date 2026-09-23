@@ -46,7 +46,7 @@ public final class MahjongEngineBridge {
         }
         MahjongTableManager manager = embeddedRuntime.tableManager();
         switch (sub) {
-            case "help" -> requirePlayer(player).sendMessage(Component.text("/muz mahjong <help|open|create|list|state|remove>"));
+            case "help" -> embeddedRuntime.tableManager().sendToPlayer(requirePlayer(player), Component.text("/muz mahjong <help|open|create|list|state|remove>"));
             case "create" -> {
                 MahjongTableSession table = manager.createTable(requirePlayer(player), args.length >= 2 ? args[1] : null);
                 sender.sendMessage("已创建内嵌麻将桌 " + table.id());

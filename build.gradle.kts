@@ -23,7 +23,7 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.46"
+version = "1.10.50"
 
 data class MuzTarget(
     val id: String,
@@ -866,10 +866,12 @@ fun renderGadgetBarBase(selected: Boolean): BufferedImage {
     val out = BufferedImage(gadgetBarCellWidth, gadgetBarCellHeight, BufferedImage.TYPE_INT_ARGB)
     val g = out.createGraphics()
     g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
+    // 可见宽度按锁定后的 21 列绘制（见 writeGadgetBarGlyph）：按 22 列画会让右边框落在被裁掉的第 22 列，栏最右侧不闭合。
+    val drawWidth = gadgetBarCellAdvance - 1
     g.color = if (selected) Color(0x4E, 0x42, 0x16, 0xF2) else Color(0x18, 0x18, 0x20, 0xE8)
-    g.fillRect(1, 1, gadgetBarCellWidth - 2, gadgetBarCellHeight - 2)
+    g.fillRect(1, 1, drawWidth - 2, gadgetBarCellHeight - 2)
     g.color = Color(0xA0, 0xA8, 0xB8, 0xD0)
-    g.drawRect(0, 0, gadgetBarCellWidth - 1, gadgetBarCellHeight - 1)
+    g.drawRect(0, 0, drawWidth - 1, gadgetBarCellHeight - 1)
     g.dispose()
     return out
 }
@@ -908,9 +910,28 @@ fun renderGadgetBarIcon(kind: String): BufferedImage {
     }
 }
 
+/**
+ * 写出九格栏字形并锁定净前进量。
+ *
+ * <p>Minecraft BitmapProvider 的 advance = 最右不透明列 + 2（与 PNG 宽度无关）。未锁定时底图实测
+ * advance 23、图标 17..19、选框 22，运行期却统一按 [gadgetBarCellAdvance]=22 回退，于是每格宽度随图标
+ * 漂移，整条栏会左右抖动，固定位置布局也无法闭合。这里把画布裁成 advance-1 列，并在最右列底部放
+ * alpha=1 的不可见锚点（与记牌器同一做法），保证所有九格栏字形 advance 恰好等于 22。
+ * 插件侧 PackAssets.GADGET_BAR_CELL_ADVANCE 与此处一一对应。
+ */
 fun writeGadgetBarGlyph(target: File, image: BufferedImage) {
+    val width = gadgetBarCellAdvance - 1
+    val locked = BufferedImage(width, gadgetBarCellHeight, BufferedImage.TYPE_INT_ARGB)
+    val g = locked.createGraphics()
+    g.drawImage(image, 0, 0, null)
+    g.dispose()
+    val anchorX = width - 1
+    val anchorY = gadgetBarCellHeight - 1
+    if ((locked.getRGB(anchorX, anchorY) ushr 24) == 0) {
+        locked.setRGB(anchorX, anchorY, 0x01FFFFFF)
+    }
     target.parentFile.mkdirs()
-    ImageIO.write(image, "png", target)
+    ImageIO.write(locked, "png", target)
 }
 
 fun writeAvatarPixelGlyph(target: File, scale: Int, row: Int, headPixels: Int) {

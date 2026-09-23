@@ -11,9 +11,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
-import java.util.function.Function;
 import java.util.function.Supplier;
-import org.bukkit.entity.Player;
 
 /**
  * 牌桌背景音乐的单会话轮播协调器：同一局只允许一个活动播放链，切曲前清理本插件的全部 BGM。
@@ -23,7 +21,7 @@ final class TableMusicCoordinator {
     private final Supplier<GamePhase> phaseSupplier;
     private final Supplier<Map<UUID, List<DoudizhuCard>>> handsSupplier;
     private final Supplier<List<UUID>> seatsSupplier;
-    private final Function<UUID, Player> playerResolver;
+    private final PlayerOutputDispatcher outputDispatcher;
     private final Supplier<Float> volumeSupplier;
     private final BiFunction<Long, Runnable, MuzScheduler.TaskHandle> scheduler;
     private final Set<UUID> activeListeners = new HashSet<>();
@@ -34,29 +32,29 @@ final class TableMusicCoordinator {
 
     TableMusicCoordinator(
         DoudizhuPlugin plugin,
+        PlayerOutputDispatcher outputDispatcher,
         Supplier<Boolean> canScheduleTasks,
         Supplier<GamePhase> phaseSupplier,
         Supplier<Map<UUID, List<DoudizhuCard>>> handsSupplier,
-        Supplier<List<UUID>> seatsSupplier,
-        Function<UUID, Player> playerResolver
+        Supplier<List<UUID>> seatsSupplier
     ) {
         this(
+            outputDispatcher,
             canScheduleTasks,
             phaseSupplier,
             handsSupplier,
             seatsSupplier,
-            playerResolver,
             plugin::getBgmVolume,
             (delay, runnable) -> plugin.scheduler().runLater(delay, runnable)
         );
     }
 
     TableMusicCoordinator(
+        PlayerOutputDispatcher outputDispatcher,
         Supplier<Boolean> canScheduleTasks,
         Supplier<GamePhase> phaseSupplier,
         Supplier<Map<UUID, List<DoudizhuCard>>> handsSupplier,
         Supplier<List<UUID>> seatsSupplier,
-        Function<UUID, Player> playerResolver,
         Supplier<Float> volumeSupplier,
         BiFunction<Long, Runnable, MuzScheduler.TaskHandle> scheduler
     ) {
@@ -64,7 +62,7 @@ final class TableMusicCoordinator {
         this.phaseSupplier = phaseSupplier;
         this.handsSupplier = handsSupplier;
         this.seatsSupplier = seatsSupplier;
-        this.playerResolver = playerResolver;
+        this.outputDispatcher = Objects.requireNonNull(outputDispatcher, "outputDispatcher");
         this.volumeSupplier = volumeSupplier;
         this.scheduler = scheduler;
     }
@@ -87,10 +85,7 @@ final class TableMusicCoordinator {
         Set<UUID> listenersToStop = new HashSet<>(activeListeners);
         listenersToStop.addAll(seatsSupplier.get());
         for (UUID playerId : listenersToStop) {
-            Player player = playerResolver.apply(playerId);
-            if (player != null) {
-                stopBgmTracks(player);
-            }
+            stopBgmTracks(playerId);
         }
         activeListeners.clear();
     }
@@ -114,9 +109,9 @@ final class TableMusicCoordinator {
         }
     }
 
-    private void stopBgmTracks(Player player) {
+    private void stopBgmTracks(UUID playerId) {
         for (String bgm : PackSounds.bgmTracks()) {
-            player.stopSound(bgm);
+            outputDispatcher.stopSound(playerId, bgm);
         }
     }
 
@@ -139,12 +134,12 @@ final class TableMusicCoordinator {
         }
         cancelScheduledTask();
         for (UUID seat : seatsSupplier.get()) {
-            Player player = playerResolver.apply(seat);
-            if (player != null) {
-                stopBgmTracks(player);
-                player.playSound(player.getLocation(), soundKey, volumeSupplier.get(), 1.0f);
-                activeListeners.add(seat);
+            if (outputDispatcher.currentPlayer(seat) == null) {
+                continue;
             }
+            stopBgmTracks(seat);
+            outputDispatcher.playSound(seat, soundKey, volumeSupplier.get(), 1.0f);
+            activeListeners.add(seat);
         }
         currentMusicKey = soundKey;
         scheduleNext(soundKey, epoch);

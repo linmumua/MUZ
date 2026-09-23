@@ -3,8 +3,6 @@ package linmumua.doudizhu.game;
 import linmumua.doudizhu.DoudizhuPlugin;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
-import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -20,11 +18,16 @@ import java.util.UUID;
  * 保证普通提示不依赖自定义物品栏 HUD 是否启用。
  */
 public final class ActionBarOverlayService {
-    private final DoudizhuPlugin plugin;
+    private final PlayerOutputDispatcher output;
     private final Map<UUID, OverlayEntry> overlays = new HashMap<>();
 
     public ActionBarOverlayService(DoudizhuPlugin plugin) {
-        this.plugin = plugin;
+        this.output = new PlayerOutputDispatcher(plugin);
+    }
+
+    /** 当前服务共享的玩家输出门面；供最明显的监听器消息路径复用。 */
+    public PlayerOutputDispatcher outputDispatcher() {
+        return output;
     }
 
     /** 显示指定时长的普通 ActionBar，并记录给 Hotbar 兼容合成层读取。 */
@@ -38,7 +41,7 @@ public final class ActionBarOverlayService {
         Component plain = normalize(message);
         long expireAt = System.currentTimeMillis() + Math.max(0L, (long) durationTicks * 50L);
         for (UUID id : players) {
-            if (onlinePlayer(id) == null) {
+            if (output.currentPlayer(id) == null) {
                 overlays.remove(id);
                 continue;
             }
@@ -64,21 +67,12 @@ public final class ActionBarOverlayService {
 
     /** 直接发送一次普通 ActionBar，不加入叠加队列。 */
     public void sendActionBar(UUID playerId, Component message) {
-        Player player = onlinePlayer(playerId);
-        if (player != null) {
-            player.sendActionBar(normalize(message));
-        }
+        output.sendActionBar(playerId, normalize(message));
     }
 
     /** 直接向多个在线玩家发送一次普通 ActionBar，不加入叠加队列。 */
     public void sendActionBar(Collection<UUID> playerIds, Component message) {
-        Component plain = normalize(message);
-        for (UUID playerId : playerIds) {
-            Player player = onlinePlayer(playerId);
-            if (player != null) {
-                player.sendActionBar(plain);
-            }
-        }
+        output.sendActionBar(playerIds, normalize(message));
     }
 
     /** 返回当前仍有效的普通叠加消息，供兼容的 Hotbar 合成路径读取。 */
@@ -97,10 +91,7 @@ public final class ActionBarOverlayService {
     /** 主动清除某个玩家的普通叠加消息并清掉客户端旧 ActionBar。 */
     public void clearOverlay(UUID playerId) {
         overlays.remove(playerId);
-        Player player = onlinePlayer(playerId);
-        if (player != null) {
-            player.sendActionBar(Component.empty());
-        }
+        output.sendActionBar(playerId, Component.empty());
     }
 
     /** 清除整桌普通叠加消息。 */
@@ -116,11 +107,7 @@ public final class ActionBarOverlayService {
     /** 停止使用时释放所有普通叠加状态。 */
     public void stop() {
         overlays.clear();
-    }
-
-    private Player onlinePlayer(UUID playerId) {
-        Player player = playerId == null ? null : Bukkit.getPlayer(playerId);
-        return player != null && player.isOnline() ? player : null;
+        output.cancelAll();
     }
 
     private static Component normalize(Component message) {

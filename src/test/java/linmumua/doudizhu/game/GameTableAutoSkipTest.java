@@ -17,7 +17,7 @@ class GameTableAutoSkipTest {
     void waitsForHumanAndUsesIndependentTokenBeforeAutoPass() throws Exception {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
-        assertTrue(source.contains("plugin.scheduler().runLater(20L"), "真人无可压必须等待 20 tick");
+        assertTrue(source.contains("manager.runTableLater(this, 20L"), "真人无可压必须等待 20 tick");
         assertTrue(source.contains("token != noResponsePassToken"), "延迟任务必须进行 token 二次校验");
         assertTrue(source.contains("scheduledNoResponseEpoch != noResponsePassEpoch"), "延迟任务必须校验独立 epoch");
         assertTrue(source.contains("!Objects.equals(currentTurn, playerId)"), "延迟任务必须校验 currentTurn");
@@ -27,8 +27,9 @@ class GameTableAutoSkipTest {
         assertTrue(source.contains("MoveAdvisor.hasAnyBeatingMove(hand, currentPattern)"), "必须继续使用现有 MoveAdvisor 判定");
         assertTrue(source.contains("cancelPendingNoResponsePass()"), "状态结束和玩家响应必须取消等待任务");
         assertTrue(source.contains("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。"), "必须提示真人等待期间可手动不要");
-        assertTrue(source.contains("!(scheduledPlayer != null && scheduledPlayer.isOnline())"), "安排等待任务必须统一判断在线状态");
-        assertTrue(source.contains("Player onlinePlayer = GameTable.this.onlinePlayer(playerId);"), "延迟回调必须只获取一次在线玩家");
+        assertTrue(source.contains("!isPlayerPresent(currentTurn)"), "安排等待任务必须通过 UUID presence 门面判断在线状态");
+        assertTrue(source.contains("!isPlayerPresent(playerId)"), "延迟回调必须再次通过 UUID presence 门面确认在线");
+        assertTrue(!source.contains(".isOnline()"), "GameTable owner 逻辑不得直接调用 Player.isOnline()");
     }
 
     @Test
@@ -47,7 +48,7 @@ class GameTableAutoSkipTest {
     void autoPassCallbackUsesSingleNormalContinuationPath() throws Exception {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
-        int callbackStart = source.indexOf("pendingNoResponsePassTask = plugin.scheduler().runLater(20L");
+        int callbackStart = source.indexOf("pendingNoResponsePassTask = manager.runTableLater(this, 20L");
         int callbackEnd = source.indexOf("\n    private boolean shouldAutoPassCurrentTurn()", callbackStart);
         assertTrue(callbackStart >= 0 && callbackEnd > callbackStart, "必须找到真人自动不要回调");
         String callback = source.substring(callbackStart, callbackEnd);

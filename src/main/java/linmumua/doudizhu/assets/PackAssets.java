@@ -300,6 +300,11 @@ public final class PackAssets {
     public static final int GADGET_BAR_CELL_ADVANCE = PackTiers.GADGET_BAR_CELL_ADVANCE;
     public static final int GADGET_BAR_ICON_WIDTH = PackTiers.GADGET_BAR_ICON_WIDTH;
     public static final int GADGET_BAR_ICON_HEIGHT = PackTiers.GADGET_BAR_ICON_HEIGHT;
+    /**
+     * 已失效：图标原始像素宽 + 1。九格栏字形现在统一锁定为 {@link #GADGET_BAR_CELL_ADVANCE}，
+     * 客户端实际 advance 不是这个值；保留仅为旧源码兼容，新代码不要用它计算位置。
+     */
+    @Deprecated
     public static final int GADGET_BAR_ICON_ADVANCE = PackTiers.GADGET_BAR_ICON_ADVANCE;
     public static final int GADGET_BAR_ICON_KIND_COUNT = PackTiers.GADGET_BAR_ICON_KIND_COUNT + 1;
 

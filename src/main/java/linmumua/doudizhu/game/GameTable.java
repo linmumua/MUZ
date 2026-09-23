@@ -31,7 +31,6 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.title.Title;
-import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
@@ -67,6 +66,8 @@ public final class GameTable {
      */
     private final Map<CardRank, Integer> remainingRankCounts = new EnumMap<>(CardRank.class);
     private final Map<UUID, String> botNames = new LinkedHashMap<>();
+    /** 真人入桌时拍下的名称快照；owner lane 不再查询 Bukkit/OfflinePlayer。 */
+    private final Map<UUID, String> playerNames = new LinkedHashMap<>();
     private final List<Component> recentLobbyEntries = new ArrayList<>();
     private final List<RecentTrickEntry> recentTrickEntries = new ArrayList<>();
     private final TableMusicCoordinator musicCoordinator;
@@ -77,6 +78,8 @@ public final class GameTable {
     private final RoundSettlementCoordinator roundSettlementCoordinator;
     private final RoundOpeningCoordinator roundOpeningCoordinator;
     private final ActionBarOverlayService actionBarOverlay;
+    /** 桌内玩家输出统一按 UUID 投递到 player lane，避免延迟闭包持有旧 Player。 */
+    private final PlayerOutputDispatcher outputDispatcher;
     private RoundOpeningSettings openingSettings;
 
     private GamePhase phase = GamePhase.LOBBY;
@@ -127,19 +130,20 @@ public final class GameTable {
         this.actionBarOverlay = sharedActionBar == null
             ? new ActionBarOverlayService(plugin)
             : sharedActionBar;
+        this.outputDispatcher = this.actionBarOverlay.outputDispatcher();
         this.musicCoordinator = new TableMusicCoordinator(
             plugin,
+            outputDispatcher,
             this::canScheduleTasks,
             () -> phase,
             () -> hands,
-            () -> seats,
-            this::onlinePlayer
+            () -> seats
         );
         this.effectCoordinator = new TableEffectCoordinator(
             plugin,
+            outputDispatcher,
             random,
-            () -> seats,
-            this::onlinePlayer
+            () -> seats
         );
         this.trickHud = new TrickHudService(
             plugin,
@@ -150,6 +154,11 @@ public final class GameTable {
             @Override
             public DoudizhuPlugin plugin() {
                 return plugin;
+            }
+
+            @Override
+            public MuzScheduler.TaskHandle runTableNow(Runnable task) {
+                return manager.runTableNow(GameTable.this, task);
             }
 
             @Override
@@ -236,6 +245,11 @@ public final class GameTable {
             @Override
             public DoudizhuPlugin plugin() {
                 return plugin;
+            }
+
+            @Override
+            public MuzScheduler.TaskHandle runTableNow(Runnable task) {
+                return manager.runTableNow(GameTable.this, task);
             }
 
             @Override
@@ -417,12 +431,7 @@ public final class GameTable {
 
             @Override
             public void notifySettlementFailure(String message) {
-                for (UUID seat : seats) {
-                    Player player = onlinePlayer(seat);
-                    if (player != null) {
-                        player.sendMessage(MuzTheme.danger(message));
-                    }
-                }
+                outputDispatcher.sendMessage(seats, MuzTheme.danger(message));
             }
         });
         this.roundOpeningCoordinator = new RoundOpeningCoordinator(new RoundOpeningCoordinator.Support() {
@@ -434,6 +443,15 @@ public final class GameTable {
             @Override
             public MuzScheduler scheduler() {
                 return plugin.scheduler();
+            }
+
+            @Override
+            public MuzScheduler.TaskHandle runTableTimer(
+                long delayTicks,
+                long periodTicks,
+                java.util.function.Consumer<MuzScheduler.TaskHandle> task
+            ) {
+                return manager.runTableTimer(GameTable.this, delayTicks, periodTicks, task);
             }
 
             @Override
@@ -481,6 +499,13 @@ public final class GameTable {
             @Override
             public void onOpeningRevealWindowFinished() {
                 GameTable.this.onOpeningRevealWindowFinished();
+            }
+
+            @Override
+            public void reportRenderFailure(String step, RuntimeException failure, int count) {
+                // 已由协调器限频；这里只负责带堆栈写入插件日志，发牌时间线继续推进。
+                plugin.getLogger().log(java.util.logging.Level.WARNING,
+                    "开局渲染失败，发牌继续推进: 牌桌=" + name + " 步骤=" + step + " 累计=" + count, failure);
             }
         });
     }
@@ -555,12 +580,11 @@ public final class GameTable {
         if (botName != null && !botName.isBlank()) {
             return botName;
         }
-        Player online = onlinePlayer(playerId);
-        if (online != null) {
-            return online.getName();
+        String playerName = playerNames == null ? null : playerNames.get(playerId);
+        if (playerName != null && !playerName.isBlank()) {
+            return playerName;
         }
-        String offlineName = Bukkit.getOfflinePlayer(playerId).getName();
-        return offlineName == null || offlineName.isBlank() ? playerId.toString().substring(0, 8) : offlineName;
+        return playerId.toString().substring(0, 8);
     }
 
     public UUID getCurrentTurn() {
@@ -631,8 +655,12 @@ public final class GameTable {
         return target;
     }
 
+    /** Player 入口只拍 UUID/name 快照；对局状态机核心走 UUID。 */
     public void addPlayer(Player player) {
-        UUID playerId = player.getUniqueId();
+        addPlayer(player.getUniqueId(), player.getName());
+    }
+
+    public void addPlayer(UUID playerId, String playerName) {
         if (contains(playerId)) {
             return;
         }
@@ -643,6 +671,9 @@ public final class GameTable {
         if (!plugin.canAffordEntry(playerId, roomLevel)) {
             throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, roomLevel));
         }
+        if (playerNames != null && playerName != null && !playerName.isBlank()) {
+            playerNames.put(playerId, playerName);
+        }
         occupySeat(playerId, false);
         Component update = compactLobbyEvent(playerId, MuzTheme.accent("加入"), MuzTheme.muted("未准备"));
         announceChat(displayName(playerId) + " 加入 · 未准备", update);
@@ -650,14 +681,20 @@ public final class GameTable {
         refreshPhysicalTable();
     }
 
+    /** Player 入口只转换为 UUID/reason；离桌清理和状态推进仍由 UUID 核心完成。 */
     public void removePlayer(Player player, String reason) {
-        UUID playerId = player.getUniqueId();
+        removePlayer(player.getUniqueId(), reason);
+    }
+
+    public void removePlayer(UUID playerId, String reason) {
         if (!contains(playerId)) {
             return;
         }
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearPlayer(playerId);
         }
+        // 全局世界 tick 已拆成按桌 owner 刷新；主动离桌时由状态变更路径显式清理玩家缓存。
+        plugin.getPhysicalTableManager().clearPlayerCaches(playerId);
         Component leaveMessage = MuzTheme.field("离桌", MuzTheme.danger(reason));
         if (phase != GamePhase.LOBBY) {
             // 先回到大厅并清掉上一帧自定义 hotbar，再发送离桌提示，避免 resetRound
@@ -703,12 +740,18 @@ public final class GameTable {
         if (botNames.remove(playerId) != null) {
             plugin.unregisterBot(playerId);
         }
+        if (playerNames != null) {
+            playerNames.remove(playerId);
+        }
     }
 
     public void toggleReady(Player player) {
-        requireAtTable(player);
+        toggleReady(player.getUniqueId());
+    }
+
+    public void toggleReady(UUID playerId) {
+        requireAtTable(playerId);
         ensurePhase(GamePhase.LOBBY, "现在不是准备阶段。");
-        UUID playerId = player.getUniqueId();
         if (!readyPlayers.contains(playerId) && !plugin.canAffordEntry(playerId, roomLevel)) {
             throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, roomLevel));
         }
@@ -780,10 +823,14 @@ public final class GameTable {
     }
 
     public void bid(Player player, int points) {
+        bid(player.getUniqueId(), points);
+    }
+
+    public void bid(UUID playerId, int points) {
         // 叫分逻辑只允许当前操作位执行，并且不能小于当前最高分
-        requireAtTable(player);
+        requireAtTable(playerId);
         ensurePhase(GamePhase.BIDDING, "现在还不到叫分的时候。");
-        requireCurrentTurn(player);
+        requireCurrentTurn(playerId);
         if (points < 0 || points > 3) {
             throw new IllegalArgumentException("叫分只能填 0 到 3。");
         }
@@ -791,7 +838,6 @@ public final class GameTable {
             throw new IllegalArgumentException("你不能叫比当前最高分更低的分，或者输入 0 放弃。");
         }
 
-        UUID playerId = player.getUniqueId();
         processBidChoice(playerId, points);
     }
 
@@ -865,8 +911,7 @@ public final class GameTable {
             || isBot(playerId) || revealedHandPlayers.contains(playerId)) {
             return false;
         }
-        Player player = onlinePlayer(playerId);
-        return player != null && player.isOnline();
+        return isPlayerPresent(playerId);
     }
 
     public int getRevealCount(UUID playerId) {
@@ -940,10 +985,14 @@ public final class GameTable {
     }
 
     public void chooseDouble(Player player, boolean doubled) {
-        requireAtTable(player);
+        chooseDouble(player.getUniqueId(), doubled);
+    }
+
+    public void chooseDouble(UUID playerId, boolean doubled) {
+        requireAtTable(playerId);
         ensurePhase(GamePhase.DOUBLING, "现在还不到加倍的时候。");
-        requireCurrentTurn(player);
-        processDoublingChoice(player.getUniqueId(), doubled ? 2 : 1, false);
+        requireCurrentTurn(playerId);
+        processDoublingChoice(playerId, doubled ? 2 : 1, false);
     }
 
     public void toggleSelection(UUID playerId, int cardId) {
@@ -976,17 +1025,10 @@ public final class GameTable {
         }
     }
 
+    /** Player 入口只把玩家对象用于 CE 行为适配；牌局核心按 UUID 执行。 */
     public void playSelected(Player player) {
-        requireAtTable(player);
-        ensurePhase(GamePhase.PLAYING, "现在还不到出牌的时候。");
-        requireCurrentTurn(player);
-
         UUID playerId = player.getUniqueId();
-        List<DoudizhuCard> chosen = selectedCardsForPlay(playerId);
-        ensureSelectedMoveCanBeatCurrentPattern(playerId, chosen);
-        cancelPendingNoResponsePass();
-
-        MoveResolution resolution = applyMoveResolution(playerId, chosen, true, "这牌型出不了。");
+        MoveResolution resolution = playSelectedCore(playerId);
         CeActionExecutor.executePlayProfile(
             plugin,
             player,
@@ -1002,6 +1044,28 @@ public final class GameTable {
             MuzTheme.success(resolution.pattern().displayName()),
             resolution.cardLabels()
         );
+    }
+
+    public void playSelected(UUID playerId) {
+        MoveResolution resolution = playSelectedCore(playerId);
+        finalizePlayedMove(
+            playerId,
+            resolution,
+            displayName(playerId) + " " + resolution.pattern().displayName(),
+            MuzTheme.success(resolution.pattern().displayName()),
+            resolution.cardLabels()
+        );
+    }
+
+    private MoveResolution playSelectedCore(UUID playerId) {
+        requireAtTable(playerId);
+        ensurePhase(GamePhase.PLAYING, "现在还不到出牌的时候。");
+        requireCurrentTurn(playerId);
+
+        List<DoudizhuCard> chosen = selectedCardsForPlay(playerId);
+        ensureSelectedMoveCanBeatCurrentPattern(playerId, chosen);
+        cancelPendingNoResponsePass();
+        return applyMoveResolution(playerId, chosen, true, "这牌型出不了。");
     }
 
     private List<DoudizhuCard> selectedCardsForPlay(UUID playerId) {
@@ -1030,10 +1094,13 @@ public final class GameTable {
     }
 
     public void pass(Player player) {
-        requireAtTable(player);
+        pass(player.getUniqueId());
+    }
+
+    public void pass(UUID playerId) {
+        requireAtTable(playerId);
         ensurePhase(GamePhase.PLAYING, "现在还不到出牌的时候。");
-        requireCurrentTurn(player);
-        UUID playerId = player.getUniqueId();
+        requireCurrentTurn(playerId);
         if (leadPlayer == null || Objects.equals(leadPlayer, playerId)) {
             throw new IllegalStateException("这轮你先出，不能过。");
         }
@@ -1248,6 +1315,11 @@ public final class GameTable {
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
+        if (plugin.getTableSpeechPanelService() != null) {
+            // 语音面板实体和同桌其它显示实体一样，只属于桌子 owner lane；此前关桌从不清理它，
+            // 是一处既有泄漏。现在与兄弟服务同点位收口，也承接 tick 无法触达的离线 owner 会话。
+            plugin.getTableSpeechPanelService().clearTable(this);
+        }
         detachAllSeatsForForceClose(reason);
         clearTableStateForForceClose();
     }
@@ -1447,12 +1519,7 @@ public final class GameTable {
             }
         } catch (RuntimeException exception) {
             plugin.getLogger().log(java.util.logging.Level.SEVERE, "牌局结算收尾失败，已终止本局并核查日志。牌桌=" + name, exception);
-            for (UUID seat : seats) {
-                Player player = onlinePlayer(seat);
-                if (player != null) {
-                    player.sendMessage(MuzTheme.danger("本局结算未完成，请核查日志与库存。"));
-                }
-            }
+            outputDispatcher.sendMessage(seats, MuzTheme.danger("本局结算未完成，请核查日志与库存。"));
         } finally {
             try {
                 if (phase != GamePhase.LOBBY) {
@@ -1468,15 +1535,11 @@ public final class GameTable {
         lobbyUiResumeAtMillis = System.currentTimeMillis() + 5500L;
         for (int index = 0; index < 5; index++) {
             long delay = index * 20L;
-            plugin.scheduler().runLater(delay, () -> {
+            manager.runTableLater(this, delay, () -> {
                 if (plugin.isShuttingDown()) {
                     return;
                 }
                 for (UUID seat : seats) {
-                    Player player = onlinePlayer(seat);
-                    if (player == null) {
-                        continue;
-                    }
                     Component bar = winners.contains(seat) ? MuzTheme.success("胜利") : MuzTheme.danger("失利");
                     // 每次闪动持续约 1.25 秒（25 格刻），5 次共 5.5 秒覆盖 lobbyUiResumeAt 窗口
                     dispatchActionBar(seat, bar, 25);
@@ -1501,6 +1564,10 @@ public final class GameTable {
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
         }
+        if (plugin.getTableSpeechPanelService() != null) {
+            // 回 LOBBY 时语音面板必须一起收掉：阶段门只允许 PLAYING，留着就是孤儿实体。
+            plugin.getTableSpeechPanelService().clearTable(this);
+        }
         resetRoundStateForLobby();
         plugin.getHandGuiService().closeHands(this);
         refreshPhysicalTable();
@@ -1510,10 +1577,7 @@ public final class GameTable {
     private void detachAllSeatsForForceClose(String reason) {
         for (UUID seat : new ArrayList<>(seats)) {
             if (!isBot(seat)) {
-                Player player = onlinePlayer(seat);
-                if (player != null) {
-                    player.sendMessage(text(reason, NamedTextColor.RED));
-                }
+                outputDispatcher.sendMessage(seat, text(reason, NamedTextColor.RED));
                 manager.unregisterPlayer(seat);
                 continue;
             }
@@ -1604,7 +1668,7 @@ public final class GameTable {
         if (!canScheduleTasks() || !debugAutoLoop || seats.size() != PLAYER_COUNT || !seats.stream().allMatch(this::isBot)) {
             return;
         }
-        plugin.scheduler().runLater(2L, () -> {
+        manager.runTableLater(this, 2L, () -> {
             try {
                 startRound(plugin.getServer().getConsoleSender());
             } catch (RuntimeException e) {
@@ -1693,9 +1757,8 @@ public final class GameTable {
     }
 
     private void scheduleNoResponsePassIfNeeded() {
-        Player scheduledPlayer = currentTurn == null ? null : GameTable.this.onlinePlayer(currentTurn);
         if (!shouldAutoPassCurrentTurn() || currentTurn == null || isBot(currentTurn)
-            || !(scheduledPlayer != null && scheduledPlayer.isOnline())) {
+            || !isPlayerPresent(currentTurn)) {
             return;
         }
         UUID playerId = currentTurn;
@@ -1704,11 +1767,10 @@ public final class GameTable {
         int scheduledEpoch = botActionEpoch;
         int scheduledNoResponseEpoch = noResponsePassEpoch;
         long token = ++noResponsePassToken;
-        pendingNoResponsePassTask = plugin.scheduler().runLater(20L, () -> {
+        pendingNoResponsePassTask = manager.runTableLater(this, 20L, () -> {
             if (token == noResponsePassToken) {
                 pendingNoResponsePassTask = null;
             }
-            Player onlinePlayer = GameTable.this.onlinePlayer(playerId);
             if (
                 !canScheduleTasks()
                     || token != noResponsePassToken
@@ -1719,7 +1781,7 @@ public final class GameTable {
                     || !Objects.equals(leadPlayer, scheduledLeadPlayer)
                     || !Objects.equals(currentPattern, scheduledPattern)
                     || isBot(playerId)
-                    || !(onlinePlayer != null && onlinePlayer.isOnline())
+                    || !isPlayerPresent(playerId)
                     || !shouldAutoPassCurrentTurn()
             ) {
                 return;
@@ -1751,10 +1813,6 @@ public final class GameTable {
         if (currentTurn == null || isBot(currentTurn) || !shouldAutoPassCurrentTurn()) {
             return;
         }
-        Player player = onlinePlayer(currentTurn);
-        if (!(player != null && player.isOnline())) {
-            return;
-        }
         Component hint = MuzTheme.warning("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。");
         dispatchActionBar(currentTurn, hint, 60);
     }
@@ -1781,7 +1839,11 @@ public final class GameTable {
     }
 
     private void requireCurrentTurn(Player player) {
-        if (!Objects.equals(currentTurn, player.getUniqueId())) {
+        requireCurrentTurn(player.getUniqueId());
+    }
+
+    private void requireCurrentTurn(UUID playerId) {
+        if (!Objects.equals(currentTurn, playerId)) {
             throw new IllegalStateException("还没轮到你。");
         }
     }
@@ -1806,11 +1868,8 @@ public final class GameTable {
         Component full = MuzTheme.banner("斗地主", name + " 号桌", message);
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
         for (UUID seat : seats) {
-            Player player = onlinePlayer(seat);
-            if (player != null) {
-                player.sendMessage(full);
-                dispatchActionBar(seat, actionBar, 60);
-            }
+            outputDispatcher.sendMessage(seat, full);
+            dispatchActionBar(seat, actionBar, 60);
         }
     }
 
@@ -1825,9 +1884,7 @@ public final class GameTable {
     private void broadcastActionBar(Component message) {
         Component actionBar = message.decoration(TextDecoration.ITALIC, false);
         for (UUID seat : seats) {
-            if (onlinePlayer(seat) != null) {
-                dispatchActionBar(seat, actionBar, 60);
-            }
+            dispatchActionBar(seat, actionBar, 60);
         }
     }
 
@@ -1889,9 +1946,14 @@ public final class GameTable {
         return result.decoration(TextDecoration.ITALIC, false);
     }
 
-    private Player onlinePlayer(UUID playerId) {
-        Player player = Bukkit.getPlayer(playerId);
-        return player != null && player.isOnline() ? player : null;
+    /**
+     * 只通过已有玩家输出门面判断 UUID 是否仍有在线 presence；owner lane 不解析 Bukkit Player。
+     */
+    private boolean isPlayerPresent(UUID playerId) {
+        PlayerOutputDispatcher dispatcher = outputDispatcher != null
+            ? outputDispatcher
+            : actionBarOverlay == null ? null : actionBarOverlay.outputDispatcher();
+        return playerId != null && dispatcher != null && dispatcher.currentPlayer(playerId) != null;
     }
 
     /** 桌内语音/提示统一走音效协调器，避免外部服务绕过去重与收听者边界。 */
@@ -2017,12 +2079,9 @@ public final class GameTable {
 
     private void broadcastPersistentActionBar(int remainingSeconds) {
         for (UUID playerId : seats) {
-            Player player = onlinePlayer(playerId);
-            if (player != null && player.isOnline()) {
-                Component bar = buildPersistentActionBar(playerId, remainingSeconds);
-                dispatchActionBar(playerId, bar, 60);
-                sendTrickHud(player);
-            }
+            Component bar = buildPersistentActionBar(playerId, remainingSeconds);
+            dispatchActionBar(playerId, bar, 60);
+            dispatchTrickHud(playerId);
         }
     }
 
@@ -2036,6 +2095,18 @@ public final class GameTable {
      * <p>【常显】：桌上没牌时只有上排空着，下排头像照旧。一轮打完就整条收起来会让 HUD 闪一下，
      * 所以这里不再因为 {@code currentTrickCards.isEmpty()} 而 hide。
      */
+    /**
+     * HUD 仍暂时需要 Player 输入；这里只在 UUID 玩家门面内适配，后续应改为输入快照。
+     */
+    private void dispatchTrickHud(UUID viewerId) {
+        PlayerOutputDispatcher dispatcher = outputDispatcher != null
+            ? outputDispatcher
+            : actionBarOverlay == null ? null : actionBarOverlay.outputDispatcher();
+        if (dispatcher != null) {
+            dispatcher.runPlayer(viewerId, this::sendTrickHud);
+        }
+    }
+
     private void sendTrickHud(Player viewer) {
         if (phase != GamePhase.PLAYING || currentTurn == null) {
             // 不在出牌阶段、或者压根没有待行动的人：这条 HUD 没有意义，收起来。
@@ -2165,7 +2236,7 @@ public final class GameTable {
         if (canScheduleTasks() && delayedUnreadyReminderAtMillis < lobbyUiResumeAtMillis) {
             delayedUnreadyReminderAtMillis = lobbyUiResumeAtMillis;
             long delayTicks = Math.max(1L, (remainingMillis + 49L) / 50L);
-            plugin.scheduler().runLater(delayTicks, () -> {
+            manager.runTableLater(this, delayTicks, () -> {
                 delayedUnreadyReminderAtMillis = 0L;
                 warnUnreadyPlayersForStartAttempt();
             });
@@ -2175,16 +2246,14 @@ public final class GameTable {
 
     private void playUnreadyWarning(List<UUID> unreadySeats) {
         DoudizhuPlugin.ConfiguredSound sound = plugin.unreadyWarningSound();
+        Title title = Title.title(
+            MINI.deserialize("<!i><gradient:#ff9ec7:#ffd670><bold>就差你没准备啦！</bold></gradient>"),
+            MINI.deserialize("<!i><#fff7fb>大家都在等你点一下 <#7ee7c1><bold>准备</bold></#7ee7c1>，马上就能开局啦</#fff7fb>"),
+            Title.Times.times(Duration.ofMillis(180), Duration.ofMillis(1800), Duration.ofMillis(320))
+        );
         for (UUID seat : unreadySeats) {
-            Player player = onlinePlayer(seat);
-            if (player != null) {
-                effectCoordinator.playConfiguredSound(seat, sound);
-                player.showTitle(Title.title(
-                    MINI.deserialize("<!i><gradient:#ff9ec7:#ffd670><bold>就差你没准备啦！</bold></gradient>"),
-                    MINI.deserialize("<!i><#fff7fb>大家都在等你点一下 <#7ee7c1><bold>准备</bold></#7ee7c1>，马上就能开局啦</#fff7fb>"),
-                    Title.Times.times(Duration.ofMillis(180), Duration.ofMillis(1800), Duration.ofMillis(320))
-                ));
-            }
+            effectCoordinator.playConfiguredSound(seat, sound);
+            outputDispatcher.showTitle(seat, title);
         }
     }
 
@@ -2194,11 +2263,11 @@ public final class GameTable {
             if (isBot(seat)) {
                 continue;
             }
-            Player player = onlinePlayer(seat);
-            if (player == null) {
-                continue;
-            }
-            player.sendMessage(roundChatMessageForSeat(seat, settlement, settlementView, summary).decoration(TextDecoration.ITALIC, false));
+            outputDispatcher.sendMessage(
+                seat,
+                roundChatMessageForSeat(seat, settlement, settlementView, summary)
+                    .decoration(TextDecoration.ITALIC, false)
+            );
         }
     }
 
@@ -2625,7 +2694,7 @@ public final class GameTable {
         UUID botId = currentTurn;
         GamePhase scheduledPhase = phase;
         long delay = plugin.randomBotActionDelayTicks(random);
-        plugin.scheduler().runLater(delay, () -> {
+        manager.runTableLater(this, delay, () -> {
             if (epoch != botActionEpoch || currentTurn == null || !isBot(currentTurn) || !Objects.equals(currentTurn, botId) || phase != scheduledPhase) {
                 return;
             }

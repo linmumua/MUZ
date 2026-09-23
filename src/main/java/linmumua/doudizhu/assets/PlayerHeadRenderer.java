@@ -409,6 +409,19 @@ public final class PlayerHeadRenderer {
         return miniMessageFor(skinUrlOf(player), scale, downOffsetTier, crowned, continuousFont);
     }
 
+    /** UUID/player lane 已采集皮肤 URL 后的兼容入口，默认使用基础字体。 */
+    public String miniMessageFor(URL skinUrl, int scale, int downOffsetTier, boolean crowned) {
+        return miniMessageFor(skinUrl, scale, downOffsetTier, crowned, false);
+    }
+
+    /**
+     * UUID/player lane 已采集皮肤 URL 后的兼容入口；保持原有缓存、布局和字体语义。
+     */
+    public String miniMessageFor(
+        URL skinUrl, int scale, int downOffsetTier, boolean crowned, boolean continuousFont) {
+        return miniMessageForUrl(skinUrl, scale, downOffsetTier, crowned, continuousFont);
+    }
+
     /**
      * 取某个机器人的像素头像，皮肤来自内置常量池。
      *
@@ -443,7 +456,7 @@ public final class PlayerHeadRenderer {
      * <p>缓存 key 是 {@code scale|tier|outline|url}，所以机器人那几个固定 URL 天然命中缓存 ——
      * 同一张皮肤在同一组配置下只渲染一次。
      */
-    private String miniMessageFor(
+    private String miniMessageForUrl(
         URL skinUrl, int scale, int downOffsetTier, boolean crowned, boolean continuousFont) {
         if (PackAssets.avatarPixelScaleTierOf(scale) < 0) {
             return null;
@@ -658,7 +671,8 @@ public final class PlayerHeadRenderer {
         return head;
     }
 
-    private URL skinUrlOf(Player player) {
+    /** 仅供 player lane 读取玩家皮肤；owner lane 应把结果作为 URL 快照传回。 */
+    public static URL skinUrlOf(Player player) {
         PlayerTextures textures = player.getPlayerProfile().getTextures();
         return textures.getSkin();
     }

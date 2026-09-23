@@ -162,6 +162,17 @@ class TableMusicCoordinatorTest {
     }
 
     @Test
+    void musicStopAndPlayAreRoutedThroughSeatOwnerLane() {
+        Fixture fixture = new Fixture();
+        UUID seat = fixture.addSeat();
+
+        fixture.coordinator.playRoundMusic();
+        fixture.coordinator.stopAll();
+
+        assertEquals(List.of(seat, seat), fixture.ownerLanePlayers.subList(0, 2));
+    }
+
+    @Test
     void normalLoopKeepsOneTrackAndOnePendingTaskAcrossCallbacks() {
         Fixture fixture = new Fixture();
         fixture.addSeat();
@@ -222,14 +233,25 @@ class TableMusicCoordinatorTest {
         private final CapturedPlayer player = new CapturedPlayer(UUID.randomUUID());
         private final CapturedPlayer unrelatedPlayer = new CapturedPlayer(UUID.randomUUID());
         private final SchedulerCapture scheduler = new SchedulerCapture();
+        private final List<UUID> ownerLanePlayers = new ArrayList<>();
+        private final PlayerOutputDispatcher outputDispatcher = new PlayerOutputDispatcher(
+            new PlayerTaskRegistry(
+                players::get,
+                (target, delay, task) -> {
+                    ownerLanePlayers.add(target.getUniqueId());
+                    task.run();
+                    return new CapturedTask();
+                }
+            )
+        );
         private GamePhase phase = GamePhase.PLAYING;
         private boolean canSchedule = true;
         private final TableMusicCoordinator coordinator = new TableMusicCoordinator(
+            outputDispatcher,
             () -> canSchedule,
             () -> phase,
             () -> hands,
             () -> seats,
-            players::get,
             () -> 0.75f,
             scheduler::schedule
         );

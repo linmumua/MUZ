@@ -117,8 +117,20 @@ class CraftEngineBundleResourcesTest {
             assertNotNull(file);
             BufferedImage image = readImage("craftengine/muz/resourcepack/assets/muz/textures/font/"
                 + file.substring("muz:font/".length()));
-            assertEquals(22, image.getWidth(), name + " 宽度必须为 22");
+            // 断言由「PNG 宽 22」升级为「客户端 advance 恰为 22」：旧断言只锁画布宽度，
+            // 但 BitmapProvider 的 advance = 最右不透明列 + 2，底图实为 23、图标 17..19，
+            // 运行期按 22 回退会让九格栏每格错位、整条栏随图标漂移。
             assertEquals(22, image.getHeight(), name + " 高度必须为 22");
+            int rightmost = -1;
+            for (int y = 0; y < image.getHeight(); y++) {
+                for (int x = 0; x < image.getWidth(); x++) {
+                    if (((image.getRGB(x, y) >>> 24) & 0xFF) > 0) {
+                        rightmost = Math.max(rightmost, x);
+                    }
+                }
+            }
+            assertEquals(PackAssets.GADGET_BAR_CELL_ADVANCE, rightmost + 2,
+                name + " 的客户端 advance 必须等于九格栏格宽，否则栏位置会漂移");
             boolean opaque = false;
             for (int y = 0; y < image.getHeight(); y++) {
                 for (int x = 0; x < image.getWidth(); x++) {

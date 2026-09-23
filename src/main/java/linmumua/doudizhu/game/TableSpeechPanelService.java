@@ -2,12 +2,12 @@ package linmumua.doudizhu.game;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 import linmumua.doudizhu.compat.VersionCompat;
 import linmumua.doudizhu.world.DisplayPanelPickGeometry;
@@ -43,13 +43,17 @@ public final class TableSpeechPanelService {
     private final EntryProvider entryProvider;
     private final TableProvider tableProvider;
     private final ActionHandler actionHandler;
+    private final PlayerOutputDispatcher output;
     private final OcclusionTester occlusionTester;
     private final LongSupplier tickSource;
-    private final Map<UUID, OwnerSession> owners = new HashMap<>();
-    private final Map<UUID, Integer> ownerEpochs = new HashMap<>();
-    private final Map<UUID, Long> lastActionTicks = new HashMap<>();
+    // FOLIA: 这三个表会被 global 扫描线程与多个 player lane 并发访问（open 在 player lane，
+    // tick 的派发在 global lane），因此必须是并发容器，不能再用 HashMap。
+    private final Map<UUID, OwnerSession> owners = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> ownerEpochs = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> lastActionTicks = new ConcurrentHashMap<>();
     private Config config;
-    private long tick;
+    // 原先这里是 long tick 字段。派发改造后它只在 tickOwner 内部「写入后立即读取」，
+    // 变成一个跨 player lane 共享的可变字段反而引入数据竞争，因此下沉为方法内局部变量。
     private boolean stopped;
 
     /**
@@ -60,9 +64,10 @@ public final class TableSpeechPanelService {
         Config config,
         EntryProvider entryProvider,
         TableProvider tableProvider,
-        ActionHandler actionHandler
+        ActionHandler actionHandler,
+        PlayerOutputDispatcher output
     ) {
-        this(plugin, config, entryProvider, tableProvider, actionHandler,
+        this(plugin, config, entryProvider, tableProvider, actionHandler, output,
             TableSpeechPanelService::traceBlocks, () -> Bukkit.getCurrentTick());
     }
 
@@ -73,6 +78,7 @@ public final class TableSpeechPanelService {
         EntryProvider entryProvider,
         TableProvider tableProvider,
         ActionHandler actionHandler,
+        PlayerOutputDispatcher output,
         OcclusionTester occlusionTester,
         LongSupplier tickSource
     ) {
@@ -81,7 +87,11 @@ public final class TableSpeechPanelService {
         this.entryProvider = Objects.requireNonNull(entryProvider, "entryProvider");
         this.tableProvider = Objects.requireNonNull(tableProvider, "tableProvider");
         this.actionHandler = Objects.requireNonNull(actionHandler, "actionHandler");
+        this.output = Objects.requireNonNull(output, "output");
         this.occlusionTester = Objects.requireNonNull(occlusionTester, "occlusionTester");
+        // IMPORTANT FOLIA: 默认时钟是 Bukkit.getCurrentTick()，它只在「存在 ticking region」的
+        // 线程上合法。global lane 调用会抛 IllegalStateException("No currently ticking region")
+        // ——实服验收已复现。因此 tick() 只做派发，真正读取时钟的动作发生在 player lane 内。
         this.tickSource = Objects.requireNonNull(tickSource, "tickSource");
     }
 
@@ -128,33 +138,57 @@ public final class TableSpeechPanelService {
     }
 
     /**
-     * 每 tick 调用；命中扫描严格每 2 tick 执行一次。期间同步清理阶段、座位和 epoch 失效会话。
+     * 每 tick 调用。本方法只负责派发，不碰实体、不读世界、不取当前 tick。
+     *
+     * <p>IMPORTANT FOLIA: 它由 global lane 驱动，而 global lane 没有 ticking region：
+     * {@code Bukkit.getCurrentTick()} 会抛 {@code IllegalStateException("No currently ticking
+     * region")}（实服验收已复现），{@code getEyeLocation}／{@code rayTraceBlocks}／
+     * {@code setGlowing}／{@code remove} 这些实体与世界访问也必须发生在 region owner lane。
+     * 因此每个 owner 的实际工作统一投递到该玩家的 player lane——与同伴服务
+     * {@code TableGadgetBarHudService} 同形（global 扫描 + runPlayer 投递）。
      */
     public void tick() {
         if (stopped) {
             return;
         }
-        tick = tickSource.getAsLong();
-        if (!config.enabled()) {
-            clearAll();
-            return;
-        }
         for (UUID ownerId : new ArrayList<>(owners.keySet())) {
             OwnerSession session = owners.get(ownerId);
-            if (session == null || !isSessionValid(session)) {
-                clearPlayer(ownerId);
+            if (session == null) {
                 continue;
             }
-            if (Math.floorMod(tick, hoverIntervalTicks()) != 0) {
+            if (output.currentPlayer(ownerId) == null) {
+                // 玩家已不可解析（离线）：他的 player lane 不会再执行，而 global lane 同样无权
+                // 操作面板实体，所以这里既不派发也不直接删实体——会话留给关桌 clearTable 收口。
+                // 代价：玩家离线且桌子仍开着时，这份会话要等关桌或重连才失效（已计入待验收项）。
                 continue;
             }
-            Player owner = Bukkit.getPlayer(ownerId);
-            Pick pick = pick(owner, session);
-            String nextId = pick == null ? null : pick.entry().id();
-            if (!Objects.equals(nextId, session.hoveredId)) {
-                session.hoveredId = nextId;
-                applyHover(session, nextId != null);
-            }
+            output.runPlayer(ownerId, player -> tickOwner(player, ownerId));
+        }
+    }
+
+    /** player lane 内的单 owner 工作：会话校验、命中扫描与 hover 同步。 */
+    private void tickOwner(Player player, UUID ownerId) {
+        if (stopped) {
+            return;
+        }
+        OwnerSession session = owners.get(ownerId);
+        if (session == null) {
+            return;
+        }
+        if (!config.enabled() || player == null || !player.isOnline() || !isSessionValid(session)) {
+            clearPlayer(ownerId);
+            return;
+        }
+        // player lane 归属于某个 ticking region，getCurrentTick 在这里才合法。
+        long now = tickSource.getAsLong();
+        if (Math.floorMod(now, hoverIntervalTicks()) != 0) {
+            return;
+        }
+        Pick pick = pick(player, session);
+        String nextId = pick == null ? null : pick.entry().id();
+        if (!Objects.equals(nextId, session.hoveredId)) {
+            session.hoveredId = nextId;
+            applyHover(session, nextId != null);
         }
     }
 

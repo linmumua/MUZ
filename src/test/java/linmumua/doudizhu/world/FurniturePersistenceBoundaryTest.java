@@ -45,10 +45,11 @@ class FurniturePersistenceBoundaryTest {
     void fallbackBranchesStillUseProtectedEntityPath() throws IOException {
         String source = Files.readString(MANAGER, StandardCharsets.UTF_8);
         String tableFallback = between(source, "} else {\n            ItemDisplay fallbackTableDisplay", "        if (tablePlacement.blockRestore() != null)");
-        String chairFallback = between(source, "} else {\n                    addEntityTreeIds(chairPlacement.entityId(), staticEntities);", "            }\n            if (chairPlacement.blockRestore() != null)");
+        String chairFallback = between(source, "} else {\n                    addEntityTreeIds(chairPlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_CHAIR);", "            }\n            if (chairPlacement.blockRestore() != null)");
 
         assertTrue(tableFallback.contains("staticEntities.add(fallbackTableDisplay.getUniqueId())"));
-        assertTrue(chairFallback.contains("addEntityTreeIds(chairPlacement.entityId(), staticEntities)"));
+        assertTrue(chairFallback.contains(
+            "addEntityTreeIds(chairPlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_CHAIR)"));
     }
 
     private static String between(String source, String start, String end) {

@@ -49,6 +49,20 @@ class GadgetBoxSaveNotificationTest {
     }
 
     @Test
+    void 配置编辑GUI的玩家输出只允许同步主线程() throws Exception {
+        String source = Files.readString(Path.of("src/main/java/linmumua/doudizhu/ui/GadgetBoxGuiService.java"));
+        assertTrue(source.contains("private static void requirePrimaryThread(String operation)"));
+        assertMethodRequiresPrimaryThread(source, "public void open(Player player)");
+        assertMethodRequiresPrimaryThread(source, "public void refresh(Player player)");
+        assertMethodRequiresPrimaryThread(source, "public ItemStack selectedItem(UUID playerId)");
+        assertMethodRequiresPrimaryThread(source, "public void close(Player player)");
+        assertMethodRequiresPrimaryThread(source, "public void handleClick(InventoryClickEvent event)");
+        assertMethodRequiresPrimaryThread(source, "public void handleDrag(InventoryDragEvent event)");
+        assertFalse(source.contains("CompletableFuture"));
+        assertFalse(source.contains("runAsync"));
+    }
+
+    @Test
     void 保存通知之后继续快照选择和重绘() throws Exception {
         String source = Files.readString(Path.of("src/main/java/linmumua/doudizhu/ui/GadgetBoxGuiService.java"));
         int start = source.indexOf("private void saveAndRender(");
@@ -62,5 +76,16 @@ class GadgetBoxSaveNotificationTest {
         int render = method.indexOf("render(holder.getInventory(), next, normalized);");
         assertTrue(save >= 0 && listener > save);
         assertTrue(snapshot > listener && normalize > snapshot && render > normalize);
+    }
+
+    private static void assertMethodRequiresPrimaryThread(String source, String signature) {
+        int start = source.indexOf(signature);
+        assertTrue(start >= 0, "缺少方法：" + signature);
+        int guard = source.indexOf("requirePrimaryThread(", start);
+        int nextMethod = source.indexOf("\n    public ", start + signature.length());
+        if (nextMethod < 0) {
+            nextMethod = source.length();
+        }
+        assertTrue(guard >= start && guard < nextMethod, "方法未证明主线程：" + signature);
     }
 }

@@ -88,10 +88,11 @@ class HandCardClickRoutingTest {
      */
     @Test
     void hoverAndClickShareTheSamePickSoHighlightPredictsHit() throws IOException {
-        String hover = methodBody(MANAGER, "private void updateHoverState(GameTable table, Player viewer)");
+        String hover = methodBody(MANAGER,
+            "private void updateHoverState(GameTable table, PlacedTable placed, UUID viewerId, Location eye");
         String click = methodBody(MANAGER, "public boolean handleHandCardClick(Player player, boolean rightClick)");
-        assertTrue(hover.contains("pickHandCard(table, placed, viewer)"),
-            "悬停没走 pickHandCard：高亮和点击可能命中不同的牌");
+        assertTrue(hover.contains("pickHandCard(table, placed, viewerId, eye, direction)"),
+            "悬停没走 UUID/视线快照版 pickHandCard：高亮和点击可能命中不同的牌");
         assertTrue(click.contains("pickHandCard(table, placed, player)"),
             "点击没走 pickHandCard：高亮不再预示点击结果，验收失去肉眼依据");
     }

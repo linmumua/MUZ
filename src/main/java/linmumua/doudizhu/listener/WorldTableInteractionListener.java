@@ -1,12 +1,14 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.ActionBarOverlayService;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.game.TableGadgetService;
+import linmumua.doudizhu.mahjong.MahjongTableManager;
 import linmumua.doudizhu.ui.MuzTheme;
 import linmumua.doudizhu.room.TableLevel;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +55,7 @@ public final class WorldTableInteractionListener implements Listener {
     private static final int BLOCKED_EDGE_SAMPLES = 4;
 
     private final DoudizhuPlugin plugin;
+    private final PlayerOutputDispatcher output;
     private final Map<UUID, TablePlacerPreview> tablePlacerPreviews = new LinkedHashMap<>();
     private final Map<UUID, TableRemoverPreview> tableRemoverPreviews = new LinkedHashMap<>();
 
@@ -75,6 +78,8 @@ public final class WorldTableInteractionListener implements Listener {
 
     public WorldTableInteractionListener(DoudizhuPlugin plugin) {
         this.plugin = plugin;
+        ActionBarOverlayService actionBar = plugin.getActionBarOverlayService();
+        this.output = actionBar == null ? new PlayerOutputDispatcher(plugin) : actionBar.outputDispatcher();
         plugin.scheduler().runTimer(1L, 4L, this::tickToolPreviews);
     }
 
@@ -158,8 +163,9 @@ public final class WorldTableInteractionListener implements Listener {
             }
         } catch (RuntimeException exception) {
             String message = exception.getMessage() == null ? "放置桌子失败。" : exception.getMessage();
-            plugin.playPlacementBlockedWarning(event.getPlayer());
-            event.getPlayer().sendActionBar(MuzTheme.danger(message));
+            UUID playerId = event.getPlayer().getUniqueId();
+            playPlacementBlockedWarning(playerId);
+            output.sendActionBar(playerId, MuzTheme.danger(message));
         }
     }
 
@@ -201,7 +207,7 @@ public final class WorldTableInteractionListener implements Listener {
         if (table != null) {
             hudDebugTablePlayers.add(playerId);
         }
-        player.sendActionBar(rows == 0
+        output.sendActionBar(playerId, rows == 0
             ? MuzTheme.warning("HUD 已全关（右键恢复）")
             : MuzTheme.accent("HUD · " + DoudizhuPlugin.describeHudRows(rows)));
     }
@@ -215,13 +221,13 @@ public final class WorldTableInteractionListener implements Listener {
     /** 调试棒换出主手后，清掉仍挂在客户端上的假预览；临时行覆盖留到离桌/退出再清。 */
     @EventHandler
     public void onHudDebugStickHeldChange(PlayerItemHeldEvent event) {
-        Player player = event.getPlayer();
-        plugin.scheduler().runLater(1L, () -> {
+        UUID playerId = event.getPlayer().getUniqueId();
+        plugin.scheduler().runLater(1L, () -> output.runPlayer(playerId, player -> {
             if (!player.isOnline() || plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
                 return;
             }
             hideHudDebugPreview(player);
-        });
+        }));
     }
 
     @EventHandler
@@ -439,8 +445,9 @@ public final class WorldTableInteractionListener implements Listener {
             handleDoudizhuTableRemover(player);
         } catch (RuntimeException exception) {
             String message = exception.getMessage() == null ? "拆桌失败。" : exception.getMessage();
-            plugin.playPlacementBlockedWarning(player);
-            player.sendActionBar(MuzTheme.danger(message));
+            UUID playerId = player.getUniqueId();
+            playPlacementBlockedWarning(playerId);
+            output.sendActionBar(playerId, MuzTheme.danger(message));
         }
         return true;
     }
@@ -553,38 +560,47 @@ public final class WorldTableInteractionListener implements Listener {
     }
 
     private boolean shouldCancelProtectedInteract(UUID entityId) {
+        // 麻将实体在共享保护链里也算「受保护」（破坏保护必须有它），但它的右键必须继续派发给
+        // 麻将入座链路，所以这里用麻将自己的实体登记表再判一次并放行。
+        MahjongTableManager mahjong = plugin.getMahjongTableManager();
         return shouldCancelProtectedInteract(
             plugin.getPhysicalTableManager().isProtectedEntity(entityId),
             plugin.getPhysicalTableManager().isChairFurnitureEntity(entityId),
-            plugin.getPhysicalTableManager().isActionButtonEntity(entityId)
+            plugin.getPhysicalTableManager().isActionButtonEntity(entityId),
+            mahjong != null && mahjong.isProtectedEntity(entityId)
         );
     }
 
     /**
      * 判断右键保护实体是否需要拦下。
      *
-     * <p>两个放行口，都对应已取证的故障：
+     * <p>三个放行口，都对应已取证的故障：
      * <ul>
      *   <li><b>椅子家具</b>——不放行，CraftEngine 在 LOWEST 优先级就收不到事件，玩家坐不上去；</li>
      *   <li><b>按钮</b>——不放行，按钮完全没反应。客户端一次右键先发 INTERACT_AT 再发 INTERACT，
      *       AT 在这里被取消后 INTERACT 不再送达，而 {@code handleInteraction} 为避免同一次右键
      *       被执行两遍只挂在 INTERACT 那一路，于是唯一的出路也被堵死。</li>
+     *   <li><b>麻将实体</b>——不放行，麻将入座 Interaction 被取消。麻将实体经由共享保护链
+     *       （{@code TableEntityGeometry.PROTECTED_TAGS}）成了受保护实体，于是必须在这里显式放行：
+     *       麻将实体既不是椅子家具、也不是动作按钮，前两个放行口都盖不住它。</li>
      * </ul>
      *
      * @param protectedEntity 是否属于牌桌保护实体
      * @param chairFurniture 是否属于椅子家具
      * @param actionButton 是否是绑着动作的按钮
+     * @param mahjongEntity 是否属于麻将自有实体（登记表判定，不是读 tag）
      * @return 需要拦下时返回 true
      */
     static boolean shouldCancelProtectedInteract(
         boolean protectedEntity,
         boolean chairFurniture,
-        boolean actionButton
+        boolean actionButton,
+        boolean mahjongEntity
     ) {
         if (!protectedEntity) {
             return false;
         }
-        return !chairFurniture && !actionButton;
+        return !chairFurniture && !actionButton && !mahjongEntity;
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -660,6 +676,13 @@ public final class WorldTableInteractionListener implements Listener {
         );
     }
 
+    private void playPlacementBlockedWarning(UUID playerId) {
+        DoudizhuPlugin.ConfiguredSound sound = plugin.placementBlockedWarningSound();
+        if (sound.volume() > 0.0f) {
+            output.playSound(playerId, sound.key(), sound.volume(), sound.pitch());
+        }
+    }
+
     private void handleDoudizhuTablePlacer(Player player, ItemStack item, Block clickedBlock) {
         if (plugin.getTableManager().getTableOf(player) != null) {
             throw new IllegalStateException("你已经在牌桌里了，先离桌再放新的。");
@@ -692,7 +715,7 @@ public final class WorldTableInteractionListener implements Listener {
                 true
             );
             tablePlacerPreviews.put(player.getUniqueId(), blockedPreview);
-            spawnTablePlacerPreview(player, blockedPreview);
+            spawnTablePlacerPreview(player.getUniqueId(), player.getWorld(), blockedPreview);
             throw new IllegalStateException(obstruction);
         }
         TablePlacerPreview previous = tablePlacerPreviews.get(player.getUniqueId());
@@ -705,12 +728,12 @@ public final class WorldTableInteractionListener implements Listener {
             consumeMainHand(player);
             tablePlacerPreviews.remove(player.getUniqueId());
             ensurePlayerHasTableRemover(player, mode, tableId);
-            player.sendActionBar(MuzTheme.success("已放置 " + tableId + " 号桌"));
+            output.sendActionBar(player.getUniqueId(), MuzTheme.success("已放置 " + tableId + " 号桌"));
             return;
         }
         tablePlacerPreviews.put(player.getUniqueId(), new TablePlacerPreview(mode, tableId, level, maxPlayers, anchor.clone(), yaw, now + 5000L, false));
-        spawnTablePlacerPreview(player, tablePlacerPreviews.get(player.getUniqueId()));
-        player.sendActionBar(MuzTheme.warning("已预览 " + tableId + " 号桌，再次右键放置"));
+        spawnTablePlacerPreview(player.getUniqueId(), player.getWorld(), tablePlacerPreviews.get(player.getUniqueId()));
+        output.sendActionBar(player.getUniqueId(), MuzTheme.warning("已预览 " + tableId + " 号桌，再次右键放置"));
     }
 
     private void handleDoudizhuTableRemover(Player player) {
@@ -750,12 +773,12 @@ public final class WorldTableInteractionListener implements Listener {
             plugin.getPhysicalTableManager().removeTable(target.tableName());
             givePlacerBack(player, DoudizhuPlugin.TableMode.DOUDIZHU, target.tableName(), level);
             tableRemoverPreviews.remove(player.getUniqueId());
-            player.sendActionBar(MuzTheme.success("已拆掉 " + target.tableName() + " 号桌"));
+            output.sendActionBar(player.getUniqueId(), MuzTheme.success("已拆掉 " + target.tableName() + " 号桌"));
             return;
         }
         tableRemoverPreviews.put(player.getUniqueId(), new TableRemoverPreview(target.mode(), target.tableName(), now + 5000L));
-        spawnTableRemoverPreview(player, target);
-        player.sendActionBar(MuzTheme.warning("已选中 " + target.tableName() + " 号桌，再次右键拆掉"));
+        dispatchTableRemoverPreview(player.getUniqueId(), player.getEyeLocation().clone(), target);
+        output.sendActionBar(player.getUniqueId(), MuzTheme.warning("已选中 " + target.tableName() + " 号桌，再次右键拆掉"));
     }
 
     private Block resolvePlacementFloor(Player player, Block clickedBlock) {
@@ -788,142 +811,162 @@ public final class WorldTableInteractionListener implements Listener {
         tickHudDebugPreviews();
     }
 
-    /** 调试棒预览只由主线程刷新；正式 PLAYING HUD 仍由 GameTable 自己的 tick 负责。 */
+    /** 调试棒预览只由玩家 lane 刷新；正式 PLAYING HUD 仍由 GameTable 自己的 tick 负责。 */
     private void tickHudDebugPreviews() {
-        Iterator<UUID> iterator = hudDebugSessionPlayers.iterator();
-        while (iterator.hasNext()) {
-            UUID playerId = iterator.next();
-            Player player = plugin.getServer().getPlayer(playerId);
-            if (player == null || !player.isOnline()) {
+        for (UUID playerId : List.copyOf(hudDebugSessionPlayers)) {
+            if (output.runPlayer(playerId, player -> tickHudDebugPreview(playerId, player)) == null) {
                 plugin.clearHudRowOverride(playerId);
                 hudDebugTablePlayers.remove(playerId);
                 hudDebugPreviewPlayers.remove(playerId);
                 consumedHudDebugClicks.remove(playerId);
-                iterator.remove();
-                continue;
+                hudDebugSessionPlayers.remove(playerId);
             }
-            GameTable table = plugin.getTableManager().getTableOf(player);
-            boolean wasInTable = hudDebugTablePlayers.contains(playerId);
-            if (table == null && wasInTable) {
-                plugin.clearHudRowOverride(playerId);
-                hideHudDebugPreview(player);
-                hudDebugTablePlayers.remove(playerId);
-                iterator.remove();
-                continue;
-            }
-            if (table == null) {
-                hudDebugTablePlayers.remove(playerId);
-            } else {
-                hudDebugTablePlayers.add(playerId);
-            }
-            if (!plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
-                hideHudDebugPreview(player);
-                continue;
-            }
-            int rows = plugin.hudRowOverride(playerId);
-            if (table != null
-                && (table.getPhase() == GamePhase.PLAYING || isRoundTransitionPhase(table))) {
-                hideHudDebugPreview(player);
-            } else if (rows == 0) {
-                hideHudDebugPreview(player);
-            } else {
-                plugin.showHudDebugPreview(player);
-                hudDebugPreviewPlayers.add(playerId);
-            }
+        }
+    }
+
+    private void tickHudDebugPreview(UUID playerId, Player player) {
+        if (!player.isOnline()) {
+            return;
+        }
+        GameTable table = plugin.getTableManager().getTableOf(player);
+        boolean wasInTable = hudDebugTablePlayers.contains(playerId);
+        if (table == null && wasInTable) {
+            plugin.clearHudRowOverride(playerId);
+            hideHudDebugPreview(player);
+            hudDebugTablePlayers.remove(playerId);
+            hudDebugSessionPlayers.remove(playerId);
+            return;
+        }
+        if (table == null) {
+            hudDebugTablePlayers.remove(playerId);
+        } else {
+            hudDebugTablePlayers.add(playerId);
+        }
+        if (!plugin.isHudDebugStick(player.getInventory().getItemInMainHand())) {
+            hideHudDebugPreview(player);
+            return;
+        }
+        int rows = plugin.hudRowOverride(playerId);
+        if (table != null
+            && (table.getPhase() == GamePhase.PLAYING || isRoundTransitionPhase(table))) {
+            hideHudDebugPreview(player);
+        } else if (rows == 0) {
+            hideHudDebugPreview(player);
+        } else {
+            plugin.showHudDebugPreview(player);
+            hudDebugPreviewPlayers.add(playerId);
         }
     }
 
     private void tickTablePlacerPreviews() {
-        Iterator<Map.Entry<UUID, TablePlacerPreview>> iterator = tablePlacerPreviews.entrySet().iterator();
         long now = System.currentTimeMillis();
-        while (iterator.hasNext()) {
-            Map.Entry<UUID, TablePlacerPreview> entry = iterator.next();
-            Player player = plugin.getServer().getPlayer(entry.getKey());
-            if (player == null || !player.isOnline() || now > entry.getValue().expiresAtMillis()) {
-                iterator.remove();
+        for (Map.Entry<UUID, TablePlacerPreview> entry : List.copyOf(tablePlacerPreviews.entrySet())) {
+            UUID playerId = entry.getKey();
+            TablePlacerPreview preview = entry.getValue();
+            if (now > preview.expiresAtMillis()) {
+                tablePlacerPreviews.remove(playerId, preview);
                 continue;
             }
-            if (!plugin.isTablePlacer(player.getInventory().getItemInMainHand())) {
-                iterator.remove();
-                continue;
+            if (output.runPlayer(playerId, player -> {
+                if (!player.isOnline() || !plugin.isTablePlacer(player.getInventory().getItemInMainHand())) {
+                    plugin.scheduler().runGlobal(() -> tablePlacerPreviews.remove(playerId, preview));
+                    return;
+                }
+                spawnTablePlacerPreview(playerId, player.getWorld(), preview);
+            }) == null) {
+                tablePlacerPreviews.remove(playerId, preview);
             }
-            spawnTablePlacerPreview(player, entry.getValue());
         }
     }
 
     private void tickTableRemoverPreviews() {
-        Iterator<Map.Entry<UUID, TableRemoverPreview>> iterator = tableRemoverPreviews.entrySet().iterator();
         long now = System.currentTimeMillis();
-        while (iterator.hasNext()) {
-            Map.Entry<UUID, TableRemoverPreview> entry = iterator.next();
-            Player player = plugin.getServer().getPlayer(entry.getKey());
-            if (player == null || !player.isOnline() || now > entry.getValue().expiresAtMillis()) {
-                iterator.remove();
+        for (Map.Entry<UUID, TableRemoverPreview> entry : List.copyOf(tableRemoverPreviews.entrySet())) {
+            UUID playerId = entry.getKey();
+            TableRemoverPreview preview = entry.getValue();
+            if (now > preview.expiresAtMillis()) {
+                tableRemoverPreviews.remove(playerId, preview);
                 continue;
             }
-            if (!plugin.isDoudizhuTableRemover(player.getInventory().getItemInMainHand())) {
-                iterator.remove();
-                continue;
+            if (output.runPlayer(playerId, player -> {
+                if (!player.isOnline()) {
+                    plugin.scheduler().runGlobal(() -> tableRemoverPreviews.remove(playerId, preview));
+                    return;
+                }
+                ItemStack remover = player.getInventory().getItemInMainHand();
+                if (!plugin.isDoudizhuTableRemover(remover)
+                    || plugin.tableRemoverMode(remover) != preview.mode()
+                    || !preview.tableName().equalsIgnoreCase(plugin.tableRemoverId(remover))) {
+                    plugin.scheduler().runGlobal(() -> tableRemoverPreviews.remove(playerId, preview));
+                    return;
+                }
+                RemovalTarget targeted = findRemovalTarget(player);
+                if (targeted == null
+                    || targeted.mode() != preview.mode()
+                    || !targeted.tableName().equalsIgnoreCase(preview.tableName())) {
+                    plugin.scheduler().runGlobal(() -> tableRemoverPreviews.remove(playerId, preview));
+                    return;
+                }
+                dispatchTableRemoverPreview(playerId, player.getEyeLocation().clone(), targeted);
+            }) == null) {
+                tableRemoverPreviews.remove(playerId, preview);
             }
-            if (plugin.tableRemoverMode(player.getInventory().getItemInMainHand()) != entry.getValue().mode()
-                || !entry.getValue().tableName().equalsIgnoreCase(plugin.tableRemoverId(player.getInventory().getItemInMainHand()))) {
-                iterator.remove();
-                continue;
-            }
-            RemovalTarget targeted = findRemovalTarget(player);
-            if (targeted == null
-                || targeted.mode() != entry.getValue().mode()
-                || !targeted.tableName().equalsIgnoreCase(entry.getValue().tableName())) {
-                iterator.remove();
-                continue;
-            }
-            spawnTableRemoverPreview(player, targeted);
         }
     }
 
-    private void spawnTablePlacerPreview(Player player, TablePlacerPreview preview) {
+    /** 拆桌预览的牌桌几何读取必须回到对应牌桌 owner lane；玩家视线只在 player lane 快照。 */
+    private void dispatchTableRemoverPreview(UUID playerId, Location playerEye, RemovalTarget target) {
+        GameTable table = plugin.getTableManager().getTable(target.tableName());
+        if (table == null) {
+            spawnTableRemoverPreview(playerId, playerEye, target);
+            return;
+        }
+        plugin.getTableManager().runTableNow(table, () -> spawnTableRemoverPreview(playerId, playerEye, target));
+    }
+
+    private void spawnTablePlacerPreview(UUID playerId, World playerWorld, TablePlacerPreview preview) {
         List<Location> blockedBlocks = plugin.getPhysicalTableManager()
             .placementBlockedBlocks(preview.anchor(), preview.yaw());
         if (!preview.blocked()) {
             Location tableCenter = plugin.getPhysicalTableManager().previewTableCenter(preview.anchor());
-            drawRing(player, tableCenter, 0.90, Color.fromRGB(255, 208, 92));
+            drawRing(playerId, tableCenter, 0.90, Color.fromRGB(255, 208, 92));
             for (Location seat : plugin.getPhysicalTableManager().previewChairBases(preview.anchor(), preview.yaw())) {
-                drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.34, Color.fromRGB(110, 210, 255));
+                drawRing(playerId, seat.clone().add(0.0, 0.08, 0.0), 0.34, Color.fromRGB(110, 210, 255));
             }
-            drawLine(player, tableCenter.clone().add(0.0, 0.05, 0.0), plugin.getPhysicalTableManager().previewOpenSide(preview.anchor(), preview.yaw()).clone().add(0.0, 0.05, 0.0), Color.fromRGB(135, 255, 165));
+            drawLine(playerId, tableCenter.clone().add(0.0, 0.05, 0.0), plugin.getPhysicalTableManager().previewOpenSide(preview.anchor(), preview.yaw()).clone().add(0.0, 0.05, 0.0), Color.fromRGB(135, 255, 165));
         }
-        drawBlockedBlocks(player, blockedBlocks);
+        drawBlockedBlocks(playerId, playerWorld, blockedBlocks);
     }
 
-    private void spawnTableRemoverPreview(Player player, RemovalTarget target) {
+    private void spawnTableRemoverPreview(UUID playerId, Location playerEye, RemovalTarget target) {
         Location anchor = plugin.getPhysicalTableManager().tableAnchor(target.tableName());
         if (anchor == null) {
             return;
         }
         float yaw = plugin.getPhysicalTableManager().tableYaw(target.tableName());
         Location tableCenter = plugin.getPhysicalTableManager().previewTableCenter(anchor);
-        drawRing(player, tableCenter, 0.96, Color.fromRGB(255, 106, 136));
+        drawRing(playerId, tableCenter, 0.96, Color.fromRGB(255, 106, 136));
         for (Location seat : plugin.getPhysicalTableManager().previewChairBases(anchor, yaw)) {
-            drawRing(player, seat.clone().add(0.0, 0.08, 0.0), 0.38, Color.fromRGB(255, 176, 104));
+            drawRing(playerId, seat.clone().add(0.0, 0.08, 0.0), 0.38, Color.fromRGB(255, 176, 104));
         }
-        drawLine(player, tableCenter.clone().add(0.0, 0.08, 0.0), player.getEyeLocation(), Color.fromRGB(255, 215, 120));
+        drawLine(playerId, tableCenter.clone().add(0.0, 0.08, 0.0), playerEye, Color.fromRGB(255, 215, 120));
     }
 
-    private void drawBlockedBlocks(Player player, List<Location> blockedBlocks) {
+    private void drawBlockedBlocks(UUID playerId, World playerWorld, List<Location> blockedBlocks) {
         int drawn = 0;
         for (Location blockedBlock : blockedBlocks) {
             if (drawn >= MAX_HIGHLIGHTED_BLOCKED_BLOCKS) {
                 return;
             }
-            if (!player.getWorld().equals(blockedBlock.getWorld())) {
+            if (!playerWorld.equals(blockedBlock.getWorld())) {
                 continue;
             }
-            drawBlockOutline(player, blockedBlock, BLOCKED_HIGHLIGHT_COLOR);
+            drawBlockOutline(playerId, blockedBlock, BLOCKED_HIGHLIGHT_COLOR);
             drawn++;
         }
     }
 
-    private void drawBlockOutline(Player player, Location blockCorner, Color color) {
+    private void drawBlockOutline(UUID playerId, Location blockCorner, Color color) {
         World world = blockCorner.getWorld();
         if (world == null) {
             return;
@@ -935,19 +978,19 @@ public final class WorldTableInteractionListener implements Listener {
         double maxY = minY + 1.0;
         double maxZ = minZ + 1.0;
         for (double y : new double[] {minY, maxY}) {
-            drawEdge(player, world, minX, y, minZ, maxX, y, minZ, color);
-            drawEdge(player, world, minX, y, maxZ, maxX, y, maxZ, color);
-            drawEdge(player, world, minX, y, minZ, minX, y, maxZ, color);
-            drawEdge(player, world, maxX, y, minZ, maxX, y, maxZ, color);
+            drawEdge(playerId, world, minX, y, minZ, maxX, y, minZ, color);
+            drawEdge(playerId, world, minX, y, maxZ, maxX, y, maxZ, color);
+            drawEdge(playerId, world, minX, y, minZ, minX, y, maxZ, color);
+            drawEdge(playerId, world, maxX, y, minZ, maxX, y, maxZ, color);
         }
-        drawEdge(player, world, minX, minY, minZ, minX, maxY, minZ, color);
-        drawEdge(player, world, maxX, minY, minZ, maxX, maxY, minZ, color);
-        drawEdge(player, world, minX, minY, maxZ, minX, maxY, maxZ, color);
-        drawEdge(player, world, maxX, minY, maxZ, maxX, maxY, maxZ, color);
+        drawEdge(playerId, world, minX, minY, minZ, minX, maxY, minZ, color);
+        drawEdge(playerId, world, maxX, minY, minZ, maxX, maxY, minZ, color);
+        drawEdge(playerId, world, minX, minY, maxZ, minX, maxY, maxZ, color);
+        drawEdge(playerId, world, maxX, minY, maxZ, maxX, maxY, maxZ, color);
     }
 
     private void drawEdge(
-        Player player,
+        UUID playerId,
         World world,
         double fromX,
         double fromY,
@@ -960,7 +1003,8 @@ public final class WorldTableInteractionListener implements Listener {
         Particle.DustOptions dust = new Particle.DustOptions(color, 0.7f);
         for (int index = 0; index <= BLOCKED_EDGE_SAMPLES; index++) {
             double progress = (double) index / BLOCKED_EDGE_SAMPLES;
-            player.spawnParticle(
+            output.spawnParticle(
+                playerId,
                 Particle.DUST,
                 new Location(
                     world,
@@ -978,16 +1022,16 @@ public final class WorldTableInteractionListener implements Listener {
         }
     }
 
-    private void drawRing(Player player, Location center, double radius, Color color) {
+    private void drawRing(UUID playerId, Location center, double radius, Color color) {
         Particle.DustOptions dust = new Particle.DustOptions(color, 1.0f);
         for (int index = 0; index < 16; index++) {
             double angle = (Math.PI * 2.0 * index) / 16.0;
             Location point = center.clone().add(Math.cos(angle) * radius, 0.0, Math.sin(angle) * radius);
-            player.spawnParticle(Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
+            output.spawnParticle(playerId, Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
         }
     }
 
-    private void drawLine(Player player, Location from, Location to, Color color) {
+    private void drawLine(UUID playerId, Location from, Location to, Color color) {
         Particle.DustOptions dust = new Particle.DustOptions(color, 1.0f);
         for (int index = 0; index <= 10; index++) {
             double progress = index / 10.0;
@@ -996,7 +1040,7 @@ public final class WorldTableInteractionListener implements Listener {
                 (to.getY() - from.getY()) * progress,
                 (to.getZ() - from.getZ()) * progress
             );
-            player.spawnParticle(Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
+            output.spawnParticle(playerId, Particle.DUST, point, 1, 0.0, 0.0, 0.0, 0.0, dust);
         }
     }
 

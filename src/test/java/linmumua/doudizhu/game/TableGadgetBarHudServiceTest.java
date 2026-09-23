@@ -33,6 +33,11 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("VirtualGadgetBar.BUBBLE_SLOT"));
         assertTrue(source.contains("Consumer<Player> voiceOpener"));
         assertTrue(source.contains("actionBarOverlay.currentOverlay(playerId)"));
+        assertTrue(source.contains("actionBarOverlay.outputDispatcher()"));
+        assertTrue(source.contains("output.sendActionBar(playerId"));
+        assertTrue(source.contains("output.runPlayer(playerId"));
+        assertTrue(source.contains("refreshResultAllowed(stopped, state, generation)"));
+        assertFalse(source.contains("player.sendActionBar"), "生产额外栏不得绕过共享玩家输出门面");
         assertTrue(source.contains("PlayerItemHeldEvent"));
         assertTrue(source.contains("event.setCancelled(true)"));
         assertTrue(source.contains("PackAssets.gadgetBarBaseGlyphText"), "额外栏必须发送 MUZ 九格底图字形");
@@ -45,6 +50,28 @@ class TableGadgetBarHudServiceTest {
         assertFalse(source.contains("Component.text(\"道具 \")"), "额外栏不得继续输出文字标题");
         assertFalse(source.contains("itemLabel("), "额外栏不得继续使用文字道具标签");
         assertFalse(source.contains("openInventory"), "额外栏不得打开 Inventory GUI");
+    }
+
+    /**
+     * 用户要求：开局后九格栏位置固定。客户端按 ActionBar 总前进量居中，提示文字若直接拼在栏前，
+     * 文字长短一变栏就左右漂移。组合必须走净前进量恒等于栏宽的固定布局，且栏不能成为正文的子节点。
+     */
+    @Test
+    void 提示文字出现时九格栏位置保持固定() throws IOException {
+        String source = Files.readString(HUD);
+        assertTrue(source.contains("HotbarActionBarLayout.calculate(barWidth, measured.getAsInt())"),
+            "九格栏与提示必须用固定宽度布局组合");
+        assertTrue(source.contains("SLOT_COUNT * PackAssets.GADGET_BAR_CELL_ADVANCE"),
+            "布局宽度必须取九格栏的真实净前进量");
+        assertFalse(source.contains("overlay.append(Component.text(\"  \")).append(bar)"),
+            "不得再把栏拼在提示后面（会漂移并继承提示颜色）");
+        assertTrue(source.contains("chatFallback(playerId, overlay)"),
+            "字体不可测时不得猜测宽度，正文应改走聊天");
+        HotbarActionBarLayout.Layout shortText = HotbarActionBarLayout.calculate(9 * 22, 30);
+        HotbarActionBarLayout.Layout longText = HotbarActionBarLayout.calculate(9 * 22, 170);
+        assertTrue(shortText.totalWidth() == 9 * 22 && longText.totalWidth() == 9 * 22,
+            "无论提示多长，净前进量都必须等于栏宽，客户端居中位置才不会变");
+        assertTrue(shortText.iconLeft(640) == longText.iconLeft(640), "栏的屏幕左坐标不得随提示长度变化");
     }
 
     @Test
@@ -72,5 +99,19 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("new Vector3f(textScale, textScale, 1.0f)"));
         assertFalse(source.contains("panel.width() / PANEL_BASE_WIDTH"),
             "面板宽度只应作为命中几何，不能把文字横向拉伸");
+    }
+
+    @Test
+    void 异步刷新代次在退出或停止后拒绝迟到结果() {
+        TableGadgetBarHudService.RefreshState state = new TableGadgetBarHudService.RefreshState();
+        long initialGeneration = state.currentGeneration();
+
+        assertTrue(TableGadgetBarHudService.refreshResultAllowed(false, state, initialGeneration));
+        state.invalidate();
+        assertFalse(TableGadgetBarHudService.refreshResultAllowed(false, state, initialGeneration));
+        assertTrue(TableGadgetBarHudService.refreshResultAllowed(
+            false, state, state.currentGeneration()));
+        assertFalse(TableGadgetBarHudService.refreshResultAllowed(
+            true, state, state.currentGeneration()));
     }
 }

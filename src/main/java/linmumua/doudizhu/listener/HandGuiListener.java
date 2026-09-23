@@ -2,6 +2,7 @@ package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.ui.HistoryInventoryHolder;
 import linmumua.doudizhu.ui.HandInventoryHolder;
 import linmumua.doudizhu.ui.MuzTheme;
@@ -27,10 +28,12 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class HandGuiListener implements Listener {
     private static final long CLICK_COOLDOWN_MILLIS = 200L;
     private final DoudizhuPlugin plugin;
+    private final PlayerOutputDispatcher output;
     private final Map<UUID, Long> lastClickAt = new ConcurrentHashMap<>();
 
     public HandGuiListener(DoudizhuPlugin plugin) {
         this.plugin = plugin;
+        this.output = plugin.getActionBarOverlayService().outputDispatcher();
     }
 
     @EventHandler
@@ -42,7 +45,7 @@ public final class HandGuiListener implements Listener {
                 return;
             }
             if (!historyHolder.viewerId().equals(player.getUniqueId())) {
-                player.closeInventory();
+                output.closeInventory(player.getUniqueId());
                 return;
             }
             if (event.getClickedInventory() == null || !event.getClickedInventory().equals(inventory)) {
@@ -60,7 +63,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (!holder.viewerId().equals(player.getUniqueId())) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         if (event.getClickedInventory() == null || !event.getClickedInventory().equals(inventory)) {
@@ -97,7 +100,7 @@ public final class HandGuiListener implements Listener {
             }
         } catch (IllegalArgumentException | IllegalStateException exception) {
             String detail = exception.getMessage();
-            player.sendMessage(message(detail == null || detail.isBlank() ? "筹码操作失败。" : detail));
+            output.sendMessage(player.getUniqueId(), message(detail == null || detail.isBlank() ? "筹码操作失败。" : detail));
             plugin.getHandGuiService().refreshSettingsIfOpen(player);
         }
     }
@@ -128,15 +131,16 @@ public final class HandGuiListener implements Listener {
         if (!pendingSound && !pendingColor) {
             return;
         }
+        UUID playerId = event.getPlayer().getUniqueId();
         String plain = event.getMessage();
         event.getRecipients().clear();
         event.setMessage("");
         event.setCancelled(true);
-        plugin.scheduler().runSync(() -> {
+        output.runPlayer(playerId, current -> {
             if (pendingSound) {
-                plugin.getHandGuiService().handlePendingSoundInput(event.getPlayer(), plain);
+                plugin.getHandGuiService().handlePendingSoundInput(current, plain);
             } else {
-                plugin.getHandGuiService().handlePendingSignInput(event.getPlayer(), plain);
+                plugin.getHandGuiService().handlePendingSignInput(current, plain);
             }
         });
     }
@@ -169,7 +173,7 @@ public final class HandGuiListener implements Listener {
                 notifySettingSaved(player, "个人显示已经恢复成默认样子");
             }
             case 25 -> {
-                player.closeInventory();
+                output.closeInventory(player.getUniqueId());
                 return;
             }
             default -> {
@@ -213,7 +217,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 24) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         DoudizhuPlugin.PlayActionKind kind = switch (rawSlot) {
@@ -240,7 +244,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 24) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         int index = fourChoiceIndex(rawSlot);
@@ -283,7 +287,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 34) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         if (rawSlot == 30) {
@@ -310,7 +314,7 @@ public final class HandGuiListener implements Listener {
             default -> plugin.countdownSound();
         };
         if (sound.volume() > 0.0f) {
-            player.playSound(player.getLocation(), sound.key(), sound.volume(), sound.pitch());
+            output.playSound(player.getUniqueId(), sound.key(), sound.volume(), sound.pitch());
         }
         if (target == HandInventoryHolder.EditorTarget.ADMIN_UNREADY_WARNING) {
             plugin.getHandGuiService().openUnreadyWarningSoundPicker(player);
@@ -327,7 +331,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 34) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         if (rawSlot == 30) {
@@ -350,7 +354,7 @@ public final class HandGuiListener implements Listener {
         plugin.setSelectionSoundProfileDefinition(profileIndex, presets.get(presetIndex));
         DoudizhuPlugin.SelectionSound sound = plugin.selectionSoundForProfile(profileIndex);
         if (sound.volume() > 0.0f) {
-            player.playSound(player.getLocation(), sound.key(), sound.volume(), sound.selectedPitch());
+            output.playSound(player.getUniqueId(), sound.key(), sound.volume(), sound.selectedPitch());
         }
         notifySettingSaved(player, "选牌音效方案 " + (profileIndex + 1) + " 已经更新");
         plugin.getHandGuiService().openAdminSelectionSoundEditor(player, profileIndex);
@@ -362,7 +366,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 24) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         int index = fourChoiceIndex(rawSlot);
@@ -385,7 +389,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 34) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
         if (rawSlot == 30) {
@@ -444,7 +448,7 @@ public final class HandGuiListener implements Listener {
             return;
         }
         if (rawSlot == 53) {
-            player.closeInventory();
+            output.closeInventory(player.getUniqueId());
             return;
         }
 
@@ -917,9 +921,10 @@ public final class HandGuiListener implements Listener {
     }
 
     private void notifySettingSaved(Player player, String text, boolean playSound) {
-        player.sendActionBar(MuzTheme.success("已经记下了 · " + text));
+        UUID playerId = player.getUniqueId();
+        output.sendActionBar(playerId, MuzTheme.success("已经记下了 · " + text));
         if (playSound) {
-            player.playSound(player.getLocation(), "minecraft:block.note_block.pling", 0.55f, 1.35f);
+            output.playSound(playerId, "minecraft:block.note_block.pling", 0.55f, 1.35f);
         }
     }
 

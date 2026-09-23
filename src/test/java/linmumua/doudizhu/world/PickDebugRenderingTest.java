@@ -153,8 +153,14 @@ class PickDebugRenderingTest {
             "没有设背景色：实心矩形靠 setBackgroundColor 上色，缺了就是无色（它在 stylePickDebugPanel 里，逐块按颜色设置）");
         assertTrue(spawn.contains("Display.Billboard.FIXED"),
             "面板必须用 FIXED 朝向：跟着视角转的话面板会脱离牌面，看不出真实边界");
-        assertTrue(spawn.contains("hideEntity("),
-            "面板没有对其他玩家隐藏：调试面板不该让同桌的人也看到");
+        assertTrue(spawn.contains("playerOutput.hideEntity("),
+            "面板隐藏必须投递到 player lane，不能在牌桌 owner 线程直接调用玩家 API");
+        assertTrue(spawn.contains("playerOutput.showEntity(viewerId, plugin, spawned)"),
+            "面板创建后必须按 UUID 将显示投递给开启者");
+        assertTrue(methodDeclaration(source, "private TextDisplay spawnPickDebugPanel(").contains("UUID viewerId"),
+            "调试面板创建必须只携带 UUID 快照，不能捕获 Player");
+        assertTrue(spawn.contains("onlinePlayerIdsSnapshot()"),
+            "面板可见性必须基于在线玩家 UUID 快照");
         assertTrue(spawn.contains("setSeeThrough(true)"),
             "没有 setSeeThrough(true)：面板会被牌挡在背后白画了，必须能穿透实体");
     }
@@ -299,7 +305,7 @@ class PickDebugRenderingTest {
         assertTrue(toggle.contains("clearPickDebug("),
             "关闭显示时没有删实体，线框会永久留在世界里");
 
-        String tick = methodBody(source, "public void tick()");
+        String tick = methodBody(source, "public void tickTable(GameTable table)");
         assertTrue(tick.contains("clearPickDebug("),
             "离桌时没有删实体：签名不变则不会重算，残留不会自愈");
 

@@ -18,6 +18,9 @@ class ActionBarOverlayServiceTest {
     void 独立服务提供完整兼容API且不依赖Hotbar() throws IOException {
         String source = Files.readString(SERVICE);
         assertTrue(source.contains("ActionBarOverlayService(DoudizhuPlugin plugin)"));
+        assertTrue(source.contains("private final PlayerOutputDispatcher output"));
+        assertTrue(source.contains("output.sendActionBar(playerId, normalize(message))"));
+        assertTrue(source.contains("output.cancelAll()"));
         assertTrue(source.contains("showOverlay(Collection<UUID> players, Component message, int durationTicks)"));
         assertTrue(source.contains("showOverlay(Collection<UUID> players, Component message)"));
         assertTrue(source.contains("showOverlay(UUID playerId, Component message)"));

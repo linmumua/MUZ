@@ -16,6 +16,9 @@ final class RoundOpeningCoordinator {
     interface Support {
         boolean canScheduleTasks();
         MuzScheduler scheduler();
+        default MuzScheduler.TaskHandle runTableTimer(long delayTicks, long periodTicks, java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return scheduler().runTimer(delayTicks, periodTicks, task);
+        }
         List<UUID> seats();
         void setOpeningPhase(GamePhase phase);
         void appendOpeningCard(UUID playerId, DoudizhuCard card);
@@ -25,6 +28,17 @@ final class RoundOpeningCoordinator {
         void tickOpeningActionBar();
         void onOpeningRevealWindowStarted();
         void onOpeningRevealWindowFinished();
+
+        /**
+         * 开局渲染失败的日志出口；默认写到标准错误，生产由 GameTable 转到插件日志。
+         *
+         * @param step 失败步骤名
+         * @param failure 异常
+         * @param count 本局累计失败次数
+         */
+        default void reportRenderFailure(String step, RuntimeException failure, int count) {
+            System.err.println("[MUZ] 开局渲染失败(" + step + ", 累计 " + count + " 次): " + failure);
+        }
     }
 
     private final Support support;
@@ -70,12 +84,13 @@ final class RoundOpeningCoordinator {
         this.revealRemainingTicks = 0;
         this.flipping = false;
         this.sortedAtHalfTurn = false;
+        this.renderFailuresSinceLog = 0;
         this.active = true;
         support.setOpeningPhase(GamePhase.DEALING);
         refresh();
         if (support.canScheduleTasks()) {
             int scheduledEpoch = epoch;
-            task = support.scheduler().runTimer(0L, 1L, handle -> {
+            task = support.runTableTimer(0L, 1L, handle -> {
                 if (!active || scheduledEpoch != epoch) {
                     handle.cancel();
                     return;
@@ -107,12 +122,12 @@ final class RoundOpeningCoordinator {
                 support.onOpeningRevealWindowFinished();
                 return true;
             }
-            support.tickOpeningActionBar();
+            safely("tickOpeningActionBar", support::tickOpeningActionBar);
             return false;
         }
         if (waitingTicks > 0) {
             waitingTicks--;
-            support.tickOpeningActionBar();
+            safely("tickOpeningActionBar", support::tickOpeningActionBar);
             return false;
         }
         dealOneCard();
@@ -160,7 +175,7 @@ final class RoundOpeningCoordinator {
             support.setOpeningPhase(GamePhase.REVEALING);
             revealRemainingTicks = settings.revealTicks();
             support.onOpeningRevealWindowStarted();
-            support.refreshPhysicalTable();
+            safely("refreshPhysicalTable", support::refreshPhysicalTable);
             return false;
         }
         flipElapsed++;
@@ -172,9 +187,31 @@ final class RoundOpeningCoordinator {
         return false;
     }
 
+    /**
+     * 渲染与状态推进隔离。
+     *
+     * <p>调度门面在周期任务回调抛异常时会取消该任务。发牌状态在调用本方法前已经推进，若渲染
+     * （实体刷新、ActionBar）抛出异常把异常带出 tick，发牌 timer 会被永久取消——牌桌停在
+     * 「正在发牌」且再也不会前进。渲染失败只影响画面，下一 tick 会重画，因此这里吞掉并限频记录，
+     * 保证时间线继续推进到明牌/叫分；不能静默吞，必须留日志。
+     */
     private void refresh() {
-        support.refreshPhysicalTable();
-        support.tickOpeningActionBar();
+        safely("refreshPhysicalTable", support::refreshPhysicalTable);
+        safely("tickOpeningActionBar", support::tickOpeningActionBar);
+    }
+
+    /* 渲染失败每累计 200 次最多记一次（持续失败时约等于每 200 tick 一次），避免异常每 tick 刷屏拖垮 TPS。 */
+    private static final int FAILURE_LOG_INTERVAL = 200;
+    private int renderFailuresSinceLog;
+
+    private void safely(String step, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException failure) {
+            if (renderFailuresSinceLog++ % FAILURE_LOG_INTERVAL == 0) {
+                support.reportRenderFailure(step, failure, renderFailuresSinceLog);
+            }
+        }
     }
 
     void cancel() {

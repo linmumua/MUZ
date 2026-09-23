@@ -4,6 +4,8 @@ import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.util.Vector;
 
+import java.util.Set;
+
 /**
  * 牌桌实体的共用几何工具方法。
  *
@@ -14,6 +16,42 @@ import org.bukkit.util.Vector;
 public final class TableEntityGeometry {
 
     private TableEntityGeometry() {
+    }
+
+    /** 牌桌自有实体的保护 tag：由 {@link PhysicalTableManager} 写入，也用于残留清理的归属判定。 */
+    public static final String TABLE_PROTECTED_TAG = "muz_table_protected";
+
+    /** 麻将自有实体的保护 tag：由 {@link linmumua.doudizhu.mahjong.MahjongTableManager} 写入。 */
+    public static final String MAHJONG_PROTECTED_TAG = "muz_mahjong_protected";
+
+    /**
+     * 共享保护链认的全部保护 tag。
+     *
+     * <p>两个子领域各自写自己的 tag，但「这个实体是否受保护」的判定必须只有一份：
+     * 分头写会让破坏保护在某一边漏掉。新增子领域时在这里登记，不要各写各的字符串。
+     *
+     * <p>注意这只是保护判定的集合，<b>不是</b>归属判定：残留清理要区分「无人认领的牌桌实体」，
+     * 那里只能认 {@link #TABLE_PROTECTED_TAG}，否则麻将实体会被当成缺 owner 的牌桌实体。
+     */
+    public static final Set<String> PROTECTED_TAGS = Set.of(TABLE_PROTECTED_TAG, MAHJONG_PROTECTED_TAG);
+
+    /**
+     * 该实体是否带任一保护 tag。
+     *
+     * <p>只查实体自身，不遍历 vehicle 链：链的遍历策略由调用方决定（牌桌保护链要追乘客，
+     * 家具判定则不需要）。
+     */
+    public static boolean hasProtectionTag(Entity entity) {
+        if (entity == null) {
+            return false;
+        }
+        Set<String> tags = entity.getScoreboardTags();
+        for (String tag : PROTECTED_TAGS) {
+            if (tags.contains(tag)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -53,9 +91,10 @@ public final class TableEntityGeometry {
     /**
      * 将实体标记为牌桌保护实体：不可破坏、不持久化、无重力、添加保护 tag。
      *
-     * <p>共用于 {@link PhysicalTableManager}（tag = {@code "muz_table_protected"}）和
-     * {@link linmumua.doudizhu.mahjong.MahjongTableManager}（tag = {@code "muz_mahjong_protected"}）。
-     * 两者 tag 不同但保护逻辑完全一致，因此必须共用，避免改一处漏一处。
+     * <p>共用于 {@link PhysicalTableManager}（tag = {@link #TABLE_PROTECTED_TAG}）和
+     * {@link linmumua.doudizhu.mahjong.MahjongTableManager}（tag = {@link #MAHJONG_PROTECTED_TAG}）。
+     * 两者 tag 不同但保护逻辑完全一致，因此必须共用，避免改一处漏一处；tag 字符串本身
+     * 也只在 {@link #PROTECTED_TAGS} 里登记一次，保护判定统一走 {@link #hasProtectionTag(Entity)}。
      *
      * @param entity 需要保护的实体
      * @param tag    scoreboard tag 字符串

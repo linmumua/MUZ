@@ -85,7 +85,17 @@ class ChairHitboxRestoreTimingTest {
     @Test
     void theOneShotTimingsStillRestoreChairHitboxVisibility() throws IOException {
         List<String> missing = new ArrayList<>();
-        for (String signature : List.of("public void syncViewer(", "public void rebuildAllTables(")) {
+        // 机制变更（非弱化）：viewer 同步已拆成 public Player 入口 + private UUID 实现，真正的实体
+        // 恢复落在单桌 owner 的 syncViewerOnOwner 里。断言改为检查执行恢复的那个方法，
+        // 仍然锁定「一次性恢复时机必须存在」。
+        // 本轮再次机制变更（同样非弱化）：不完整桌重建改为异步 stage 流水线，viewer 同步随之拆成
+        // syncViewerOnOwner（投递重建）与 continueViewerSyncOnOwner（重建完成后回 owner lane 做实体
+        // 恢复）；重建全量的恢复则作为流水线收尾回调留在 rebuildAllTables 内。断言仍指向真正执行
+        // 恢复的方法体，断言强度不变。
+        for (String signature : List.of(
+            "private void continueViewerSyncOnOwner(GameTable table, UUID viewerId)",
+            "public CompletionStage<Void> rebuildAllTables()"
+        )) {
             if (!stripComments(methodBody(MANAGER, signature)).contains(RESTORE + "(")) {
                 missing.add(signature);
             }
@@ -94,6 +104,13 @@ class ChairHitboxRestoreTimingTest {
         assertTrue(
             missing.isEmpty(),
             "一次性恢复时机被删了，旧版本隐藏过判定框的在线玩家会永久坐不下：" + missing
+        );
+        // 恢复不能只"存在"，还必须真的可达：viewer 同步重建完成后要回到本桌 owner lane 才执行恢复，
+        // 漏掉这一步同样是"功能没了"。
+        assertTrue(
+            stripComments(methodBody(MANAGER, "private void syncViewerOnOwner(GameTable table, UUID viewerId)"))
+                .contains("continueViewerSyncOnOwner(table, viewerId)"),
+            "viewer 同步重建后不再回到 owner lane 执行一次性恢复，上线玩家会永久坐不下"
         );
     }
 
@@ -120,8 +137,11 @@ class ChairHitboxRestoreTimingTest {
             listener.contains("syncViewer("),
             "上线处理不再调用 syncViewer，椅子判定框的一次性恢复走不到了"
         );
+        // 机制变更（非弱化）：延迟进场从旧 scheduler.runLater 改为 player lane 门面的延迟投递
+        // （output.runPlayer(uuid, delay, ...)）。断言随之改为检查带 delay 的 runPlayer 调用，
+        // 仍然锁定「join 不能立刻改实体、必须等区块/实体就绪」这一意图。
         assertTrue(
-            listener.contains("runLater("),
+            listener.contains("output.runPlayer(playerId, delay,"),
             "上线处理不再延迟执行，join 瞬间区块与实体可能还没就绪，恢复会打空"
         );
     }

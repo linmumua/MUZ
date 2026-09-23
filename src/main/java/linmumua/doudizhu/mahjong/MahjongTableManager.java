@@ -2,8 +2,11 @@ package linmumua.doudizhu.mahjong;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.compat.VersionCompat;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.ui.MuzTheme;
 import linmumua.doudizhu.ui.TypewriterTextStyle;
+import linmumua.doudizhu.scheduler.MuzScheduler;
+import linmumua.doudizhu.scheduler.RegionTaskBarrier;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -12,9 +15,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.text.Component;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Display;
@@ -23,6 +26,7 @@ import org.bukkit.entity.Interaction;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
+import org.bukkit.World;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -34,19 +38,40 @@ import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
 
 public final class MahjongTableManager implements Listener {
-    private static final String PROTECTED_ENTITY_TAG = "muz_mahjong_protected";
+    // tag 字符串登记在 TableEntityGeometry.PROTECTED_TAGS（共享保护链），这里只负责写入。
+    // 注意表内登记（visualEntityIds）与 tag 是两条独立的保护依据：前者用于右键放行口，
+    // 后者用于破坏保护，两者都指向同一批实体。
+    private static final String PROTECTED_ENTITY_TAG =
+        linmumua.doudizhu.world.TableEntityGeometry.MAHJONG_PROTECTED_TAG;
+    /** 关闭清理屏障的 global 超时 tick；只用于观察聚合结果，不阻塞调用线程。 */
+    private static final long CLEANUP_BARRIER_TIMEOUT_TICKS = 100L;
     private final DoudizhuPlugin plugin;
+    /** 玩家输出只按 UUID 投递到 player lane；麻将桌与实体状态仍走本类的桌 owner facade。 */
+    private final PlayerOutputDispatcher playerOutput;
     private final Map<String, MahjongTableSession> tables = new ConcurrentHashMap<>();
     private final Map<UUID, SeatBinding> seatBindings = new ConcurrentHashMap<>();
     private final Map<UUID, String> playerTableIds = new ConcurrentHashMap<>();
     private volatile MahjongLayoutConfig layoutConfig;
+    private volatile boolean shutdown;
+    /**
+     * 最近一次关闭清理的完成屏障；未关闭时保持已完成的空 future。
+     *
+     * <p>只做观察与日志，不在 {@code onDisable} 的主线程上阻塞等待：Paper 后端把 region 任务
+     * 排到主线程，阻塞等待会把任务本身饿死，Folia 下未加载 region 更是永远不会返回。
+     */
+    private volatile CompletableFuture<RegionTaskBarrier.Result> shutdownCompletion =
+        CompletableFuture.completedFuture(null);
 
     public MahjongTableManager(DoudizhuPlugin plugin, MahjongLayoutConfig layoutConfig) {
         this.plugin = plugin;
+        this.playerOutput = new PlayerOutputDispatcher(plugin);
         this.layoutConfig = layoutConfig;
     }
 
     public void reloadLayout(MahjongLayoutConfig layoutConfig) {
+        if (shutdown) {
+            return;
+        }
         this.layoutConfig = layoutConfig;
         for (MahjongTableSession table : tables.values()) {
             table.applyLayout(layoutConfig);
@@ -67,7 +92,11 @@ public final class MahjongTableManager implements Listener {
     }
 
     public boolean containsPlayer(UUID playerId) {
-        return playerId != null && playerTableIds.containsKey(playerId);
+        return !shutdown && playerId != null && playerTableIds.containsKey(playerId);
+    }
+
+    public boolean isShutdown() {
+        return shutdown;
     }
 
     public MahjongTableSession createTable(Player owner, String requestedId) {
@@ -75,6 +104,7 @@ public final class MahjongTableManager implements Listener {
     }
 
     public MahjongTableSession createTable(Player owner, String requestedId, Location center) {
+        ensureOpen();
         if (owner == null) {
             throw new IllegalArgumentException("创建麻将桌需要有效玩家。" );
         }
@@ -87,12 +117,15 @@ public final class MahjongTableManager implements Listener {
         }
         MahjongTableSession session = new MahjongTableSession(id, center.clone(), owner.getUniqueId(), owner.getName(), System.currentTimeMillis(), layoutConfig);
         tables.put(id, session);
-        render(session);
+        rerender(session);
         plugin.persistMahjongTable(id, center, owner.getUniqueId(), owner.getName());
         return session;
     }
 
     public MahjongTableSession restoreTable(String tableId, Location center, java.util.UUID ownerId, String ownerName) {
+        if (shutdown) {
+            return null;
+        }
         if (center == null || center.getWorld() == null) {
             return null;
         }
@@ -102,11 +135,14 @@ public final class MahjongTableManager implements Listener {
         }
         MahjongTableSession session = new MahjongTableSession(id, center.clone(), ownerId, ownerName, System.currentTimeMillis(), layoutConfig);
         tables.put(id, session);
-        render(session);
+        rerender(session);
         return session;
     }
 
     public MahjongTableSession removeTable(String tableId) {
+        if (shutdown) {
+            return null;
+        }
         MahjongTableSession removed;
         if (tableId == null || tableId.isBlank()) {
             removed = nearestTable(null);
@@ -120,7 +156,7 @@ public final class MahjongTableManager implements Listener {
             for (UUID playerId : List.copyOf(removed.occupants().values())) {
                 playerTableIds.remove(playerId);
             }
-            cleanup(removed);
+            removeVisuals(removed);
             plugin.deletePersistedTable("MAHJONG", removed.id());
         }
         return removed;
@@ -217,20 +253,26 @@ public final class MahjongTableManager implements Listener {
         return bestTable;
     }
 
+    /**
+     * 只按麻将桌自己的实体登记表判断保护对象。
+     *
+     * <p>这里不能通过全局 UUID 实体索引做反查：麻将领域尚未完成 Folia owner 路由，且
+     * 实体可能正处于未加载区块。实体生成、删除和真正的 Bukkit 实体操作一律经
+     * {@code rerender}/{@code removeVisuals} 直接投递到桌锚点 region；{@link #runOnTableRegion(MahjongTableSession, Runnable)}
+     * 是带「代次 + 实例身份」闸门的通用桌 owner 入口，当前没有生产调用方，仅由契约测试钉住其形状。
+     *
+     * <p>本方法服务于共享保护链的<b>右键放行口</b>：麻将 tag 已经并入
+     * {@code PhysicalTableManager.isProtectedEntity}（走 {@code TableEntityGeometry.PROTECTED_TAGS}），
+     * 使麻将实体同样获得破坏保护；而右键不能只看「受保护」就拦下，还要在这里判定它属于麻将，
+     * 由 {@code WorldTableInteractionListener.shouldCancelProtectedInteract} 放行，
+     * 否则麻将入座 Interaction 会被取消（麻将实体既不是椅子家具也不是动作按钮）。
+     * 用登记表而不是读实体 tag，正是为了避开上面那条全局实体反查限制。
+     */
     public boolean isProtectedEntity(UUID entityId) {
-        Entity entity = Bukkit.getEntity(entityId);
-        while (entity != null) {
-            if (entity.getScoreboardTags().contains(PROTECTED_ENTITY_TAG)) {
-                return true;
-            }
-            for (MahjongTableSession table : tables.values()) {
-                if (table.visualEntityIds().contains(entity.getUniqueId())) {
-                    return true;
-                }
-            }
-            entity = entity.getVehicle();
+        if (entityId == null) {
+            return false;
         }
-        return false;
+        return tables.values().stream().anyMatch(table -> table.visualEntityIds().contains(entityId));
     }
 
     public MahjongTableSession nearestTable(Location location) {
@@ -325,12 +367,12 @@ public final class MahjongTableManager implements Listener {
                 table.leave(player.getUniqueId());
                 playerTableIds.remove(player.getUniqueId());
                 rerender(table);
-                player.sendMessage(MuzTheme.warning("你已从 " + table.id() + " 的" + binding.seat().label() + "离座。"));
+                sendToPlayer(player.getUniqueId(), MuzTheme.warning("你已从 " + table.id() + " 的" + binding.seat().label() + "离座。"));
                 return;
             }
             boolean ready = table.toggleReady(player.getUniqueId());
             rerender(table);
-            player.sendMessage(ready
+            sendToPlayer(player.getUniqueId(), ready
                 ? MuzTheme.success("你已在 " + table.id() + " 的" + binding.seat().label() + "准备。")
                 : MuzTheme.warning("你已取消 " + table.id() + " 的" + binding.seat().label() + "准备。"));
             if (table.occupants().size() == MahjongTableSession.Seat.values().length && table.readyCount() == MahjongTableSession.Seat.values().length) {
@@ -339,33 +381,76 @@ public final class MahjongTableManager implements Listener {
             return;
         }
         if (currentTableId != null && !currentTableId.equalsIgnoreCase(table.id())) {
-            player.sendMessage(MuzTheme.danger("你已经在另一张麻将桌入座了：" + currentTableId));
+            sendToPlayer(player.getUniqueId(), MuzTheme.danger("你已经在另一张麻将桌入座了：" + currentTableId));
             return;
         }
         UUID occupiedBy = table.occupants().get(binding.seat());
         if (occupiedBy != null && !occupiedBy.equals(player.getUniqueId())) {
-            player.sendMessage(MuzTheme.danger(binding.seat().label() + " 已有人。"));
+            sendToPlayer(player.getUniqueId(), MuzTheme.danger(binding.seat().label() + " 已有人。"));
             return;
         }
         if (currentSeat != null) {
             table.leave(player.getUniqueId());
         }
         if (!table.sit(binding.seat(), player.getUniqueId(), player.getName())) {
-            player.sendMessage(MuzTheme.danger("这个座位暂时没坐进去。"));
+            sendToPlayer(player.getUniqueId(), MuzTheme.danger("这个座位暂时没坐进去。"));
             return;
         }
         playerTableIds.put(player.getUniqueId(), table.id());
         rerender(table);
-        player.sendMessage(MuzTheme.success("你已坐到麻将桌 " + table.id() + " 的" + binding.seat().label() + "。"));
+        sendToPlayer(player.getUniqueId(), MuzTheme.success("你已坐到麻将桌 " + table.id() + " 的" + binding.seat().label() + "。"));
     }
 
     public void shutdown() {
-        for (MahjongTableSession table : List.copyOf(tables.values())) {
-            cleanup(table);
+        if (shutdown) {
+            return;
         }
+        // 先封住麻将新入口再清理；scheduler 由插件入口最后关闭，
+        // 所以这里的 owner 清理仍能真实投递（DoudizhuPlugin.onDisable 的顺序契约）。
+        shutdown = true;
+        List<MahjongTableSession> remaining = List.copyOf(tables.values());
         tables.clear();
         seatBindings.clear();
         playerTableIds.clear();
+        if (plugin.getServer().isStopping()) {
+            // 关服分支与 PhysicalTableManager.shutdown 一致：region 可能已不可用，实体随世界销毁，
+            // 这里只推进代次并清追踪，绝不在非法 owner 上操作实体。
+            for (MahjongTableSession table : remaining) {
+                table.nextGeneration();
+                table.clearVisuals();
+            }
+            return;
+        }
+        // reload 分支：调度仍可用。每张桌登记为一个清理 request，真实删除在桌 region 内执行；
+        // 用完成屏障观察聚合结果，失败只记录日志，不阻塞调用线程。
+        List<RegionTaskBarrier.Request> requests = new ArrayList<>();
+        for (MahjongTableSession table : remaining) {
+            table.nextGeneration();
+            requests.add(new RegionTaskBarrier.Request(
+                table.id(), table.anchor(), () -> cleanupOnTableRegion(table)));
+        }
+        shutdownCompletion = new RegionTaskBarrier(
+            plugin.scheduler(), requests, CLEANUP_BARRIER_TIMEOUT_TICKS)
+            .start()
+            .whenComplete((result, failure) -> {
+                if (failure != null) {
+                    plugin.getLogger().warning("麻将桌清理屏障异常结束: " + failure.getMessage());
+                } else if (result == null || result.status() != RegionTaskBarrier.Status.COMPLETED) {
+                    plugin.getLogger().warning("麻将桌清理屏障未全部完成，状态="
+                        + (result == null ? "null" : result.status()));
+                }
+            });
+    }
+
+    /** 返回最近一次关闭清理的完成屏障（未关闭时为已完成的空 future），供关闭流程观察，不阻塞等待。 */
+    public CompletableFuture<RegionTaskBarrier.Result> shutdownCompletion() {
+        return shutdownCompletion;
+    }
+
+    private void ensureOpen() {
+        if (shutdown) {
+            throw new IllegalStateException("内嵌麻将运行时已关闭。");
+        }
     }
 
     private String nextId() {
@@ -376,8 +461,89 @@ public final class MahjongTableManager implements Listener {
         return String.valueOf(index);
     }
 
+    /**
+     * 在麻将桌锚点所属 region 执行实体操作，并绑定桌实例 generation。
+     *
+     * <p>业务状态仍由各自事件入口维护；凡是 Display/Interaction 的创建、删除和实体
+     * 属性修改，都必须从这个入口进入，避免把麻将实体操作投递到 global scheduler。
+     */
+    public MuzScheduler.TaskHandle runOnTableRegion(MahjongTableSession table, Runnable task) {
+        if (shutdown || table == null || task == null || table.anchor().getWorld() == null) {
+            return cancelledTask("region");
+        }
+        long expectedGeneration = table.generation();
+        return plugin.scheduler().runRegion(table.anchor(), () -> {
+            if (table.generation() == expectedGeneration && tables.get(table.id()) == table) {
+                task.run();
+            }
+        });
+    }
+
+    /** 在玩家自己的 player/entity scheduler 上执行玩家输出；任务只接收 UUID 对应的当前玩家。 */
+    public MuzScheduler.TaskHandle runForPlayer(UUID playerId, java.util.function.Consumer<Player> task) {
+        if (shutdown || playerId == null || task == null) {
+            return cancelledTask("player");
+        }
+        return playerOutput.runPlayer(playerId, task);
+    }
+
+    /** 保留旧 Player + Runnable 签名；实际投递仍转换为 UUID 并进入 player lane。 */
+    public MuzScheduler.TaskHandle runForPlayer(Player player, Runnable task) {
+        if (player == null || task == null) {
+            return cancelledTask("player");
+        }
+        return runForPlayer(player.getUniqueId(), ignored -> task.run());
+    }
+
+    public void sendToPlayer(UUID playerId, Component message) {
+        if (!shutdown && playerId != null && message != null) {
+            playerOutput.sendMessage(playerId, message);
+        }
+    }
+
+    public void sendToPlayer(Player player, Component message) {
+        if (player != null) {
+            sendToPlayer(player.getUniqueId(), message);
+        }
+    }
+
+    public void sendToPlayer(UUID playerId, List<Component> messages) {
+        if (shutdown || playerId == null || messages == null || messages.isEmpty()) {
+            return;
+        }
+        for (Component message : messages) {
+            sendToPlayer(playerId, message);
+        }
+    }
+
+    public void sendToPlayer(Player player, List<Component> messages) {
+        if (player != null) {
+            sendToPlayer(player.getUniqueId(), messages);
+        }
+    }
+
+    private MuzScheduler.TaskHandle cancelledTask(String owner) {
+        return new MuzScheduler.TaskHandle() {
+            @Override
+            public void cancel() { }
+
+            @Override
+            public boolean isCancelled() {
+                return true;
+            }
+
+            @Override
+            public String ownerId() {
+                return owner;
+            }
+        };
+    }
+
     private void render(MahjongTableSession table) {
-        cleanup(table);
+        if (table == null) {
+            return;
+        }
+        cleanupOnTableRegion(table);
         Location center = displayCenter(table);
         MahjongLayoutConfig layout = table.layoutConfig();
         // [MUZ-DEBUG] 详细日志：查看渲染时使用的配置值
@@ -409,23 +575,50 @@ public final class MahjongTableManager implements Listener {
     }
 
     private void rerender(MahjongTableSession table) {
-        if (table != null) {
-            render(table);
-        }
-    }
-
-    private void cleanup(MahjongTableSession table) {
-        if (table == null) {
+        if (table == null || table.anchor().getWorld() == null) {
             return;
         }
+        // 提交前推进 generation：淘汰已排队的旧重绘；并在 region 内复核实例身份，
+        // 防止同名新桌实例被旧实例的迟到回调写入实体。
+        long expectedGeneration = table.nextGeneration();
+        plugin.scheduler().runRegion(table.anchor(), () -> {
+            if (table.generation() != expectedGeneration || tables.get(table.id()) != table) {
+                return;
+            }
+            render(table);
+        });
+    }
+
+    /**
+     * 终结删除：推进 generation 淘汰在途重绘，再把真实实体删除投递到桌 region。
+     *
+     * <p>清理本身不设代次/注册闸门——{@code removeTable} 与 {@code shutdown} 会先把桌移出注册表，
+     * 若这里再要求「桌仍在注册表且代次不变」，删除会被自己的屏障挡掉，实体永久残留。
+     * 删除只按本桌已登记的 UUID 列表执行，重复执行是安全的。
+     */
+    private void removeVisuals(MahjongTableSession table) {
+        if (table == null || table.anchor().getWorld() == null) {
+            return;
+        }
+        table.nextGeneration();
+        plugin.scheduler().runRegion(table.anchor(), () -> cleanupOnTableRegion(table));
+    }
+
+    /** 只能在桌锚点 region 中调用；不再通过 Bukkit 全局实体索引反查。 */
+    private void cleanupOnTableRegion(MahjongTableSession table) {
         for (UUID entityId : List.copyOf(table.visualEntityIds())) {
             seatBindings.remove(entityId);
-            Entity entity = Bukkit.getEntity(entityId);
+            Entity entity = entityAt(table, entityId);
             if (entity != null) {
                 entity.remove();
             }
         }
         table.clearVisuals();
+    }
+
+    private Entity entityAt(MahjongTableSession table, UUID entityId) {
+        World world = table.anchor().getWorld();
+        return world == null || entityId == null ? null : world.getEntity(entityId);
     }
 
     private void remember(MahjongTableSession table, Entity entity) {
@@ -440,10 +633,7 @@ public final class MahjongTableManager implements Listener {
             return;
         }
         for (UUID playerId : table.occupants().values()) {
-            Player online = Bukkit.getPlayer(playerId);
-            if (online != null) {
-                online.sendMessage(message);
-            }
+            sendToPlayer(playerId, message);
         }
     }
 

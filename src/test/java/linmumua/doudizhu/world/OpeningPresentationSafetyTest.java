@@ -68,7 +68,9 @@ class OpeningPresentationSafetyTest {
     @Test
     void handLockHintUsesRoundOpeningLabel() throws IOException {
         String source = Files.readString(MANAGER);
-        assertTrue(source.contains("hint(player, table.openingRevealLabel(), NamedTextColor.YELLOW);"));
+        // 机制变更（非弱化）：提示改走 player lane 的 UUID 形式（hint(UUID, ...)），不再是 Player 形参；
+        // 仍然要求使用开局明牌标签而非硬编码文案，下一行的禁止断言不变。
+        assertTrue(source.contains("hint(player.getUniqueId(), table.openingRevealLabel(), NamedTextColor.YELLOW);"));
         assertFalse(source.contains("开局发牌与明牌展示完成前不能操作手牌。"));
     }
 

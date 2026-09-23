@@ -7,9 +7,12 @@ import linmumua.doudizhu.game.SimpleBotBrain;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.PlayerRole;
+import linmumua.doudizhu.game.TableManager;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.model.CardRank;
 import linmumua.doudizhu.model.DoudizhuCard;
 import linmumua.doudizhu.room.TableLevel;
+import linmumua.doudizhu.scheduler.RegionTaskBarrier;
 import linmumua.doudizhu.ui.MuzTheme;
 import linmumua.doudizhu.ui.TypewriterTextStyle;
 import java.util.ArrayList;
@@ -24,7 +27,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -36,6 +43,7 @@ import org.bukkit.World;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Server;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
@@ -49,15 +57,85 @@ import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Transformation;
 import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
 
 public final class PhysicalTableManager {
+    /** 牌桌实体的不可变归属快照，供后续 region/entity owner 路由使用。 */
+    public record TableOwner(UUID id, String name, String tableName, long generation) {
+        public TableOwner {
+            name = name == null || name.isBlank() ? null : name;
+            tableName = tableName == null || tableName.isBlank()
+                ? null
+                : tableName.trim().toLowerCase(Locale.ROOT);
+            if (tableName == null) {
+                throw new IllegalArgumentException("牌桌实体 owner 缺少桌标识");
+            }
+            if (generation <= 0L) {
+                throw new IllegalArgumentException("牌桌实体 owner 缺少有效代次");
+            }
+        }
+    }
+
+    private static final String ENTITY_ROLE_UNKNOWN = "unknown";
+    private static final String ENTITY_ROLE_TABLE = "table";
+    private static final String ENTITY_ROLE_CHAIR = "chair";
+    private static final String ENTITY_ROLE_ACTION_LABEL = "action-label";
+    private static final String ENTITY_ROLE_ACTION_HITBOX = "action-hitbox";
+    private static final String ENTITY_ROLE_CARD = "card";
+    private static final String ENTITY_ROLE_CARD_LABEL = "card-label";
+    private static final String ENTITY_ROLE_CARD_CAPTURER = "card-capturer";
+    private static final String ENTITY_ROLE_CARD_EDGE = "card-edge";
+    private static final String ENTITY_ROLE_DEBUG_PANEL = "debug-panel";
+
     /** Hover/点击仅缩小命中触发范围，不改变牌面显示尺寸。 */
     private static final double HAND_CARD_HIT_AREA_SCALE = 0.90;
     // 桌椅与按钮属于世界里的公共实体；手牌和个人按钮则是按玩家隐藏/显示的私有实体
-    private static final String PROTECTED_ENTITY_TAG = "muz_table_protected";
+    // 这个常量只用于「牌桌自有实体」的归属判定（写入 tag 与残留清理），tag 字符串本身
+    // 登记在 TableEntityGeometry.PROTECTED_TAGS；isProtectedEntity 走的是共享保护链，
+    // 除牌桌实体外还认麻将 tag，见那里的注释。
+    private static final String PROTECTED_ENTITY_TAG = TableEntityGeometry.TABLE_PROTECTED_TAG;
+
+    /** 牌桌实体清理屏障的超时 tick；只用于观察聚合结果，绝不在调用线程上阻塞等待。 */
+    private static final long CLEANUP_BARRIER_TIMEOUT_TICKS = 100L;
+
+    /**
+     * 当前是否运行在 Folia 这类区域化核心上（只算一次）。
+     *
+     * <p><b>为什么必须按核心类型分支</b>：同一处「锚点区块就绪」逻辑在两类核心上合法且正确的
+     * 实现是不同的——Paper/Leaf 的**主线程允许同步加载区块**，牌桌的放置/重建路径
+     * （{@code placeNewTableInternal} → {@code spawnTable}、{@code rebuildAllTables} /
+     * {@code rebuildSingleTable} / {@code shiftAllAnchors} → {@code cleanupPlacedTable} →
+     * {@code spawnTable}）本就依赖「执行前锚点邻域已加载」这一保证：区块未加载时实体与方块操作
+     * 会静默失效，结果是把旧实体清掉却没能重建，整桌桌椅按钮凭空消失（真实 Leaf 26.1.2 实服复现）。
+     * 而 Folia 的区域线程在**任何**上下文——主线程与 region 线程——都禁止同步区块获取，
+     * 抛 {@code IllegalArgumentException("Async chunk retrieval")}，只能走异步加载 + region 投递。
+     * 因此不能只留一条实现：留同步会在 Folia 上永久失败，留只读检查会在 Paper/Leaf 上丢整桌实体。
+     *
+     * <p><b>判定方式</b>已收口到 {@link RegionizedCoreDetector}：优先官方品牌接口
+     * {@code ServerBuildInfo.buildInfo().isBrandCompatible(Key.key("papermc","folia"))}，
+     * 品牌不可用时才回退到**只认 {@code RegionizedServer}** 的类存在性。判定细节、现场两份内核
+     * 的判别力证据与失败策略都写在那个类里。
+     *
+     * <p><b>历史纠错（2026-09-23）</b>：本字段曾经是 {@code detectRegionizedCore()}，用
+     * {@code RegionizedServer <b>或</b> TickRegions} 的类存在性判定。该判据是错的——
+     * 现场 {@code leaf-26.1.2.jar} 打了一个 484 字节的 {@code TickRegions} 兼容桩却没有
+     * {@code RegionizedServer}，于是 Leaf 被误判成区域化核心，同步恢复/预热分支根本不执行。
+     * 现在删掉了 TickRegions 判据。
+     */
+    private static final boolean REGIONIZED = RegionizedCoreDetector.isRegionized();
+
+    /**
+     * 最近一次 reload 关闭清理的完成屏障。
+     *
+     * <p>只观察不阻塞，与 {@code MahjongTableManager.shutdownCompletion()} 同口径：
+     * Paper 后端把 region 任务排到主线程，{@code onDisable} 在主线程上阻塞等待会把任务本身饿死，
+     * Folia 下未加载 region 更是永远不会返回。未关闭时保持已完成空 future。
+     */
+    private volatile CompletableFuture<RegionTaskBarrier.Result> shutdownCompletion =
+        CompletableFuture.completedFuture(null);
     private static final MiniMessage MINI = MiniMessage.miniMessage();
     private static final float DEFAULT_PRIVATE_CARD_RENDER_SCALE = 0.50f;
     private static final int CARD_HOVER_GRACE_TICKS = 2;
@@ -169,10 +247,52 @@ public final class PhysicalTableManager {
         new ActionButtonState("bid", "叫2分", ButtonAction.BID_2, 0.32),
         new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, 0.96)
     );
-    private long playDetailLastRefreshBucket = Long.MIN_VALUE;
+    /** 每张牌桌独立记录桌边动态的刷新桶；owner tick 不能共享全局节流状态。 */
+    private final Map<String, Long> playDetailLastRefreshBucketByTable = new LinkedHashMap<>();
 
     private final DoudizhuPlugin plugin;
+    /** 连接生命周期维护的不可变 UUID 快照；region owner 不直接枚举 Player。 */
+    private final PlayerPresenceRegistry playerPresence;
+    /** 玩家输出统一经 UUID 快照投递到 player lane，region owner 不直接触碰玩家 API。 */
+    private final PlayerOutputDispatcher playerOutput;
+    /** 实体 owner 的持久化键；仅 MUZ 自有实体写入，CraftEngine 家具不伪造这些字段。 */
+    private final NamespacedKey entityOwnerKey;
+    private final NamespacedKey entityOwnerNameKey;
+    private final NamespacedKey entityTableKey;
+    private final NamespacedKey entityRoleKey;
+    private final NamespacedKey entityGenerationKey;
+    private final Map<String, Long> tableGenerationByName = new LinkedHashMap<>();
     private final Map<String, PlacedTable> placedTables = new LinkedHashMap<>();
+    /** 每个牌桌锚点的 3x3 footprint；这里只做运行期索引，不伪造区块事件屏障。 */
+    private final Map<ChunkOwnerKey, Set<String>> tableNamesByFootprintChunk = new LinkedHashMap<>();
+    private final Map<String, Set<ChunkOwnerKey>> footprintChunksByTable = new LinkedHashMap<>();
+    /** 区块连续加载会产生多个事件；同一逻辑桌同一时刻只允许一个 owner 修复任务。 */
+    private final Set<String> chunkLoadRepairQueued = new LinkedHashSet<>();
+    /** 单桌清理代次；barrier 完成后必须仍匹配，避免旧结果重建新桌。 */
+    private final Map<String, Long> cleanupEpochByTable = new LinkedHashMap<>();
+    /** 已经捕获 cleanup plan 或运行 barrier 的桌，禁止重复 ChunkLoad 创建第二个 barrier。 */
+    private final Set<String> activeChunkLoadRepairs = new LinkedHashSet<>();
+    /**
+     * 在飞重建的桌（归一化桌名）。
+     *
+     * <p>重建不再把 {@code placedTables} / footprint 索引 / 实体索引整批摘除：旧放置快照会一直保留到
+     * global 收口**成功提交**为止。旧状态在替换成功前绝不能丢——否则窗口期 {@code TableManager.cleanupIfEmpty}
+     * 会把空桌当成"已拆"注销（永久丢桌），重建失败也会连旧桌一起丢掉。
+     *
+     * <p>本集合同时承担两个职责：
+     * <ul>
+     *   <li>同桌重建互斥：旧逻辑靠"先把旧桌从 {@code placedTables} 摘掉再重建"实现天然互斥，现在改成不动
+     *       旧状态，就必须显式互斥——标记还在时第二次重建直接让出；</li>
+     *   <li>世界体门禁：重建在飞时旧实体马上要被替换，{@code refresh} / {@code tickTable} 这类会按旧
+     *       {@code PlacedTable} 继续生成实体的路径必须让位（见 {@link #placedTableForWorldBody}），
+     *       否则会在窗口里造出无人跟踪的孤儿实体。</li>
+     * </ul>
+     * 标记由调用 lane 写入、由多个 owner lane 读取，因此必须是并发容器。
+     */
+    private final Set<String> rebuildingTableKeys = ConcurrentHashMap.newKeySet();
+    /** 残留清理的邻桌保护按实体 UUID O(1) 查询，不再扫描 placedTables。 */
+    private final Map<UUID, TableOwner> trackedEntityOwnersById = new LinkedHashMap<>();
+    private final Map<String, Set<UUID>> indexedEntityIdsByTable = new LinkedHashMap<>();
     private final Map<UUID, ActionBinding> actionBindings = new LinkedHashMap<>();
     private final Map<UUID, CardBinding> cardBindings = new LinkedHashMap<>();
     private final Map<UUID, Integer> hintIndices = new LinkedHashMap<>();
@@ -243,8 +363,91 @@ public final class PhysicalTableManager {
         java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
     // ---- 追踪结束 ----
 
+    /**
+     * 连接生命周期维护的最小 UUID presence registry。
+     *
+     * <p>只保存不可变 UUID 快照，供牌桌 owner lane 使用；连接监听器可通过
+     * {@link #markPlayerConnected(UUID)} / {@link #markPlayerDisconnected(UUID)} 接入，
+     * 不需要把 Player 带进世界实体刷新链路。
+     */
+    static final class PlayerPresenceRegistry {
+        private final LinkedHashSet<UUID> connected = new LinkedHashSet<>();
+        private volatile List<UUID> snapshot = List.of();
+
+        PlayerPresenceRegistry() {
+        }
+
+        PlayerPresenceRegistry(Collection<UUID> initialPlayerIds) {
+            if (initialPlayerIds != null) {
+                for (UUID playerId : initialPlayerIds) {
+                    if (playerId != null) {
+                        connected.add(playerId);
+                    }
+                }
+                snapshot = List.copyOf(connected);
+            }
+        }
+
+        synchronized void markConnected(UUID playerId) {
+            if (playerId != null && connected.add(playerId)) {
+                snapshot = List.copyOf(connected);
+            }
+        }
+
+        synchronized void markDisconnected(UUID playerId) {
+            if (playerId != null && connected.remove(playerId)) {
+                snapshot = List.copyOf(connected);
+            }
+        }
+
+        List<UUID> snapshot() {
+            return snapshot;
+        }
+    }
+
     public PhysicalTableManager(DoudizhuPlugin plugin) {
+        this(plugin, new PlayerPresenceRegistry(seedOnlinePlayerIds()));
+    }
+
+    /**
+     * 仅在管理器装配时拍一次现存玩家 UUID，作为连接监听器接手前的初始在线集合。
+     *
+     * <p>owner tick 后续只读 {@link PlayerPresenceRegistry} 快照，不再枚举 Player；这里也不能假设
+     * 存在运行中的服务端——单元测试会直接构造本管理器，此时 {@code Bukkit.getServer()} 为 null，
+     * 必须退回空集合，而不是在构造器里抛 NPE。之后由连接监听器用
+     * {@link #markPlayerConnected(UUID)} / {@link #markPlayerDisconnected(UUID)} 维护。
+     */
+    private static List<UUID> seedOnlinePlayerIds() {
+        Server server = Bukkit.getServer();
+        if (server == null) {
+            return List.of();
+        }
+        List<UUID> ids = new ArrayList<>();
+        for (Player player : server.getOnlinePlayers()) {
+            ids.add(player.getUniqueId());
+        }
+        return ids;
+    }
+
+    PhysicalTableManager(DoudizhuPlugin plugin, PlayerPresenceRegistry playerPresence) {
         this.plugin = plugin;
+        this.playerPresence = Objects.requireNonNull(playerPresence, "playerPresence");
+        this.playerOutput = new PlayerOutputDispatcher(plugin);
+        this.entityOwnerKey = new NamespacedKey(plugin, "table-owner");
+        this.entityOwnerNameKey = new NamespacedKey(plugin, "table-owner-name");
+        this.entityTableKey = new NamespacedKey(plugin, "table-name");
+        this.entityRoleKey = new NamespacedKey(plugin, "table-role");
+        this.entityGenerationKey = new NamespacedKey(plugin, "table-generation");
+    }
+
+    /** 连接生命周期注入点：只登记 UUID，不把 Player 带入 owner lane。 */
+    public void markPlayerConnected(UUID playerId) {
+        playerPresence.markConnected(playerId);
+    }
+
+    /** 连接生命周期注入点：只移除 UUID，不触碰 Bukkit Player。 */
+    public void markPlayerDisconnected(UUID playerId) {
+        playerPresence.markDisconnected(playerId);
     }
 
     public GameTable placeNewTable(Player owner, String name) {
@@ -279,13 +482,21 @@ public final class PhysicalTableManager {
             throw new IllegalArgumentException("这儿已经有张桌子了。");
         }
         GameTable table = plugin.getTableManager().getTable(name);
+        boolean newlyCreated = false;
         if (table == null) {
             table = plugin.getTableManager().createTable(name, plugin.defaultCreateRoomLevel());
+            newlyCreated = true;
         }
-        // 和恢复牌桌走同一条清场逻辑，否则诊断桌测不出残留实体有没有被收掉。
-        ensureChunkReady(anchor);
-        purgeResidualWorldArtifacts(anchor, yaw);
-        placedTables.put(key, spawnTable(table, anchor.clone(), yaw, null, "console"));
+        try {
+            // 和恢复牌桌走同一条清场逻辑，否则诊断桌测不出残留实体有没有被收掉。
+            ensureChunkReady(anchor);
+            purgeResidualWorldArtifacts(anchor, yaw);
+            putPlacedTable(key, spawnTable(table, anchor.clone(), yaw, null, "console"));
+            notifyTableAnchorBinding(table);
+        } catch (RuntimeException | Error failure) {
+            rollbackPlacedTableAfterPlacementFailure(key, table, newlyCreated, failure);
+            throw failure;
+        }
         refresh(table);
         return table;
     }
@@ -320,12 +531,20 @@ public final class PhysicalTableManager {
         // 批量放桌时相邻桌位的桌面/椅子区域可能重叠，跳过这一项才能连续生成；
         // 玩家已在其他桌的保护仍然保留，避免调试命令把同一玩家同时挂到多张桌。
         GameTable table = plugin.getTableManager().getTable(name);
+        boolean newlyCreated = false;
         if (table == null) {
             table = plugin.getTableManager().createTable(name, roomLevel);
+            newlyCreated = true;
         }
-        ensureChunkReady(anchor);
-        purgeResidualWorldArtifacts(anchor, yaw);
-        placedTables.put(key, spawnTable(table, anchor.clone(), yaw, owner.getUniqueId(), owner.getName()));
+        try {
+            ensureChunkReady(anchor);
+            purgeResidualWorldArtifacts(anchor, yaw);
+            putPlacedTable(key, spawnTable(table, anchor.clone(), yaw, owner.getUniqueId(), owner.getName()));
+            notifyTableAnchorBinding(table);
+        } catch (RuntimeException | Error failure) {
+            rollbackNewTableAfterPlacementFailure(table, newlyCreated, failure);
+            throw failure;
+        }
         plugin.persistDoudizhuTable(table.getName(), table.getRoomLevel(), anchor, yaw, owner.getUniqueId(), owner.getName());
         refresh(table);
         return table;
@@ -446,7 +665,13 @@ public final class PhysicalTableManager {
      * @return 桌面与全部椅子的被挡方块整格坐标，去重后按检测顺序排列；区块未加载时返回空列表
      */
     public List<Location> placementBlockedBlocks(Location anchor, float yaw) {
-        if (anchor == null || anchor.getWorld() == null || !anchor.getChunk().isLoaded()) {
+        // 不能再用 anchor.getChunk().isLoaded()：Location#getChunk() 内部就是 World#getChunkAt，
+        // 在真实 Folia 上会同步拉区块并抛 Async chunk retrieval。本方法经
+        // WorldTableInteractionListener 的放桌预览（spawnTablePlacerPreview ← tickTablePlacerPreviews）
+        // 跑在 player lane，属于可达路径，与上一轮修掉的 ensureChunkReady 是同类违规。
+        // 改用只读的 world.isChunkLoaded(...)，语义不变：区块未加载时返回空列表（预览视为被阻挡）。
+        if (anchor == null || anchor.getWorld() == null
+            || !anchor.getWorld().isChunkLoaded(anchor.getBlockX() >> 4, anchor.getBlockZ() >> 4)) {
             return List.of();
         }
         Set<Location> blocked = new LinkedHashSet<>();
@@ -482,30 +707,88 @@ public final class PhysicalTableManager {
             throw new IllegalStateException(obstruction);
         }
         GameTable table = plugin.getTableManager().getTable(name);
+        boolean newlyCreated = false;
         if (table == null) {
             table = plugin.getTableManager().createTable(name, roomLevel);
+            newlyCreated = true;
         }
-        placedTables.put(key, spawnTable(table, anchor.clone(), yaw, owner.getUniqueId(), owner.getName()));
+        try {
+            putPlacedTable(key, spawnTable(table, anchor.clone(), yaw, owner.getUniqueId(), owner.getName()));
+            notifyTableAnchorBinding(table);
+        } catch (RuntimeException | Error failure) {
+            rollbackNewTableAfterPlacementFailure(table, newlyCreated, failure);
+            throw failure;
+        }
         plugin.persistDoudizhuTable(table.getName(), table.getRoomLevel(), anchor, yaw, owner.getUniqueId(), owner.getName());
         refresh(table);
         return table;
     }
 
-    public GameTable restoreTable(String name, TableLevel roomLevel, Location anchor, float yaw, UUID ownerId, String ownerName) {
+    /**
+     * 从存档恢复一张牌桌。**按核心类型（{@link #REGIONIZED}）分支**。
+     *
+     * <p><b>非区域化核心（Paper/Leaf）</b>：主线程允许同步加载区块，也没有「世界体必须落在某
+     * region」的约束，所以同步执行——先 {@link #ensureChunkReady} 强拉锚点区块（否则 spawn 的
+     * 实体留不住），再在调用线程直接完成恢复。这样 onEnable 内即可完成恢复，恢复时序与旧版一致，
+     * 不会把「已恢复 N 张」推迟到下一个 100 tick pass。返回已完成的 stage，调用方无需区分核心类型。
+     *
+     * <p><b>区域化核心（Folia）</b>：真实 Folia 26.1.2 上原地拉区块会抛
+     * {@code IllegalArgumentException("Async chunk retrieval")}：{@code Location#getChunk()}
+     * 内部走 {@code World#getChunkAt}，在 region 线程与主线程都非法。因此走两段式——
+     * 「先异步把锚点区块拉起来，再把整套世界体（清残留方块/实体、CE 家具、桌椅文字生成）
+     * 投递到锚点 region」。恢复流程本身位于 global lane（onEnable 与 5 秒重试定时器），
+     * 所以世界体绝不能在调用线程原地执行。
+     *
+     * @return 世界体执行完毕后才完成的 stage，成功值是恢复出来的牌桌；
+     *         加载或世界体失败时以异常完成，调用方必须处理，不能静默丢弃。
+     */
+    public CompletionStage<GameTable> restoreTable(String name, TableLevel roomLevel, Location anchor, float yaw, UUID ownerId, String ownerName) {
         String key = normalize(name);
+        // 纯内存早退：桌已在运行期注册表里，没必要再走异步加载与 region 投递。
+        if (placedTables.containsKey(key)) {
+            return CompletableFuture.completedFuture(plugin.getTableManager().getTable(name));
+        }
+        ensureWorldVisualsReady("恢复牌桌");
+        if (!REGIONIZED) {
+            // 非区域化核心（Paper/Leaf）：同步执行，恢复旧版「onEnable 内即完成恢复」的时序。
+            ensureChunkReady(anchor);
+            GameTable table = restoreTableOnLoadedChunk(key, name, roomLevel, anchor, yaw, ownerId, ownerName);
+            return CompletableFuture.completedFuture(table);
+        }
+        // 区域化核心（Folia）：先异步加载锚点区块，再经 thenCompose 把世界体投到锚点 region；
+        // 绝不能在 global lane 上直接动世界（Folia 会抛 No currently ticking region / Async chunk retrieval）。
+        return ensureChunkLoadedAsync(anchor).thenCompose(ignored ->
+            runRegionStageValue(anchor, () ->
+                restoreTableOnLoadedChunk(key, name, roomLevel, anchor, yaw, ownerId, ownerName)));
+    }
+
+    /**
+     * 恢复流程中真正动世界的部分，只能在锚点 region 内部调用。
+     *
+     * <p>从 {@link #restoreTable} 拆出来，是为了把「世界体必须落在 anchor region」这条约束
+     * 固定在一个方法体内：region 投递之前会被异步加载撑开几帧，期间桌可能已被其它路径放好，
+     * 所以这里必须再查一次幂等早退，避免重复生成一整套实体。
+     */
+    private GameTable restoreTableOnLoadedChunk(String key, String name, TableLevel roomLevel, Location anchor, float yaw, UUID ownerId, String ownerName) {
         if (placedTables.containsKey(key)) {
             return plugin.getTableManager().getTable(name);
         }
-        ensureWorldVisualsReady("恢复牌桌");
-        ensureChunkReady(anchor);
         purgeResidualWorldArtifacts(anchor, yaw);
         GameTable table = plugin.getTableManager().getTable(name);
+        boolean newlyCreated = false;
         if (table == null) {
             table = plugin.getTableManager().createTable(name, roomLevel);
+            newlyCreated = true;
         } else {
             table.setRoomLevel(roomLevel);
         }
-        placedTables.put(key, spawnTable(table, anchor.clone(), yaw, ownerId, ownerName));
+        try {
+            putPlacedTable(key, spawnTable(table, anchor.clone(), yaw, ownerId, ownerName));
+            notifyTableAnchorBinding(table);
+        } catch (RuntimeException | Error failure) {
+            rollbackPlacedTableAfterPlacementFailure(key, table, newlyCreated, failure);
+            throw failure;
+        }
         refresh(table);
         return table;
     }
@@ -518,11 +801,653 @@ public final class PhysicalTableManager {
         return placedTables.size();
     }
 
+    /**
+     * 是否有「已放置」或「重建在飞」的牌桌。
+     *
+     * <p>预热门禁不能只看瞬时 {@link #placedTableCount()}：重建改为异步流水线后，放置快照会在收口阶段
+     * 短暂处于"尚未提交"的状态。用这个合并判据，只要本桌还登记在 {@code placedTables} 里、或还有一条
+     * 重建在飞，门禁就不会误判成"没有桌可重建"而跳过后面的预热 pass。
+     */
+    public boolean hasPlacedOrRebuildingTables() {
+        return !placedTables.isEmpty() || !rebuildingTableKeys.isEmpty();
+    }
+
+    /**
+     * 世界体路径读取放置快照的唯一入口：重建在飞时返回 {@code null}，与"未放置"同一处理方式。
+     *
+     * <p>重建期间旧 {@code PlacedTable} 仍在 {@code placedTables} 里（见 {@link #rebuildingTableKeys}），
+     * 但它的实体可能已经被旧锚点 region 清掉。{@code refresh} / {@code tickTable} 这类世界体路径若继续
+     * 按旧快照生成实体，会造出既不在新桌、也不在旧桌的孤儿。因此这里统一让位，等收口提交后再按新桌工作。
+     *
+     * <p>重建流水线自己收尾的那次刷新**不走**这个门禁（它拿的就是刚提交的新桌，见
+     * {@link #refreshWith(GameTable, PlacedTable)}）。
+     */
+    private PlacedTable placedTableForWorldBody(String tableName) {
+        PlacedTable placed = placedTable(tableName);
+        if (placed == null) {
+            return null;
+        }
+        if (rebuildingTableKeys.contains(normalize(placed.tableName()))) {
+            return null;
+        }
+        return placed;
+    }
+
     public List<String> placedTableNames() {
         return placedTables.values().stream()
             .map(PlacedTable::tableName)
             .sorted(String.CASE_INSENSITIVE_ORDER)
             .toList();
+    }
+
+    /**
+     * 返回覆盖指定世界区块的牌桌名快照。
+     *
+     * <p>查询只读取本管理器维护的 3x3 footprint 索引，不暴露 {@code PlacedTable}，
+     * 供区块生命周期监听器把事件转换成牌桌 owner 任务。
+     *
+     * @param worldId 世界 UUID
+     * @param chunkX 区块 X
+     * @param chunkZ 区块 Z
+     * @return 不可变牌桌名快照
+     */
+    public List<String> tableNamesForFootprintChunk(UUID worldId, int chunkX, int chunkZ) {
+        if (worldId == null) {
+            return List.of();
+        }
+        Set<String> indexed = tableNamesByFootprintChunk.get(
+            new ChunkOwnerKey(worldId, packedChunkKey(chunkX, chunkZ)));
+        if (indexed == null || indexed.isEmpty()) {
+            return List.of();
+        }
+        return indexed.stream()
+            .map(placedTables::get)
+            .filter(Objects::nonNull)
+            .map(PlacedTable::tableName)
+            .sorted(String.CASE_INSENSITIVE_ORDER)
+            .toList();
+    }
+
+    /**
+     * 返回指定世界内当前已登记牌桌名的不可变快照。
+     *
+     * <p>这是世界卸载的接缝查询，不代表世界卸载屏障已完成，也不触碰实体。
+     *
+     * @param worldId 世界 UUID
+     * @return 不可变牌桌名快照
+     */
+    public List<String> tableNamesInWorld(UUID worldId) {
+        if (worldId == null) {
+            return List.of();
+        }
+        return placedTables.values().stream()
+            .filter(Objects::nonNull)
+            .filter(placed -> placed.anchor().getWorld() != null
+                && worldId.equals(placed.anchor().getWorld().getUID()))
+            .map(PlacedTable::tableName)
+            .sorted(String.CASE_INSENSITIVE_ORDER)
+            .toList();
+    }
+
+    /**
+     * 区块卸载接缝：只把 footprint 受影响的逻辑桌切回 global/unplaced，保留实体与索引。
+     *
+     * @param worldId 世界 UUID
+     * @param chunkX 区块 X
+     * @param chunkZ 区块 Z
+     */
+    public void onChunkUnload(UUID worldId, int chunkX, int chunkZ) {
+        for (String tableName : tableNamesForFootprintChunk(worldId, chunkX, chunkZ)) {
+            plugin.getTableManager().markTableUnplaced(tableName);
+        }
+    }
+
+    /**
+     * 世界卸载接缝：只把该世界的逻辑桌切回 global/unplaced，保留实体与索引。
+     *
+     * @param worldId 世界 UUID
+     */
+    public void onWorldUnload(UUID worldId) {
+        for (String tableName : tableNamesInWorld(worldId)) {
+            plugin.getTableManager().markTableUnplaced(tableName);
+        }
+    }
+
+    /**
+     * 区块加载接缝：只排入受影响牌桌的 owner lane，实体检查和刷新不在 global 回调中执行。
+     *
+     * @param worldId 世界 UUID
+     * @param chunkX 区块 X
+     * @param chunkZ 区块 Z
+     */
+    public void onChunkLoad(UUID worldId, int chunkX, int chunkZ) {
+        for (String tableName : tableNamesForFootprintChunk(worldId, chunkX, chunkZ)) {
+            queueChunkLoadRepair(tableName);
+        }
+    }
+
+    private void queueChunkLoadRepair(String tableName) {
+        String key = normalize(tableName);
+        GameTable table = plugin.getTableManager().getTable(tableName);
+        if (key == null || table == null) {
+            return;
+        }
+        synchronized (chunkLoadRepairQueued) {
+            if (activeChunkLoadRepairs.contains(key)) {
+                return;
+            }
+            if (!chunkLoadRepairQueued.add(key)) {
+                return;
+            }
+        }
+        final CompletionStage<?>[] stageRef = new CompletionStage<?>[1];
+        try {
+            var handle = plugin.getTableManager().runTableLater(table, 1L, () -> {
+                CompletionStage<Void> stage;
+                try {
+                    stage = repairTableAfterChunkLoad(table);
+                } catch (Throwable failure) {
+                    stage = failedStage(failure);
+                }
+                stageRef[0] = stage;
+                stage.whenComplete((ignored, failure) -> {
+                    synchronized (chunkLoadRepairQueued) {
+                        chunkLoadRepairQueued.remove(key);
+                        activeChunkLoadRepairs.remove(key);
+                    }
+                    if (failure != null) {
+                        plugin.getLogger().warning("区块加载修复未完成: " + key + "，原因=" + failure.getMessage());
+                    }
+                });
+            });
+            // owner lane 若在回调开始前被卸载/取消，不能永久卡住 ChunkLoad 去重集合。
+            handle.onTermination(() -> {
+                if (stageRef[0] == null) {
+                    synchronized (chunkLoadRepairQueued) {
+                        chunkLoadRepairQueued.remove(key);
+                        activeChunkLoadRepairs.remove(key);
+                    }
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            synchronized (chunkLoadRepairQueued) {
+                chunkLoadRepairQueued.remove(key);
+                activeChunkLoadRepairs.remove(key);
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * 只允许由 {@link TableManager#runTableLater(GameTable, long, Runnable)} 的 owner 回调进入。
+     *
+     * <p>不完整桌不会再同步 rebuildSingleTable：先冻结单桌 cleanup plan 并完成 unresolved 预检；缺失 tracked
+     * entity 视为已不存在，可提交空或非空 barrier，只有无法安全定位的现存对象或基础身份异常才保留索引等待重试。
+     * 预检成功后才由每个实体/方块所在 region 执行清理，最后回到 global 校验并在 anchor region 重建。返回
+     * stage 前不释放 ChunkLoad 去重状态，避免 owner 回调刚返回就有第二个 barrier 进入。
+     */
+    private CompletionStage<Void> repairTableAfterChunkLoad(GameTable table) {
+        if (table == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        String key = normalize(table.getName());
+        PlacedTable current = placedTable(table.getName());
+        if (key == null || current == null || !isFootprintLoaded(current)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!isIncomplete(current)) {
+            notifyTableAnchorBinding(table);
+            refresh(table);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        final long epoch;
+        synchronized (chunkLoadRepairQueued) {
+            if (!activeChunkLoadRepairs.add(key)) {
+                return CompletableFuture.completedFuture(null);
+            }
+            epoch = cleanupEpochByTable.merge(key, 1L, Long::sum);
+        }
+        // 先冻结完整清理计划；只有捕获成功且没有未解析项，才允许取消旧 owner 任务并摘除牌桌。
+        // 缺失 tracked entity 已在 captureCleanupPlan 中视为 absent；预检失败仅保留 placed 与 footprint/entity 索引，等待下一次 ChunkLoad 重试。
+        CleanupPlan plan = captureCleanupPlan(key, table, current, epoch);
+        if (!plan.unresolved().isEmpty()) {
+            plugin.getLogger().warning("区块加载修复预检失败，保留牌桌索引: " + key + "，未解析=" + plan.unresolved());
+            return CompletableFuture.completedFuture(null);
+        }
+        if (placedTable(key) != current) {
+            throw new IllegalStateException("区块加载修复放置身份已变化，不摘除牌桌: " + key);
+        }
+
+        // 先让逻辑桌回到 global/unplaced；GameTable 实例本身保留。
+        //
+        // 【严禁在这里硬取消周期任务】这里曾经先调 TableManager.cancelOwnerPeriodicTasks(key)，
+        // 它会把三个注册表里的条目**永久摘除**（TablePeriodicTaskRegistry 的 cancel/cancelOwner 会
+        // entries.remove + cancelled=true），之后的 rebindTablePeriodicTask 只能返回 false：
+        //   - ownerPeriodicTasks 里的开局发牌 timer（GameTable → TableManager.runTableTimer）没有任何
+        //     重新注册路径，ChunkLoad 修复一次就把整条发牌时间线永久打死（窗口内不再 tick）；
+        //   - periodicTasks 里的 tickActionBar 同样消失，于是修复成功后的 notifyTableAnchorBinding
+        //     会抛「牌桌周期任务未重绑定」，把 finishCleanupPlan 里随后的 refresh 一起跳过。
+        // 这里真正需要的只是「离开旧 owner lane」，而下面的 removePlacedTableIfSame → markTableUnplaced
+        // 已经用原子 rebind 做到：periodicTasks / ownerPeriodicTasks 带 bindingGeneration 门禁重绑到
+        // global（旧 region/global 句柄被取消，迟到回调被代次拦下），world 任务按「未放置」语义摘除、
+        // 等修复收口 notifyTableAnchorBinding 用新锚点重新注册。
+        // 因此这里只摘放置状态：周期任务由 markTableUnplaced 保留，并由修复成功后的重绑复活到新锚点。
+        removePlacedTableIfSame(key, current);
+        return submitCleanupPlan(plan);
+    }
+
+    private CleanupPlan captureCleanupPlan(
+        String tableKey,
+        GameTable table,
+        PlacedTable placed,
+        long epoch
+    ) {
+        Location anchor = placed.anchor() == null ? null : placed.anchor().clone();
+        TableOwner owner = placed.owner();
+        LinkedHashSet<String> unresolved = new LinkedHashSet<>();
+        if (anchor == null || anchor.getWorld() == null) {
+            unresolved.add("anchor-location");
+        }
+        if (owner == null) {
+            unresolved.add("table-owner");
+        }
+
+        List<UUID> staticEntities = List.copyOf(placed.staticEntities());
+        List<UUID> craftEngineEntities = List.copyOf(placed.craftEngineVisualEntities());
+        List<UUID> actionEntities = List.copyOf(placed.actionEntities());
+        List<UUID> seatNameEntities = List.copyOf(placed.seatNameDisplayIds());
+        List<UUID> seatInfoEntities = List.copyOf(placed.seatInfoDisplayIds());
+        List<UUID> privateEntities = flattenEntityBuckets(placed.privateEntitiesByPlayer());
+        List<UUID> backsideEntities = flattenEntityBuckets(placed.backsideEntitiesByPlayer());
+        UUID statusDisplayId = placed.statusDisplayId();
+        UUID playDetailDisplayId = placed.playDetailDisplayId();
+        Map<Integer, UUID> seatAssignments = Map.copyOf(new LinkedHashMap<>(placed.seatAssignments()));
+        List<Long> footprintChunkKeys = List.copyOf(placed.footprintChunkKeys());
+
+        LinkedHashSet<UUID> allEntityIds = new LinkedHashSet<>();
+        allEntityIds.addAll(staticEntities);
+        allEntityIds.addAll(craftEngineEntities);
+        allEntityIds.addAll(actionEntities);
+        allEntityIds.addAll(seatNameEntities);
+        allEntityIds.addAll(seatInfoEntities);
+        allEntityIds.addAll(privateEntities);
+        allEntityIds.addAll(backsideEntities);
+        if (statusDisplayId != null) {
+            allEntityIds.add(statusDisplayId);
+        }
+        if (playDetailDisplayId != null) {
+            allEntityIds.add(playDetailDisplayId);
+        }
+
+        Map<UUID, Location> locations = new LinkedHashMap<>();
+        for (UUID entityId : allEntityIds) {
+            if (entityId == null) {
+                unresolved.add("entity-null");
+                continue;
+            }
+            Entity entity = Bukkit.getEntity(entityId);
+            // tracked UUID 查不到实体表示它已经不存在；不能把正常的缺失恢复场景误判为预检失败。
+            if (entity == null) {
+                continue;
+            }
+            Location location = entity.getLocation();
+            // 只有实体对象仍存在但无法安全定位时才阻断 destructive cleanup。
+            if (location == null || location.getWorld() == null) {
+                unresolved.add("entity-location:" + entityId);
+                continue;
+            }
+            locations.put(entityId, location.clone());
+        }
+
+        Map<ChunkOwnerKey, CleanupRegionPartBuilder> parts = new LinkedHashMap<>();
+        LinkedHashSet<UUID> craftEntitySet = new LinkedHashSet<>(craftEngineEntities);
+        for (UUID entityId : allEntityIds) {
+            if (craftEntitySet.contains(entityId)) {
+                continue;
+            }
+            Location location = locations.get(entityId);
+            if (location != null) {
+                addCleanupEntity(parts, entityId, location);
+            }
+        }
+        for (UUID entityId : craftEngineEntities) {
+            Location location = locations.get(entityId);
+            if (location == null) {
+                continue;
+            }
+            Entity entity = Bukkit.getEntity(entityId);
+            UUID vehicleId = entity == null || entity.getVehicle() == null
+                ? null
+                : entity.getVehicle().getUniqueId();
+            if (vehicleId == null || !craftEntitySet.contains(vehicleId)) {
+                addCleanupFurniture(parts, entityId, location);
+            }
+        }
+        for (BlockRestore blockRestore : placed.blockRestores()) {
+            if (blockRestore == null || blockRestore.originalState() == null) {
+                unresolved.add("block-state");
+                continue;
+            }
+            Location location = blockRestore.originalState().getLocation();
+            if (location == null || location.getWorld() == null) {
+                unresolved.add("block-location");
+                continue;
+            }
+            addCleanupBlock(parts, blockRestore.originalState(), location.clone());
+        }
+
+        List<CleanupRegionPart> frozenParts = parts.values().stream()
+            .map(CleanupRegionPartBuilder::freeze)
+            .toList();
+        return new CleanupPlan(
+            tableKey,
+            table,
+            owner,
+            anchor,
+            placed.yaw(),
+            seatAssignments,
+            footprintChunkKeys,
+            staticEntities,
+            craftEngineEntities,
+            actionEntities,
+            seatNameEntities,
+            seatInfoEntities,
+            privateEntities,
+            backsideEntities,
+            statusDisplayId,
+            playDetailDisplayId,
+            frozenParts,
+            List.copyOf(unresolved),
+            epoch
+        );
+    }
+
+    private static List<UUID> flattenEntityBuckets(Map<UUID, List<UUID>> buckets) {
+        LinkedHashSet<UUID> ids = new LinkedHashSet<>();
+        if (buckets != null) {
+            for (List<UUID> bucket : buckets.values()) {
+                if (bucket != null) {
+                    ids.addAll(bucket);
+                }
+            }
+        }
+        return List.copyOf(ids);
+    }
+
+    private static CleanupRegionPartBuilder regionPart(
+        Map<ChunkOwnerKey, CleanupRegionPartBuilder> parts,
+        Location location
+    ) {
+        UUID worldId = location.getWorld() == null ? null : location.getWorld().getUID();
+        ChunkOwnerKey key = new ChunkOwnerKey(worldId, packedChunkKey(
+            location.getBlockX() >> 4,
+            location.getBlockZ() >> 4
+        ));
+        return parts.computeIfAbsent(key, ignored -> new CleanupRegionPartBuilder(location.clone()));
+    }
+
+    private static void addCleanupEntity(
+        Map<ChunkOwnerKey, CleanupRegionPartBuilder> parts,
+        UUID entityId,
+        Location location
+    ) {
+        regionPart(parts, location).entities.add(new CleanupEntity(entityId, location.clone()));
+    }
+
+    private static void addCleanupFurniture(
+        Map<ChunkOwnerKey, CleanupRegionPartBuilder> parts,
+        UUID rootId,
+        Location location
+    ) {
+        regionPart(parts, location).furniture.add(new CleanupFurniture(rootId, location.clone()));
+    }
+
+    private static void addCleanupBlock(
+        Map<ChunkOwnerKey, CleanupRegionPartBuilder> parts,
+        BlockState state,
+        Location location
+    ) {
+        regionPart(parts, location).blocks.add(new CleanupBlock(state, location.clone()));
+    }
+
+    private void executeCleanupRegion(CleanupPlan plan, CleanupRegionPart part) {
+        for (CleanupEntity cleanup : part.entities()) {
+            actionBindings.remove(cleanup.entityId());
+            cardBindings.remove(cleanup.entityId());
+            Entity entity = Bukkit.getEntity(cleanup.entityId());
+            if (entity == null || !sameWorldAndChunk(entity.getLocation(), part.ownerLocation())) {
+                if (entity != null) {
+                    plugin.getLogger().warning("跳过跨 region 牌桌实体清理: " + cleanup.entityId());
+                }
+                continue;
+            }
+            if (ownedBy(entity, plan.owner())) {
+                entity.remove();
+            }
+        }
+        for (CleanupFurniture cleanup : part.furniture()) {
+            Entity root = Bukkit.getEntity(cleanup.rootId());
+            if (root == null || !sameWorldAndChunk(root.getLocation(), part.ownerLocation())) {
+                if (root != null) {
+                    plugin.getLogger().warning("跳过跨 region CE 家具清理: " + cleanup.rootId());
+                }
+                continue;
+            }
+            // CE 家具不写 MUZ owner PDC；root 是一个原子操作，passenger 树不跨 request 拆分。
+            plugin.getCraftEngineFurnitureService().removeFurniture(root);
+            forceRemoveEntityTree(root);
+        }
+        for (CleanupBlock cleanup : part.blocks()) {
+            cleanup.state().update(true, false);
+        }
+    }
+
+    private static boolean sameWorldAndChunk(Location left, Location right) {
+        return left != null && right != null
+            && left.getWorld() != null && right.getWorld() != null
+            && left.getWorld().getUID().equals(right.getWorld().getUID())
+            && (left.getBlockX() >> 4) == (right.getBlockX() >> 4)
+            && (left.getBlockZ() >> 4) == (right.getBlockZ() >> 4);
+    }
+
+    private CompletionStage<Void> submitCleanupPlan(CleanupPlan plan) {
+        List<RegionTaskBarrier.Request> requests = new ArrayList<>();
+        int index = 0;
+        for (CleanupRegionPart part : plan.parts()) {
+            String requestId = plan.tableKey() + "#cleanup-" + index++;
+            requests.add(new RegionTaskBarrier.Request(
+                requestId,
+                part.ownerLocation().clone(),
+                () -> executeCleanupRegion(plan, part)
+            ));
+        }
+        RegionTaskBarrier barrier;
+        try {
+            barrier = new RegionTaskBarrier(plugin.scheduler(), requests, 100L);
+            barrier.start();
+        } catch (Throwable failure) {
+            plugin.getLogger().warning("区块加载修复无法提交清理屏障: " + plan.tableKey() + "，原因=" + failure.getMessage());
+            return CompletableFuture.completedFuture(null);
+        }
+        return barrier.completion()
+            .thenCompose(result -> runGlobalStage(() -> validateCleanupBarrier(plan, result)))
+            .thenCompose(result -> finishCleanupPlan(plan, result));
+    }
+
+    private RegionTaskBarrier.Result validateCleanupBarrier(
+        CleanupPlan plan,
+        RegionTaskBarrier.Result result
+    ) {
+        if (result == null || result.status() != RegionTaskBarrier.Status.COMPLETED) {
+            return null;
+        }
+        if (!canRebuildCleanupPlan(plan)) {
+            plugin.getLogger().warning("区块加载修复屏障完成但状态已失效: " + plan.tableKey());
+            return null;
+        }
+        return result;
+    }
+
+    private CompletionStage<Void> finishCleanupPlan(CleanupPlan plan, RegionTaskBarrier.Result result) {
+        if (result == null || result.status() != RegionTaskBarrier.Status.COMPLETED) {
+            plugin.getLogger().warning("区块加载修复清理屏障失败: " + plan.tableKey()
+                + "，状态=" + (result == null ? "null" : result.status()));
+            return CompletableFuture.completedFuture(null);
+        }
+        return runRegionStage(plan.anchor(), () -> {
+            if (!canRebuildCleanupPlan(plan)) {
+                plugin.getLogger().warning("区块加载修复放弃重建: " + plan.tableKey()
+                    + "，桌实例/代次/区块状态已变化");
+                return;
+            }
+            if (canPurgeResidualForPlan(plan)) {
+                try {
+                    purgeResidualWorldArtifacts(plan.anchor().clone(), plan.yaw());
+                } catch (Throwable failure) {
+                    plugin.getLogger().warning("区块加载修复残留清理失败，不重建: " + plan.tableKey()
+                        + "，原因=" + failure.getMessage());
+                    return;
+                }
+            } else {
+                plugin.getLogger().warning("区块加载修复跳过残留扫描: " + plan.tableKey()
+                    + "，无法证明扫描范围属于同一 owner region");
+            }
+            PlacedTable rebuilt = spawnTable(
+                plan.table(),
+                plan.anchor().clone(),
+                plan.yaw(),
+                plan.owner().id(),
+                plan.owner().name()
+            );
+            rebuilt.seatAssignments().putAll(plan.seatAssignments());
+            putPlacedTable(plan.tableKey(), rebuilt);
+            notifyTableAnchorBinding(plan.table());
+            refresh(plan.table());
+        });
+    }
+
+    private boolean canRebuildCleanupPlan(CleanupPlan plan) {
+        synchronized (chunkLoadRepairQueued) {
+            return !plugin.isShuttingDown()
+                && cleanupEpochByTable.getOrDefault(plan.tableKey(), -1L) == plan.epoch()
+                && plugin.getTableManager().getTable(plan.tableKey()) == plan.table()
+                && placedTable(plan.tableKey()) == null
+                && isFootprintLoaded(plan.anchor(), plan.footprintChunkKeys());
+        }
+    }
+
+    private boolean canPurgeResidualForPlan(CleanupPlan plan) {
+        Location anchor = plan.anchor();
+        if (anchor == null || anchor.getWorld() == null) {
+            return false;
+        }
+        int anchorChunkX = anchor.getBlockX() >> 4;
+        int anchorChunkZ = anchor.getBlockZ() >> 4;
+        UUID worldId = anchor.getWorld().getUID();
+        for (CleanupRegionPart part : plan.parts()) {
+            Location owner = part.ownerLocation();
+            if (owner == null || owner.getWorld() == null
+                || !worldId.equals(owner.getWorld().getUID())
+                || owner.getBlockX() >> 4 != anchorChunkX
+                || owner.getBlockZ() >> 4 != anchorChunkZ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isFootprintLoaded(PlacedTable placed) {
+        return placed != null && isFootprintLoaded(placed.anchor(), placed.footprintChunkKeys());
+    }
+
+    private boolean isFootprintLoaded(Location anchor, List<Long> footprintChunkKeys) {
+        World world = anchor == null ? null : anchor.getWorld();
+        if (world == null || footprintChunkKeys == null) {
+            return false;
+        }
+        for (long packed : footprintChunkKeys) {
+            int chunkX = (int) (packed >> 32);
+            int chunkZ = (int) packed;
+            if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private <T> CompletionStage<T> runGlobalStage(Supplier<T> supplier) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        try {
+            var handle = plugin.scheduler().runGlobal(() -> {
+                try {
+                    result.complete(supplier.get());
+                } catch (Throwable failure) {
+                    result.completeExceptionally(failure);
+                }
+            });
+            if (handle == null || handle.isCancelled()) {
+                result.completeExceptionally(new IllegalStateException("global stage 注册失败"));
+            }
+        } catch (Throwable failure) {
+            result.completeExceptionally(failure);
+        }
+        return result;
+    }
+
+    private CompletionStage<Void> runRegionStage(Location owner, Runnable action) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        try {
+            var handle = plugin.scheduler().runRegion(owner.clone(), () -> {
+                try {
+                    action.run();
+                    result.complete(null);
+                } catch (Throwable failure) {
+                    result.completeExceptionally(failure);
+                }
+            });
+            if (handle == null || handle.isCancelled()) {
+                result.completeExceptionally(new IllegalStateException("anchor region stage 注册失败"));
+            }
+        } catch (Throwable failure) {
+            result.completeExceptionally(failure);
+        }
+        return result;
+    }
+
+    /**
+     * 与 {@link #runRegionStage} 同一范式，只是把返回值带回调用线程。
+     *
+     * <p>恢复存档牌桌要经它把世界体投到锚点 region，并把恢复出来的牌桌交还异步调用链；
+     * 句柄被取消时与 runRegionStage 同口径 completeExceptionally 并记日志，绝不静默吞掉。
+     */
+    private <T> CompletionStage<T> runRegionStageValue(Location owner, Supplier<T> supplier) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        try {
+            var handle = plugin.scheduler().runRegion(owner.clone(), () -> {
+                try {
+                    result.complete(supplier.get());
+                } catch (Throwable failure) {
+                    result.completeExceptionally(failure);
+                }
+            });
+            if (handle == null || handle.isCancelled()) {
+                result.completeExceptionally(new IllegalStateException("anchor region stage 注册失败"));
+            }
+        } catch (Throwable failure) {
+            result.completeExceptionally(failure);
+        }
+        return result;
+    }
+
+    private static <T> CompletionStage<T> failedStage(Throwable failure) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        result.completeExceptionally(failure);
+        return result;
+    }
+
+    private static long packedChunkKey(int chunkX, int chunkZ) {
+        return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
     }
 
     /**
@@ -894,21 +1819,59 @@ public final class PhysicalTableManager {
     }
 
     /**
-     * 重建前把牌桌锚点所在区块拉起来
-     * 区块未加载时 remove() 是空操作、spawn 出来的实体也留不住，
+     * 重建前确认牌桌锚点 3x3 区块已加载。**按核心类型（{@link #REGIONIZED}）分支**。
+     *
+     * <p>原契约（保留其意图）：区块未加载时 remove() 是空操作、spawn 出来的实体也留不住，
      * 直接重建会让整桌桌椅按钮凭空消失。
+     *
+     * <p><b>非区域化核心（Paper/Leaf）</b>：恢复原实现的阻塞强加载（{@code World#getChunkAt}）。
+     * 主线程允许同步加载区块，重建路径依赖「执行前锚点邻域已加载」这一保证，缺了它整桌实体就丢。
+     *
+     * <p><b>区域化核心（Folia）</b>：只读判断 + 未加载时告警。原实现用阻塞的
+     * {@code World#getChunkAt} 强拉区块，真实 Folia 上直接抛 {@code Async chunk retrieval}。
+     * 区块加载必须由异步侧（{@link #ensureChunkLoadedAsync} 或 ChunkLoad 事件接缝）完成，
+     * 若仍走到未加载分支，说明重建调用方漏了异步加载，属于流程缺陷，必须出声而不是静默半重建。
      * @param anchor 牌桌锚点
      */
     private void ensureAnchorChunkLoaded(Location anchor) {
         if (anchor == null || anchor.getWorld() == null) {
             return;
         }
-        for (long packed : anchorChunkKeys(anchor.getBlockX(), anchor.getBlockZ())) {
+        ensureAnchorChunkLoadedCore(anchor.getWorld(), anchor.getBlockX(), anchor.getBlockZ(), REGIONIZED,
+            message -> plugin.getLogger().warning(message));
+    }
+
+    /**
+     * 锚点 3x3 邻域预热的核心，**按核心类型分支**，且不依赖实例——便于以 fake World 做真实行为测试。
+     *
+     * <p>分支语义与 {@link #ensureAnchorChunkLoaded} 的文档一致：区域化核心对未加载区块只告警不拉取，
+     * 非区域化核心（Paper/Leaf）才允许同步强加载。{@code regionized} 由调用方从 {@link #REGIONIZED}
+     * 传入，绝不能在非区域化分支硬编码放行同步获取。
+     *
+     * @param world      牌桌锚点所在世界；null 直接返回
+     * @param blockX     锚点方块 X
+     * @param blockZ     锚点方块 Z
+     * @param regionized 当前核心是否区域化（Folia）
+     * @param warn       未加载告警出口，调用方负责落到服务器日志
+     */
+    static void ensureAnchorChunkLoadedCore(World world, int blockX, int blockZ, boolean regionized, Consumer<String> warn) {
+        if (world == null) {
+            return;
+        }
+        for (long packed : anchorChunkKeys(blockX, blockZ)) {
             int chunkX = (int) (packed >> 32);
             int chunkZ = (int) packed;
-            if (!anchor.getWorld().isChunkLoaded(chunkX, chunkZ)) {
-                anchor.getWorld().getChunkAt(chunkX, chunkZ);
+            if (world.isChunkLoaded(chunkX, chunkZ)) {
+                continue;
             }
+            if (regionized) {
+                // 区域化核心不能同步拉区块：Folia 上 world.getChunkAt(...) 在 region/主线程都非法且阻塞。
+                warn.accept("重建牌桌时锚点邻域区块未加载，本应已由异步加载保证: world="
+                    + world.getName() + " chunk=[" + chunkX + ", " + chunkZ + "]");
+                continue;
+            }
+            // 非区域化核心（Paper/Leaf）主线程可同步加载：重建前把锚点邻域强拉起来。
+            world.getChunkAt(chunkX, chunkZ);
         }
     }
 
@@ -932,119 +1895,611 @@ public final class PhysicalTableManager {
         return keys;
     }
 
-    public void rebuildAllTables() {
-        if (!canSafelyReplaceWorldVisuals()) {
+    /**
+     * 运行期索引使用的单桌 footprint。它与区块预加载使用同一份 3x3 计算，避免两边漂移。
+     * @param anchor 锚点
+     * @return 该桌覆盖的 3x3 区块键
+     */
+    private static List<Long> footprintChunkKeys(Location anchor) {
+        if (anchor == null) {
+            return List.of();
+        }
+        return anchorChunkKeys(anchor.getBlockX(), anchor.getBlockZ());
+    }
+
+    private void indexPlacedTable(String tableKey, PlacedTable placed) {
+        if (tableKey == null || placed == null) {
             return;
+        }
+        unindexPlacedTable(tableKey, placed);
+        Set<ChunkOwnerKey> footprint = new LinkedHashSet<>();
+        UUID worldId = placed.anchor().getWorld() == null ? null : placed.anchor().getWorld().getUID();
+        for (long chunkKey : placed.footprintChunkKeys()) {
+            ChunkOwnerKey ownerKey = new ChunkOwnerKey(worldId, chunkKey);
+            tableNamesByFootprintChunk.computeIfAbsent(ownerKey, ignored -> new LinkedHashSet<>()).add(tableKey);
+            footprint.add(ownerKey);
+        }
+        footprintChunksByTable.put(tableKey, footprint);
+        reindexPlacedTableEntities(tableKey, placed);
+    }
+
+    private void unindexPlacedTable(String tableKey, PlacedTable placed) {
+        if (tableKey == null) {
+            return;
+        }
+        Set<ChunkOwnerKey> footprint = footprintChunksByTable.remove(tableKey);
+        if (footprint != null) {
+            for (ChunkOwnerKey ownerKey : footprint) {
+                Set<String> names = tableNamesByFootprintChunk.get(ownerKey);
+                if (names == null) {
+                    continue;
+                }
+                names.remove(tableKey);
+                if (names.isEmpty()) {
+                    tableNamesByFootprintChunk.remove(ownerKey);
+                }
+            }
+        }
+        Set<UUID> entityIds = indexedEntityIdsByTable.remove(tableKey);
+        if (entityIds != null) {
+            for (UUID entityId : entityIds) {
+                TableOwner owner = trackedEntityOwnersById.get(entityId);
+                if (owner != null && tableKey.equals(owner.tableName())) {
+                    trackedEntityOwnersById.remove(entityId);
+                }
+            }
+        }
+    }
+
+    private void reindexPlacedTableEntities(String tableKey, PlacedTable placed) {
+        Set<UUID> current = new LinkedHashSet<>();
+        collectEntityIds(current, placed.staticEntities());
+        collectEntityIds(current, placed.craftEngineVisualEntities());
+        collectEntityIds(current, placed.actionEntities());
+        collectEntityIds(current, placed.seatNameDisplayIds());
+        collectEntityIds(current, placed.seatInfoDisplayIds());
+        collectEntityBuckets(current, placed.privateEntitiesByPlayer().values());
+        collectEntityBuckets(current, placed.backsideEntitiesByPlayer().values());
+        if (placed.statusDisplayId() != null) {
+            current.add(placed.statusDisplayId());
+        }
+        if (placed.playDetailDisplayId() != null) {
+            current.add(placed.playDetailDisplayId());
+        }
+        Set<UUID> previous = indexedEntityIdsByTable.put(tableKey, current);
+        if (previous != null) {
+            for (UUID entityId : previous) {
+                if (!current.contains(entityId)) {
+                    TableOwner owner = trackedEntityOwnersById.get(entityId);
+                    if (owner != null && tableKey.equals(owner.tableName())) {
+                        trackedEntityOwnersById.remove(entityId);
+                    }
+                }
+            }
+        }
+        for (UUID entityId : current) {
+            trackedEntityOwnersById.put(entityId, placed.owner());
+        }
+    }
+
+    private static void collectEntityIds(Set<UUID> target, Collection<UUID> ids) {
+        if (ids == null) {
+            return;
+        }
+        for (UUID id : ids) {
+            if (id != null) {
+                target.add(id);
+            }
+        }
+    }
+
+    private static void collectEntityBuckets(Set<UUID> target, Collection<? extends Collection<UUID>> buckets) {
+        if (buckets == null) {
+            return;
+        }
+        for (Collection<UUID> bucket : buckets) {
+            collectEntityIds(target, bucket);
+        }
+    }
+
+    private void putPlacedTable(String tableKey, PlacedTable placed) {
+        PlacedTable previous = placedTables.put(tableKey, placed);
+        if (previous != null) {
+            unindexPlacedTable(tableKey, previous);
+        }
+        indexPlacedTable(tableKey, placed);
+    }
+
+    private void clearPlacedTableIndexes() {
+        tableNamesByFootprintChunk.clear();
+        footprintChunksByTable.clear();
+        trackedEntityOwnersById.clear();
+        indexedEntityIdsByTable.clear();
+    }
+
+    /**
+     * 重建全部已放置牌桌（reload 与启动视觉预热）。
+     *
+     * <p>【为什么改成异步流水线】真实 Folia 上「同步拉区块」与「在调用线程动实体」都会抛异常
+     * （{@code Async chunk retrieval} / {@code No currently ticking region}），原地重建会整批失败。
+     * 现在每张桌都走同一条固定顺序的 lane 流水线（见 {@link #runSingleRebuild}）：
+     * 调用 lane 冻结快照并打上在飞标记 → 异步加载新旧锚点 footprint → 旧锚点 region 清旧实体 →
+     * 新锚点 region 扫残留并生成新桌 → global 收口写入索引与 owner 重绑 → 锚点 region 刷新世界体。
+     *
+     * <p>【旧状态必须活到收口成功】这里**不再**提前 {@code placedTables.clear()} / 摘索引 /
+     * {@code markTableUnplaced}：旧放置快照与索引会一直保留，直到 global 收口把新桌写进同一张 Map。
+     * 理由见 {@link #rebuildingTableKeys}——提前清空会开出一个"这张桌不存在"的秒级窗口，窗口内
+     * {@code TableManager.cleanupIfEmpty} 会把空桌注销（永久丢桌），重建失败也会连旧桌一起丢。
+     *
+     * <p>【非并发 Map 的写入边界】{@code placedTables} / footprint 索引 / 实体索引都是非并发
+     * LinkedHashMap，本重建流水线**自身**的收口写入只发生在调用 lane 与 global 收口步骤；
+     * region 回调只读 {@link RebuildRequest} 里的冻结快照，并把新建出来的 {@code PlacedTable} 当返回值交回。
+     * 注意这只描述重建流水线自己的边界：既有的 owner tick / 交互路径（{@code refresh}、{@code tickTable}
+     * 等）仍会在各自 owner lane 上读写同一批非并发 Map，尚未统一并发边界（见 {@link #rebuildingTableKeys}
+     * 的世界体门禁如何把重建窗口从这些路径里隔出去）。统一迁移不做，属待偿技术债。
+     *
+     * @return 整批（含每桌刷新）走完后完成的 stage；单桌失败只记录日志并继续后面的桌，
+     *         不会把整批打断，也不会把失败桌伪装成已重建。
+     */
+    public CompletionStage<Void> rebuildAllTables() {
+        if (!canSafelyReplaceWorldVisuals()) {
+            return CompletableFuture.completedFuture(null);
         }
         // 重新武装遮挡告警：本方法在每次 /muz reload 时都会跑，而告警判据读的全是配置。
         // 不重置的话，服主改完 hand-center.distance 或 button-layout 再重载，
         // 新配置下的遮挡永远不会被报出来——那正是最需要这条告警的时刻。
         capturerOcclusionWarned = false;
-        Map<String, PlacedTable> snapshot = new LinkedHashMap<>(placedTables);
-        placedTables.clear();
-        for (Map.Entry<String, PlacedTable> entry : snapshot.entrySet()) {
-            PlacedTable previous = entry.getValue();
-            // 区块没加载时旧实体删不掉、新实体也建不出来，重建等于把整桌实体丢光。
-            // 先把锚点区块拉起来再动手。
-            ensureAnchorChunkLoaded(previous.anchor());
-            cleanupPlacedTable(previous);
-            // HARD-CODED REBUILD SAFETY:
-            // Startup warmup can rebuild the same persisted tables multiple times.
-            // If any old chair/table visual survives tracked cleanup, the next rebuild would stack another copy on top.
-            // Always purge anchor-side residual world artifacts before respawning the rebuilt table.
-            purgeResidualWorldArtifacts(previous.anchor(), previous.yaw());
-            GameTable table = plugin.getTableManager().getTable(previous.tableName());
-            if (table == null) {
-                continue;
+        List<String> tableKeys = new ArrayList<>(placedTables.keySet());
+        List<RebuildRequest> requests = new ArrayList<>(tableKeys.size());
+        for (String tableKey : tableKeys) {
+            RebuildRequest request = captureSingleRebuild(tableKey, 0.0);
+            if (request != null) {
+                requests.add(request);
             }
-            PlacedTable rebuilt = spawnTable(table, previous.anchor().clone(), previous.yaw(), previous.ownerId(), previous.ownerName());
-            rebuilt.seatAssignments().putAll(previous.seatAssignments());
-            placedTables.put(entry.getKey(), rebuilt);
-            refresh(table);
-            // 重建后补一次显式恢复。重建换了一批椅子实体，理论上新实体没有历史隐藏状态，
-            // 这一步偏兜底；真正需要它的是 syncViewer 那条（在线玩家身上的旧隐藏状态）。
-            // 放在这里而不是刷新链路里，是因为恢复只需要一次：
-            // 挂在 syncActionWidgets 上会变成每次出牌都重发判定框，把坐着的玩家挤开。
-            // 这里传全场：重建换了全新的椅子实体，坐着的玩家已经被掀下来，
-            // 不存在"把人挤开"的问题，而新实体本就需要让所有人都看见。
-            restoreOccupiedChairHitboxVisibility(rebuilt, rebuilt.anchor().getWorld().getPlayers());
         }
+        // 重建后补一次显式恢复。重建换了一批椅子实体，理论上新实体没有历史隐藏状态，
+        // 这一步偏兜底；真正需要它的是 syncViewer 那条（在线玩家身上的旧隐藏状态）。
+        // 放在这里而不是刷新链路里，是因为恢复只需要一次：
+        // 挂在 syncActionWidgets 上会变成每次出牌都重发判定框，把坐着的玩家挤开。
+        // 这里传全场：重建换了全新的椅子实体，坐着的玩家已经被掀下来，
+        // 不存在"把人挤开"的问题，而新实体本就需要让所有人都看见。
+        return runRebuildBatch(requests,
+            rebuilt -> restoreOccupiedChairHitboxVisibility(rebuilt, onlinePlayerIdsSnapshot()));
     }
 
-    public void repairIncompleteTables(String reason) {
-        // 桌名和诊断原因分开存。以前只存 "桌名(原因)" 一串，重建时拿它去查表必然查不到，
-        // 结果桌子被摘掉却没重建回来，表现就是桌椅整套凭空消失。
+    /**
+     * 扫描并重建不完整桌。
+     *
+     * <p>【为什么先切回 global】扫描会遍历并改写 {@code placedTables}，必须与重建流水线里
+     * 写同一批非并发 Map 的收口步骤落在同一条 lane 上，因此整段扫描作为 global stage 执行。
+     * 现在返回 stage，调用方可以在 {@code rebuildAllTables()} 之后串接它，避免在旧实体已被清掉、
+     * 新桌尚未生成时扫出一整批"不完整桌"。
+     */
+    public CompletionStage<Void> repairIncompleteTables(String reason) {
+        return runGlobalStage(() -> captureIncompleteRebuildRequests(reason))
+            .thenCompose(requests -> {
+                if (requests == null || requests.isEmpty()) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                return runRebuildBatch(requests, null);
+            });
+    }
+
+    /**
+     * 在调用 lane（global）上扫描不完整桌并冻结重建请求。
+     *
+     * <p>桌名和诊断原因分开存。以前只存 "桌名(原因)" 一串，重建时拿它去查表必然查不到，
+     * 结果桌子被摘掉却没重建回来，表现就是桌椅整套凭空消失。
+     *
+     * <p>先只读扫描出桌名，再逐个摘除：直接在 {@code placedTables} 上边遍历边摘会抛
+     * {@code ConcurrentModificationException}。
+     */
+    private List<RebuildRequest> captureIncompleteRebuildRequests(String reason) {
         List<String> targets = new ArrayList<>();
         List<String> logEntries = new ArrayList<>();
-        for (PlacedTable placed : placedTables.values()) {
+        for (Map.Entry<String, PlacedTable> entry : placedTables.entrySet()) {
+            PlacedTable placed = entry.getValue();
             if (placed == null) {
                 continue;
             }
             if (isIncomplete(placed)) {
-                targets.add(placed.tableName());
+                targets.add(entry.getKey());
                 logEntries.add(placed.tableName() + "(" + incompleteReason(placed) + ")");
             }
         }
         if (targets.isEmpty()) {
-            return;
+            return List.of();
         }
         if (reason != null && reason.startsWith("viewer-")) {
             plugin.getLogger().fine("[MUZ/repair/ddz] reason=" + reason + " tables=" + logEntries);
         } else {
             plugin.getLogger().warning("[MUZ/repair/ddz] reason=" + reason + " tables=" + logEntries);
         }
-        for (String tableName : targets) {
-            rebuildSingleTable(tableName);
-        }
-    }
-
-    public void shiftAllAnchors(double deltaY) {
-        if (Math.abs(deltaY) < 0.0001) {
-            return;
-        }
-        if (!canSafelyReplaceWorldVisuals()) {
-            return;
-        }
-        Map<String, PlacedTable> snapshot = new LinkedHashMap<>(placedTables);
-        placedTables.clear();
-        for (Map.Entry<String, PlacedTable> entry : snapshot.entrySet()) {
-            PlacedTable previous = entry.getValue();
-            ensureAnchorChunkLoaded(previous.anchor());
-            cleanupPlacedTable(previous);
-            purgeResidualWorldArtifacts(previous.anchor().clone().add(0.0, deltaY, 0.0), previous.yaw());
-            GameTable table = plugin.getTableManager().getTable(previous.tableName());
-            if (table == null) {
-                continue;
+        List<RebuildRequest> requests = new ArrayList<>(targets.size());
+        for (String tableKey : targets) {
+            RebuildRequest request = captureSingleRebuild(tableKey, 0.0);
+            if (request != null) {
+                requests.add(request);
             }
-            PlacedTable rebuilt = spawnTable(table, previous.anchor().clone().add(0.0, deltaY, 0.0), previous.yaw(), previous.ownerId(), previous.ownerName());
-            rebuilt.seatAssignments().putAll(previous.seatAssignments());
-            placedTables.put(entry.getKey(), rebuilt);
-            refresh(table);
+        }
+        return requests;
+    }
+
+    /**
+     * 把所有已放置牌的锚点整体上下位移后重建（管理菜单改 {@code table.spawn-offset-y} 时使用）。
+     *
+     * <p>位移会同时改变锚点，因此清旧实体必须投**旧锚点** region、生成新桌投**新锚点** region：
+     * 两者可能不在同一 region，在新锚点线程上清旧实体在 Folia 上非法。
+     *
+     * <p>与 {@link #rebuildAllTables()} 同样**不提前摘除**旧 {@code PlacedTable} / 索引，旧状态活到收口提交；
+     * owner 周期任务也仍绑在旧锚点 region，直到收口时 {@code notifyTableAnchorBinding} 重绑到新锚点。
+     */
+    public CompletionStage<Void> shiftAllAnchors(double deltaY) {
+        if (Math.abs(deltaY) < 0.0001) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!canSafelyReplaceWorldVisuals()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<String> tableKeys = new ArrayList<>(placedTables.keySet());
+        List<RebuildRequest> requests = new ArrayList<>(tableKeys.size());
+        for (String tableKey : tableKeys) {
+            RebuildRequest request = captureSingleRebuild(tableKey, deltaY);
+            if (request != null) {
+                requests.add(request);
+            }
+        }
+        return runRebuildBatch(requests, null);
+    }
+
+    /**
+     * 重建单张桌。
+     *
+     * @return 该桌重建流水线走完后完成的 stage；找不到旧桌时返回已完成 stage 并记录告警
+     */
+    private CompletionStage<Void> rebuildSingleTable(String tableName) {
+        if (!canSafelyReplaceWorldVisuals()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        RebuildRequest request = captureSingleRebuild(normalize(tableName), 0.0);
+        if (request == null) {
+            // 查不到就说明调用方传错了名字（或该桌已有一条重建在飞）。静默返回会让桌子被摘掉却建不回来，
+            // 这里必须出声。
+            plugin.getLogger().warning("[MUZ/repair/ddz] 重建失败，找不到已放置的牌桌（或该桌重建已在飞行中）: " + tableName);
+            return CompletableFuture.completedFuture(null);
+        }
+        return runRebuildBatch(List.of(request), null);
+    }
+
+    /**
+     * 在调用 lane 上冻结一张桌的重建参数，并在 {@link #rebuildingTableKeys} 里打上在飞标记。
+     *
+     * <p>【为什么不摘旧状态】旧 {@code PlacedTable} 与三份索引都保持原样，直到 global 收口把新桌写进
+     * 同一张 Map。调用方（{@code rebuildAllTables} / {@code shiftAllAnchors} / 单桌修复）不再提前
+     * {@code remove} / {@code clear} / {@code markTableUnplaced}。
+     *
+     * <p>【互斥改由标记承担】旧逻辑靠"先摘除再重建"提供同桌天然互斥；既然不动旧状态，就靠标记：
+     * 同桌已有流水线在飞时第二次重建直接返回 null，不可能出现两条流水线同时提交同一张桌。
+     *
+     * @param deltaY 新锚点相对旧锚点的 Y 位移（非位移场景传 0）
+     * @return 冻结好的请求；该桌当前未放置或已有重建在飞时返回 null
+     */
+    private RebuildRequest captureSingleRebuild(String tableKey, double deltaY) {
+        if (tableKey == null) {
+            return null;
+        }
+        PlacedTable previous = placedTables.get(tableKey);
+        if (previous == null) {
+            return null;
+        }
+        if (!rebuildingTableKeys.add(tableKey)) {
+            // 该桌已有一条重建流水线在飞：让出，迟到结果不得把两条流水线交错提交。
+            plugin.getLogger().fine("[MUZ/repair/ddz] 该桌重建已在飞行中，跳过重复派发: " + previous.tableName());
+            return null;
+        }
+        return freezeRebuildRequest(
+            tableKey,
+            previous,
+            previous.anchor().clone().add(0.0, deltaY, 0.0)
+        );
+    }
+
+    /**
+     * 冻结一次单桌重建的参数快照。
+     *
+     * <p>快照只携带值（旧桌、旧/新锚点、座位归属与目标桌实例），这样后面的 region 回调完全不必
+     * 回头读 {@code placedTables} / footprint 索引 / 实体索引，也就不存在跨 lane 读写非并发 Map
+     * 的问题。座位归属做浅拷贝：旧 {@code PlacedTable} 之后没人再引用它，不需要深拷贝开销。
+     */
+    private RebuildRequest freezeRebuildRequest(String tableKey, PlacedTable previous, Location newAnchor) {
+        return new RebuildRequest(
+            tableKey,
+            previous.tableName(),
+            previous,
+            previous.anchor().clone(),
+            newAnchor.clone(),
+            previous.yaw(),
+            previous.ownerId(),
+            previous.ownerName(),
+            new LinkedHashMap<>(previous.seatAssignments()),
+            plugin.getTableManager().getTable(previous.tableName())
+        );
+    }
+
+    /**
+     * 顺序执行一批已冻结的单桌重建请求。
+     *
+     * <p>【为什么必须顺序化】{@code placedTables} 与 footprint/实体索引都是非并发 Map，而
+     * {@code refresh}（读）与收口步骤（写）都会碰它们。若 N 张桌并行推进，多个 region 回调与
+     * global 收口会并发读写同一批 LinkedHashMap，轻则丢索引、重则遍历时死循环。因此这里用
+     * {@code thenCompose} 把每张桌的完整流水线首尾相接：任一时刻只有一个 lane 在推进。
+     *
+     * <p>单桌失败只记录日志并继续后面的桌——丢一整批比丢一张更糟。失败桌保持"未放置"状态，
+     * 等下一次重建或修复，绝不会被当成已重建。
+     *
+     * @param requests     调用 lane 已完成摘除与索引清理的冻结请求
+     * @param afterRefresh 每桌刷新后在锚点 region 内执行的一次性收尾（可为 null）
+     */
+    private CompletionStage<Void> runRebuildBatch(List<RebuildRequest> requests, Consumer<PlacedTable> afterRefresh) {
+        if (requests == null || requests.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletionStage<Void> chain = CompletableFuture.completedFuture(null);
+        for (RebuildRequest request : requests) {
+            chain = chain.thenCompose(ignored -> runSingleRebuild(request, afterRefresh)
+                .exceptionally(failure -> {
+                    plugin.getLogger().warning("牌桌异步重建失败: " + request.tableName()
+                        + "，原因=" + failure.getMessage());
+                    return null;
+                }));
+        }
+        return chain;
+    }
+
+    /**
+     * 单桌重建流水线：加载 → 清旧 → 生成新 → 收口索引 → 刷新世界体。
+     *
+     * <p>lane 分配遵循两条硬约束：
+     * <ul>
+     *   <li><b>先加载再动世界</b>：区块没加载时旧实体删不掉、新实体也建不出来，重建等于把整桌
+     *       实体丢光。因此旧锚点 footprint（清旧实体前）与新锚点 footprint（生成前）都必须先就绪。</li>
+     *   <li><b>清旧实体投旧锚点、生成投新锚点</b>：{@code shiftAllAnchors} 会改变锚点，跨 region 时
+     *       在新锚点线程上清旧实体非法。</li>
+     * </ul>
+     * 失败或关闭时流水线会提前退出，绝不在未完成状态下提交索引（见 {@link #commitRebuiltTable}）。
+     *
+     * <p>【闸门必须前移到 spawn 之前】身份/关闭/放置代次检查在这里先做一次：spawn 之后才发现不能提交，
+     * 会留下一批既无 owner 也无索引的孤儿实体与方块（只有真实世界里的残留，没有任何登记可以再找到它）。
+     * 收口阶段仍会再查一次（并发拆桌、关闭可能发生在这两步之间）；那一次若拦下，新生成的桌子必须投回
+     * **它自己的新锚点 region** 清理（{@link #dispatchRebuildCleanupOnOwnerRegion}），不能在 global
+     * 或旧锚点 region 上删新锚点侧的实体。
+     */
+    private CompletionStage<Void> runSingleRebuild(RebuildRequest request, Consumer<PlacedTable> afterRefresh) {
+        Location oldAnchor = request.oldAnchor();
+        Location newAnchor = request.newAnchor();
+        CompletionStage<Void> loads = footprintLoadsForRebuild(oldAnchor, newAnchor);
+        // 旧锚点 region：只清旧实体与旧锚点侧的残留。
+        CompletionStage<Void> cleaned = dispatchOwnerRegionAfter(
+            loads,
+            oldAnchor,
+            () -> cleanupPlacedTable(request.previous())
+        );
+        // 新锚点 region：闸门通过后才扫新锚点残留并生成新桌；region 回调只读冻结快照，返回构建结果。
+        CompletionStage<PlacedTable> rebuilt = dispatchOwnerRegionValueAfter(
+            cleaned,
+            newAnchor,
+            () -> {
+                String rejection = rebuildGateRejection(request);
+                if (rejection != null) {
+                    plugin.getLogger().warning("牌桌重建前置闸门拦下，不再生成新桌: "
+                        + request.tableName() + "，原因=" + rejection);
+                    return null;
+                }
+                return rebuildTableOnOwnerRegion(request);
+            }
+        );
+        CompletionStage<Void> committed = rebuilt.thenCompose(value -> {
+            if (value == null) {
+                // 前置闸门或 spawn 自身已放弃：没有任何新世界体需要收口或清理。
+                return CompletableFuture.completedFuture(null);
+            }
+            return runGlobalStage(() -> {
+                    // 收口 throw 也必须走同一条收尾：不能让 thenCompose 的失败分支绕过孤儿清理。
+                    try {
+                        return commitRebuiltTable(request, value);
+                    } catch (RuntimeException | Error failure) {
+                        plugin.getLogger().warning("牌桌重建收口异常: " + request.tableName()
+                            + "，原因=" + failure.getMessage());
+                        return null;
+                    }
+                })
+                .thenCompose(committedTable -> {
+                    if (committedTable != null) {
+                        // 新锚点 region：刷新世界体（状态/座位/按钮/手牌）与一次性收尾。刷新会碰实体，
+                        // 必须留在锚点 region，不能在 global 收口线程上做。
+                        return runRegionStage(newAnchor,
+                            () -> refreshRebuiltTableOnOwnerRegion(request, committedTable, afterRefresh));
+                    }
+                    // 已生成但收口没通过：新实体必须投回它自己的锚点 region 清理。
+                    return dispatchRebuildCleanupOnOwnerRegion(
+                        newAnchor,
+                        request.tableName(),
+                        () -> cleanupPlacedTable(value)
+                    );
+                });
+        });
+        // 无论成功、被闸门拒绝还是异常，都必须撤掉在飞标记，否则该桌永远无法再次重建。
+        return committed.whenComplete((ignored, failure) ->
+            rebuildingTableKeys.remove(request.tableKey()));
+    }
+
+    /**
+     * 重建的身份/关闭/放置代次闸门，前置与收口共用同一份判据。
+     *
+     * <p>用「拒绝原因」而不是布尔，是为了让两处调用点各自记日志时还能保留原来那条区分度高的信息
+     * （关闭 / 实例已注销 / 放置状态被改写），同时保证两处判据不会漂移。
+     *
+     * @return 通过时返回 {@code null}，否则返回拒绝原因
+     */
+    private String rebuildGateRejection(RebuildRequest request) {
+        if (plugin.isShuttingDown()) {
+            return "插件正在关闭";
+        }
+        GameTable current = plugin.getTableManager().getTable(request.tableName());
+        if (current == null || current != request.table()) {
+            return "牌桌实例已注销或已替换";
+        }
+        if (placedTables.get(request.tableKey()) != request.previous()) {
+            // 放置状态已不是冻结时那一份：期间被拆桌或另一条清理路径改过，收口不得再复活它。
+            return "牌桌放置状态已被其它路径改写";
+        }
+        return null;
+    }
+
+    /**
+     * 清理"已生成但收口没通过"的重建新桌，**必须**投到该桌自己的锚点 region。
+     *
+     * <p>抽成包内可见接缝是为了让「闸门拒绝后清理 stage 真实执行、且不在错误 region」这条能用记录型
+     * 调度后端做行为级验证（见 {@code RebuildPipelineLaneOrderBehaviorTest}）。
+     */
+    CompletionStage<Void> dispatchRebuildCleanupOnOwnerRegion(
+        Location ownerAnchor,
+        String tableName,
+        Runnable cleanupBody
+    ) {
+        plugin.getLogger().warning("牌桌重建已生成但无法提交，清理新实体: " + tableName);
+        return runRegionStage(ownerAnchor, cleanupBody).exceptionally(failure -> {
+            plugin.getLogger().warning("未能提交的重建清理失败: " + tableName
+                + "，原因=" + failure.getMessage());
+            return null;
+        });
+    }
+
+    /**
+     * 一次重建需要先加载的 footprint：旧锚点（清旧实体前）与新锚点（生成前）。
+     * 两个锚点落在同一区块时只加载一份，避免对同一批区块重复发起异步加载。
+     */
+    private CompletionStage<Void> footprintLoadsForRebuild(Location oldAnchor, Location newAnchor) {
+        CompletionStage<Void> loads = ensureFootprintLoadedAsync(oldAnchor);
+        if (sameAnchorChunk(oldAnchor, newAnchor)) {
+            return loads;
+        }
+        return loads.thenCompose(ignored -> ensureFootprintLoadedAsync(newAnchor));
+    }
+
+    /**
+     * 把世界体投到目标锚点 region，且**必须**等给定前置 stage 完成之后才投递。
+     *
+     * <p>抽成包内可见接缝是为了让「异步加载先于 owner region 世界体」这条顺序能用 fake World +
+     * 记录型调度后端做**行为级**验证（见 {@code RebuildPipelineLaneOrderBehaviorTest}），
+     * 而不是只对源码做字符串匹配；生产重建流水线的每一步都经它串联。
+     */
+    CompletionStage<Void> dispatchOwnerRegionAfter(
+        CompletionStage<?> prerequisite,
+        Location ownerAnchor,
+        Runnable worldBody
+    ) {
+        return prerequisite.thenCompose(ignored -> runRegionStage(ownerAnchor, worldBody));
+    }
+
+    /**
+     * {@link #dispatchOwnerRegionAfter} 的带返回值版本，用于需要把构建结果交回调用 chain 的步骤。
+     */
+    <T> CompletionStage<T> dispatchOwnerRegionValueAfter(
+        CompletionStage<?> prerequisite,
+        Location ownerAnchor,
+        Supplier<T> worldBody
+    ) {
+        return prerequisite.thenCompose(ignored -> runRegionStageValue(ownerAnchor, worldBody));
+    }
+
+    /**
+     * 单桌重建的世界体，只能在目标锚点 region 内调用。
+     *
+     * <p>先扫新锚点残留：启动预热可能对同一批持久化桌连续重建多次，旧椅子/桌子若有一次躲过
+     * 追踪清理，下一次重建就会在它上面再叠一层。
+     */
+    private PlacedTable rebuildTableOnOwnerRegion(RebuildRequest request) {
+        if (plugin.isShuttingDown()) {
+            // 关闭中不得再生成新实体：迟到的流水线只能放弃，不能留下无人清理的世界残留。
+            return null;
+        }
+        // HARD-CODED REBUILD SAFETY:
+        // Startup warmup can rebuild the same persisted tables multiple times.
+        // If any old chair/table visual survives tracked cleanup, the next rebuild would stack another copy on top.
+        // Always purge anchor-side residual world artifacts before respawning the rebuilt table.
+        purgeResidualWorldArtifacts(request.newAnchor().clone(), request.yaw());
+        GameTable table = request.table();
+        if (table == null) {
+            return null;
+        }
+        PlacedTable rebuilt = spawnTable(
+            table,
+            request.newAnchor().clone(),
+            request.yaw(),
+            request.ownerId(),
+            request.ownerName()
+        );
+        rebuilt.seatAssignments().putAll(request.seatAssignments());
+        return rebuilt;
+    }
+
+    /**
+     * 在 global 收口 lane 上提交重建结果：写入 {@code placedTables} 与 footprint/实体索引，
+     * 并重绑 owner 周期任务。region 回调不得写这些非并发结构，所有写入都在这里一次完成。
+     *
+     * <p>闸门与 spawn 前那次是同一份判据（见 {@link #rebuildGateRejection}）：关闭、桌实例被注销/替换、
+     * 放置状态被别的路径改写，都不得再提交——迟到的重建结果绝不能复活一张已经被移除的牌桌。闸门在
+     * 收口才拦下意味着新桌**已经生成**，调用方必须据此做锚点 region 清理，不能只把结果丢掉。
+     *
+     * @return 提交成功时返回新桌，被闸门拦下时返回 null
+     */
+    private PlacedTable commitRebuiltTable(RebuildRequest request, PlacedTable rebuilt) {
+        if (rebuilt == null) {
+            return null;
+        }
+        String rejection = rebuildGateRejection(request);
+        if (rejection != null) {
+            plugin.getLogger().warning("放弃提交牌桌重建结果: " + request.tableName() + "，原因=" + rejection);
+            return null;
+        }
+        putPlacedTable(request.tableKey(), rebuilt);
+        notifyTableAnchorBinding(request.table());
+        return rebuilt;
+    }
+
+    /**
+     * 提交成功后的锚点 region 刷新：世界体渲染与一次性收尾都留在这里做。
+     * 收口被闸门拦下（{@code committedTable == null}）时整体跳过，避免对着不存在的桌子刷新。
+     */
+    private void refreshRebuiltTableOnOwnerRegion(
+        RebuildRequest request,
+        PlacedTable committedTable,
+        Consumer<PlacedTable> afterRefresh
+    ) {
+        if (committedTable == null) {
+            return;
+        }
+        // 这里拿的就是刚收口提交的新桌，**不走** world-body 门禁（标记此刻还在），否则重建后永远不会刷新。
+        refreshWith(request.table(), committedTable);
+        if (afterRefresh != null) {
+            afterRefresh.accept(committedTable);
         }
     }
 
-    private void rebuildSingleTable(String tableName) {
-        if (!canSafelyReplaceWorldVisuals()) {
-            return;
+    /** 两个锚点是否落在同一世界的同一区块（用于省掉重复的 footprint 异步加载）。 */
+    private static boolean sameAnchorChunk(Location left, Location right) {
+        if (left == null || right == null) {
+            return false;
         }
-        String key = normalize(tableName);
-        PlacedTable previous = placedTables.remove(key);
-        if (previous == null) {
-            // 查不到就说明调用方传错了名字。静默返回会让桌子被摘掉却建不回来，这里必须出声。
-            plugin.getLogger().warning("[MUZ/repair/ddz] 重建失败，找不到已放置的牌桌: " + tableName);
-            return;
+        World leftWorld = left.getWorld();
+        World rightWorld = right.getWorld();
+        if (leftWorld == null || rightWorld == null) {
+            return false;
         }
-        ensureAnchorChunkLoaded(previous.anchor());
-        cleanupPlacedTable(previous);
-        purgeResidualWorldArtifacts(previous.anchor(), previous.yaw());
-        GameTable table = plugin.getTableManager().getTable(previous.tableName());
-        if (table == null) {
-            return;
-        }
-        PlacedTable rebuilt = spawnTable(table, previous.anchor().clone(), previous.yaw(), previous.ownerId(), previous.ownerName());
-        rebuilt.seatAssignments().putAll(previous.seatAssignments());
-        placedTables.put(key, rebuilt);
-        refresh(table);
+        return leftWorld.getUID().equals(rightWorld.getUID())
+            && (left.getBlockX() >> 4) == (right.getBlockX() >> 4)
+            && (left.getBlockZ() >> 4) == (right.getBlockZ() >> 4);
     }
 
     private boolean isIncomplete(PlacedTable placed) {
@@ -1082,8 +2537,21 @@ public final class PhysicalTableManager {
         if (table == null) {
             return;
         }
-        PlacedTable placed = placedTable(table.getName());
+        PlacedTable placed = placedTableForWorldBody(table.getName());
         if (placed == null) {
+            return;
+        }
+        refreshWith(table, placed);
+    }
+
+    /**
+     * 刷新世界体的实体部分，直接消费已确定的 {@code PlacedTable}。
+     *
+     * <p>拆出这一层，是为了让重建流水线收尾的那次刷新能拿**刚提交的新桌**直接刷新，
+     * 而不必走 {@link #placedTableForWorldBody} 的在飞门禁（重建标记要到整条链结束才撤）。
+     */
+    private void refreshWith(GameTable table, PlacedTable placed) {
+        if (table == null || placed == null) {
             return;
         }
         reconcileSeatAssignments(table, placed);
@@ -1092,6 +2560,7 @@ public final class PhysicalTableManager {
         refreshSeatInfos(table, placed);
         refreshActionButtons(table, placed);
         refreshPrivateHands(table, placed);
+        reindexPlacedTableEntities(normalize(placed.tableName()), placed);
         plugin.persistDoudizhuTable(table.getName(), table.getRoomLevel(), placed.anchor(), placed.yaw(), placed.ownerId(), placed.ownerName());
     }
 
@@ -1099,16 +2568,60 @@ public final class PhysicalTableManager {
         if (table == null) {
             return;
         }
-        PlacedTable placed = placedTable(table.getName());
+        PlacedTable placed = placedTableForWorldBody(table.getName());
         if (placed == null) {
             return;
         }
         renderPrivateHand(table, placed, playerId);
+        reindexPlacedTableEntities(normalize(placed.tableName()), placed);
     }
 
     public Location tableAnchor(String tableName) {
         PlacedTable placed = placedTable(tableName);
         return placed == null ? null : placed.anchor().clone();
+    }
+
+    /** 放置状态变化后通知逻辑桌周期注册表选择正确的调度 lane。 */
+    private void notifyTableAnchorBinding(GameTable table) {
+        if (table == null) {
+            return;
+        }
+        if (!plugin.getTableManager().rebindTablePeriodicTask(table, tableAnchor(table.getName()))) {
+            throw new IllegalStateException("牌桌周期任务未重绑定，桌实例可能已注销: " + table.getName());
+        }
+    }
+
+    private void rollbackPlacedTableAfterPlacementFailure(
+        String tableKey,
+        GameTable table,
+        boolean newlyCreated,
+        Throwable failure
+    ) {
+        PlacedTable placed = removePlacedTable(tableKey);
+        if (placed != null) {
+            try {
+                cleanupPlacedTable(placed);
+            } catch (RuntimeException | Error cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+        }
+        rollbackNewTableAfterPlacementFailure(table, newlyCreated, failure);
+    }
+
+    private void rollbackNewTableAfterPlacementFailure(GameTable table, boolean newlyCreated, Throwable failure) {
+        if (!newlyCreated || table == null) {
+            return;
+        }
+        try {
+            plugin.getTableManager().unregisterTable(table.getName());
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+        try {
+            table.shutdown();
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 
     public float tableYaw(String tableName) {
@@ -1161,32 +2674,33 @@ public final class PhysicalTableManager {
         return bestTable;
     }
 
-    public void hidePrivateEntitiesFrom(Player viewer) {
-        for (PlacedTable placed : placedTables.values()) {
-            GameTable table = plugin.getTableManager().getTable(placed.tableName());
-            for (Map.Entry<UUID, List<UUID>> entry : placed.privateEntitiesByPlayer().entrySet()) {
-                if (entry.getKey().equals(viewer.getUniqueId())) {
-                    continue;
-                }
-                // 明牌那家的正面牌本局对所有人公开，这里不能再一律隐藏，
-                // 否则新进服或重新同步的玩家会看不到已经明出来的牌。
-                // 判定框仍然只归牌主，所以这里只放开牌面显示。
-                if (table != null && table.isHandRevealed(entry.getKey())) {
-                    for (UUID entityId : entry.getValue()) {
-                        Entity entity = Bukkit.getEntity(entityId);
-                        if (entity instanceof Interaction) {
-                            viewer.hideEntity(plugin, entity);
-                        } else if (entity != null) {
-                            viewer.showEntity(plugin, entity);
-                        }
-                    }
-                    continue;
-                }
+    private void hidePrivateEntitiesFrom(UUID viewerId, PlacedTable placed) {
+        if (viewerId == null || placed == null) {
+            return;
+        }
+        GameTable table = plugin.getTableManager().getTable(placed.tableName());
+        for (Map.Entry<UUID, List<UUID>> entry : placed.privateEntitiesByPlayer().entrySet()) {
+            if (entry.getKey().equals(viewerId)) {
+                continue;
+            }
+            // 明牌那家的正面牌本局对所有人公开，这里不能再一律隐藏，
+            // 否则新进服或重新同步的玩家会看不到已经明出来的牌。
+            // 判定框仍然只归牌主，所以这里只放开牌面显示。
+            if (table != null && table.isHandRevealed(entry.getKey())) {
                 for (UUID entityId : entry.getValue()) {
                     Entity entity = Bukkit.getEntity(entityId);
-                    if (entity != null) {
-                        viewer.hideEntity(plugin, entity);
+                    if (entity instanceof Interaction) {
+                        playerOutput.hideEntity(viewerId, plugin, entity);
+                    } else if (entity != null) {
+                        playerOutput.showEntity(viewerId, plugin, entity);
                     }
+                }
+                continue;
+            }
+            for (UUID entityId : entry.getValue()) {
+                Entity entity = Bukkit.getEntity(entityId);
+                if (entity != null) {
+                    playerOutput.hideEntity(viewerId, plugin, entity);
                 }
             }
         }
@@ -1196,56 +2710,122 @@ public final class PhysicalTableManager {
         if (viewer == null || plugin.isShuttingDown()) {
             return;
         }
-        List<String> incomplete = new ArrayList<>();
-        for (PlacedTable placed : placedTables.values()) {
-            String reason = incompleteReason(placed);
-            if (!reason.isBlank()) {
-                incomplete.add(placed.tableName() + "(" + reason + ")");
-            }
+        UUID viewerId = viewer.getUniqueId();
+        markPlayerConnected(viewerId);
+        syncViewer(viewerId);
+    }
+
+    /**
+     * 跨桌 viewer 同步只负责拍 UUID 快照并逐桌投递 owner；不在 global/player 回调中直接改实体。
+     */
+    private void syncViewer(UUID viewerId) {
+        if (viewerId == null || plugin.isShuttingDown()) {
+            return;
         }
-        if (!incomplete.isEmpty()) {
-            plugin.getLogger().fine("[MUZ/viewer-sync/ddz] viewer=" + viewer.getName() + " incomplete=" + incomplete);
-            for (String tableName : incomplete.stream().map(entry -> entry.substring(0, entry.indexOf('('))).toList()) {
-                rebuildSingleTable(tableName);
-            }
-        }
-        clearHover(viewer.getUniqueId());
+        clearHover(viewerId);
         actionSignatureByTable.clear();
         privateHandSignatureByTable.clear();
         backsideHandSignatureByTable.clear();
-        for (PlacedTable placed : placedTables.values()) {
-            GameTable table = plugin.getTableManager().getTable(placed.tableName());
-            if (table != null) {
-                refresh(table);
+        List<String> tableNames = placedTables.values().stream()
+            .map(PlacedTable::tableName)
+            .toList();
+        for (String tableName : tableNames) {
+            GameTable table = plugin.getTableManager().getTable(tableName);
+            if (table == null) {
+                continue;
             }
-            // 椅子判定框的恢复只在这类一次性时机做，不放在刷新链路里。
-            // hideEntity 的隐藏状态按玩家持久，旧版本藏起来的实体不会自愈，
-            // 所以每个重新进入视野的 viewer 都要显式恢复一次；
-            // 但放进 syncActionWidgets 就会变成每次出牌都重发，把坐着的玩家挤开。
-            restoreOccupiedChairHitboxVisibility(placed, List.of(viewer));
-            showPublicEntitiesTo(viewer, placed.staticEntities());
-            showPublicEntitiesTo(viewer, placed.seatNameDisplayIds());
-            showPublicEntitiesTo(viewer, placed.seatInfoDisplayIds());
-            if (placed.statusDisplayId() != null) {
-                showPublicEntitiesTo(viewer, List.of(placed.statusDisplayId()));
-            }
-            if (placed.playDetailDisplayId() != null) {
-                showPublicEntitiesTo(viewer, List.of(placed.playDetailDisplayId()));
-            }
-            // staticEntities 与上面的显式 show 会无条件显示 playDetail，
-            // 这里在其后按阶段/入座权威重算一次，确保开局后入座真人（含刚上线的这名 viewer）不被重新显示出来。
-            if (table != null) {
-                updatePlayDetailVisibility(table, placed);
-            }
+            plugin.getTableManager().runTableNow(table, () -> syncViewerOnOwner(table, viewerId));
         }
-        hidePrivateEntitiesFrom(viewer);
     }
 
-    private void showPublicEntitiesTo(Player viewer, List<UUID> entityIds) {
+    /**
+     * 在单桌 owner 内完成实体修复、变换与 viewer 输出投递。
+     *
+     * <p>不完整桌的重建现在是异步流水线，因此这里分成两段：投递重建并把后续同步挂到重建完成回调上，
+     * 由回调重新投回本桌 owner lane 再动实体——既不能在 global 收口线程上改实体，也不能在新桌
+     * 尚未生成时读取 {@code placedTable}。完整桌仍走原同步路径，次数与语义不变。
+     */
+    private void syncViewerOnOwner(GameTable table, UUID viewerId) {
+        if (table == null || viewerId == null || plugin.isShuttingDown()) {
+            return;
+        }
+        PlacedTable placed = placedTable(table.getName());
+        if (placed == null) {
+            return;
+        }
+        // 与 continueViewerSyncOnOwner 同理：锚点区块已卸载时本任务落在 global，incompleteReason 会读实体，必须跳过。
+        if (!Bukkit.isOwnedByCurrentRegion(placed.anchor())) {
+            return;
+        }
+        String reason = incompleteReason(placed);
+        if (reason.isBlank() || isRebuildInFlight(normalize(placed.tableName()))) {
+            // 重建在飞时旧实体正在被替换：这里不能再把"实体查不到"当成不完整去触发又一次重建
+            // （会和在飞流水线撞互斥，还会刷一条误导告警）。直接走同步收尾：refresh 会因世界体
+            // 门禁让位，椅子判定框一次性恢复仍在（历史隐藏状态不会自愈，不能连它一起跳过）。
+            continueViewerSyncOnOwner(table, viewerId);
+            return;
+        }
+        plugin.getLogger().fine("[MUZ/viewer-sync/ddz] viewer=" + viewerId + " table="
+            + placed.tableName() + " incomplete=" + reason);
+        rebuildSingleTable(table.getName()).whenComplete((ignored, failure) -> {
+            if (failure != null) {
+                plugin.getLogger().warning("[MUZ/viewer-sync/ddz] 重建后同步失败: viewer=" + viewerId
+                    + " table=" + table.getName() + "，原因=" + failure.getMessage());
+                return;
+            }
+            if (plugin.isShuttingDown()) {
+                return;
+            }
+            plugin.getTableManager().runTableNow(table, () -> continueViewerSyncOnOwner(table, viewerId));
+        });
+    }
+
+    /** 本桌是否有一条重建流水线在飞（归一化桌名）。 */
+    private boolean isRebuildInFlight(String tableKey) {
+        return tableKey != null && rebuildingTableKeys.contains(tableKey);
+    }
+
+    /** 单桌 viewer 同步的实体部分；必须在本桌 owner lane 内执行。 */
+    private void continueViewerSyncOnOwner(GameTable table, UUID viewerId) {
+        if (table == null || viewerId == null || plugin.isShuttingDown()) {
+            return;
+        }
+        PlacedTable placed = placedTable(table.getName());
+        if (placed == null) {
+            return;
+        }
+        // Folia：桌子区块卸载后 owner 锚点被清空，runTableNow 会回落到 global lane；
+        // global 上不得读世界/实体（getNearbyEntities 会抛 "Cannot getEntities asynchronously"）。
+        // 此时桌子不在任何玩家附近，跳过即可，区块重新加载后由 ChunkLoad 修复链路刷新。
+        if (!Bukkit.isOwnedByCurrentRegion(placed.anchor())) {
+            return;
+        }
+        refresh(table);
+        // 椅子判定框的恢复只在这类一次性时机做，不放在刷新链路里。
+        // hideEntity 的隐藏状态按玩家持久，旧版本藏起来的实体不会自愈，
+        // 所以每个重新进入视野的 viewer 都要显式恢复一次；
+        // 但放进 syncActionWidgets 就会变成每次出牌都重发，把坐着的玩家挤开。
+        restoreOccupiedChairHitboxVisibility(placed, List.of(viewerId));
+        showPublicEntitiesTo(viewerId, placed.staticEntities());
+        showPublicEntitiesTo(viewerId, placed.seatNameDisplayIds());
+        showPublicEntitiesTo(viewerId, placed.seatInfoDisplayIds());
+        if (placed.statusDisplayId() != null) {
+            showPublicEntitiesTo(viewerId, List.of(placed.statusDisplayId()));
+        }
+        if (placed.playDetailDisplayId() != null) {
+            showPublicEntitiesTo(viewerId, List.of(placed.playDetailDisplayId()));
+        }
+        // staticEntities 与上面的显式 show 会无条件显示 playDetail，
+        // 这里在其后按阶段/入座权威重算一次，确保开局后入座真人（含刚上线的这名 viewer）不被重新显示出来。
+        updatePlayDetailVisibility(table, placed);
+        hidePrivateEntitiesFrom(viewerId, placed);
+    }
+
+    private void showPublicEntitiesTo(UUID viewerId, List<UUID> entityIds) {
         for (UUID entityId : entityIds) {
             Entity entity = Bukkit.getEntity(entityId);
             if (entity != null) {
-                viewer.showEntity(plugin, entity);
+                playerOutput.showEntity(viewerId, plugin, entity);
             }
         }
     }
@@ -1258,13 +2838,13 @@ public final class PhysicalTableManager {
         ActionBinding binding = actionBindings.get(entity.getUniqueId());
         if (binding != null) {
             if (!isWithinActionInteractionRange(player, entity)) {
-                hint(player, "靠近一点再点击。", NamedTextColor.YELLOW);
+                hint(player.getUniqueId(), "靠近一点再点击。", NamedTextColor.YELLOW);
                 return true;
             }
             GameTable table = plugin.getTableManager().getTable(binding.tableName());
             if (table == null) {
                 // 静默失败最难查：残留按钮指向已销毁的牌桌时必须给玩家反馈
-                hint(player, "该牌桌已不存在，按钮已失效。", NamedTextColor.RED);
+                hint(player.getUniqueId(), "该牌桌已不存在，按钮已失效。", NamedTextColor.RED);
                 plugin.getLogger().warning("玩家 " + player.getName() + " 点击了已失效的按钮，关联牌桌: " + binding.tableName());
                 return true;
             }
@@ -1274,7 +2854,7 @@ public final class PhysicalTableManager {
                     case JOIN -> joinSeat(table, placedTable(table.getName()), player, binding.seatIndex());
                     case READY -> table.toggleReady(player);
                     case START -> table.startRound(player);
-                    case STATUS -> hint(player, "抬头看桌子上方的状态牌。", NamedTextColor.YELLOW);
+                    case STATUS -> hint(player.getUniqueId(), "抬头看桌子上方的状态牌。", NamedTextColor.YELLOW);
                     case LEAVE -> plugin.getTableManager().leaveTable(player);
                     case PLAY_SELECTED -> table.playSelected(player);
                     case PASS_TURN -> table.pass(player);
@@ -1282,20 +2862,20 @@ public final class PhysicalTableManager {
                     case CLEAR_SELECTION -> {
                         table.clearSelection(player.getUniqueId());
                         refreshPrivateHand(table, player.getUniqueId());
-                        hint(player, "已清除已选牌。", NamedTextColor.GRAY);
+                        hint(player.getUniqueId(), "已清除已选牌。", NamedTextColor.GRAY);
                     }
                     case DOUBLE_NO -> table.chooseDouble(player, false);
                     case DOUBLE_YES -> table.chooseDouble(player, true);
                     case OPEN_SETTINGS -> {
                         plugin.getHandGuiService().openSettings(player);
-                        hint(player, "你的个人设置菜单开好了。", NamedTextColor.GREEN);
+                        hint(player.getUniqueId(), "你的个人设置菜单开好了。", NamedTextColor.GREEN);
                     }
                     // 道具栏已改为牌桌内屏幕额外栏；这里仅刷新数据，不再打开九格 Inventory GUI。
                     case GADGET -> {
                         if (plugin.getTableGadgetBarHudService() != null) {
                             plugin.getTableGadgetBarHudService().refresh(player.getUniqueId());
                         }
-                        hint(player, "牌桌额外道具栏已显示。", NamedTextColor.GREEN);
+                        hint(player.getUniqueId(), "牌桌额外道具栏已显示。", NamedTextColor.GREEN);
                     }
                     case BID_0 -> table.bid(player, 0);
                     case BID_1 -> table.bid(player, 1);
@@ -1305,7 +2885,7 @@ public final class PhysicalTableManager {
                 }
                 refresh(table);
             } catch (RuntimeException exception) {
-                hint(player, exception.getMessage(), NamedTextColor.RED);
+                hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             }
             return true;
         }
@@ -1338,7 +2918,7 @@ public final class PhysicalTableManager {
             return false;
         }
         if (table.isOpeningHandLocked()) {
-            hint(player, table.openingRevealLabel(), NamedTextColor.YELLOW);
+            hint(player.getUniqueId(), table.openingRevealLabel(), NamedTextColor.YELLOW);
             return true;
         }
         PlacedTable placed = placedTable(table.getName());
@@ -1528,9 +3108,9 @@ public final class PhysicalTableManager {
                 + " delta=" + (after - before));
             updatePrivateSelection(table, placed, player.getUniqueId());
             updateBacksideSelection(table, placed, player.getUniqueId());
-            playSelectionSound(player, !wasSelected);
+            playSelectionSound(player.getUniqueId(), !wasSelected);
         } catch (RuntimeException exception) {
-            hint(player, exception.getMessage(), NamedTextColor.RED);
+            hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             refresh(table);
         }
     }
@@ -1542,17 +3122,17 @@ public final class PhysicalTableManager {
         try {
             Set<Integer> selection = table.getSelection(player.getUniqueId());
             if (selection.isEmpty()) {
-                hint(player, "请先右键选择要出的牌。", NamedTextColor.YELLOW);
+                hint(player.getUniqueId(), "请先右键选择要出的牌。", NamedTextColor.YELLOW);
                 return;
             }
             if (!selection.contains(cardId)) {
-                hint(player, "请左键点击已选中的牌来出牌。", NamedTextColor.YELLOW);
+                hint(player.getUniqueId(), "请左键点击已选中的牌来出牌。", NamedTextColor.YELLOW);
                 return;
             }
             table.playSelected(player);
             refresh(table);
         } catch (RuntimeException exception) {
-            hint(player, exception.getMessage(), NamedTextColor.RED);
+            hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             refresh(table);
         }
     }
@@ -1566,12 +3146,11 @@ public final class PhysicalTableManager {
         if (placed == null) {
             throw new IllegalArgumentException("这桌还没摆出来。");
         }
-        cleanupPlacedTable(placed);
         // HARD-CODED REMOVAL SAFETY:
         // After a server restart, tracked entity ids can be incomplete while world-side furniture/blocks still exist.
         // A normal tracked cleanup is not enough, so remove now also performs an anchor-based residual sweep over the
         // expected table/chair locations. Do not delete this fallback unless the user explicitly asks.
-        purgeResidualWorldArtifacts(placed.anchor(), placed.yaw());
+        cleanupPlacedTableOnOwnerRegion(placed);
         if (table != null) {
             plugin.getTableManager().unregisterTable(table.getName());
         }
@@ -1581,8 +3160,7 @@ public final class PhysicalTableManager {
     public void forceRemoveTable(String tableName) {
         PlacedTable placed = removePlacedTable(tableName);
         if (placed != null) {
-            cleanupPlacedTable(placed);
-            purgeResidualWorldArtifacts(placed.anchor(), placed.yaw());
+            cleanupPlacedTableOnOwnerRegion(placed);
         }
         plugin.getTableManager().unregisterTable(tableName);
         plugin.deletePersistedTable("DOUDIZHU", tableName);
@@ -1591,8 +3169,19 @@ public final class PhysicalTableManager {
     public void shutdown() {
         // 放在最前、两条分支之外：关服和 reload 都必须把追踪日志的尾巴写掉。
         shutdownTraceLog();
+        synchronized (chunkLoadRepairQueued) {
+            chunkLoadRepairQueued.clear();
+        }
+        List<PlacedTable> remaining = new ArrayList<>(placedTables.values());
         if (plugin.getServer().isStopping()) {
+            // 关服分支：region 可能已不可用，实体随世界销毁，只清追踪与运行态；
+            // 绝不在非法 owner 上操作实体（与 MahjongTableManager.shutdown 一致）。
+            for (PlacedTable placed : remaining) {
+                plugin.getTableManager().cancelOwnerPeriodicTasks(placed.tableName());
+            }
             placedTables.clear();
+            clearPlacedTableIndexes();
+            playDetailLastRefreshBucketByTable.clear();
             actionBindings.clear();
             cardBindings.clear();
             hintIndices.clear();
@@ -1608,14 +3197,54 @@ public final class PhysicalTableManager {
             handDealPresentations.clear();
             return;
         }
-        for (PlacedTable placed : new ArrayList<>(placedTables.values())) {
-            cleanupPlacedTable(placed);
+        // reload 分支：调度仍可用。每张桌登记为一个清理 request，真实删除在桌锚点 region 内执行
+        // （牌桌实体属于桌的 owner region，不是调用方 region）；用完成屏障观察聚合结果，
+        // 失败只记录日志，不阻塞调用线程。
+        List<RegionTaskBarrier.Request> requests = new ArrayList<>();
+        for (PlacedTable placed : remaining) {
+            plugin.getTableManager().cancelOwnerPeriodicTasks(placed.tableName());
+            requests.add(new RegionTaskBarrier.Request(
+                placed.tableName(), placed.anchor().clone(), () -> cleanupPlacedTable(placed)));
         }
+        shutdownCompletion = submitShutdownCleanupBarrier(requests);
         placedTables.clear();
+        clearPlacedTableIndexes();
+        playDetailLastRefreshBucketByTable.clear();
         actionBindings.clear();
         cardBindings.clear();
         // reload 走的是这条分支。漏掉这几张表会让 hover 映射越reload越多，
         // 并且残留条目指向已删除的实体。
+    }
+
+    /**
+     * 提交 reload 关闭清理屏障。
+     *
+     * <p>只观察与日志，不让调用线程等待：屏障永远返回一个 future，失败不抛出，
+     * 因为它在 {@code onDisable} 主线程上被调用，抛异常会打断后续的数据库 flush 与 backend 关闭。
+     */
+    private CompletableFuture<RegionTaskBarrier.Result> submitShutdownCleanupBarrier(
+        List<RegionTaskBarrier.Request> requests
+    ) {
+        try {
+            return new RegionTaskBarrier(plugin.scheduler(), requests, CLEANUP_BARRIER_TIMEOUT_TICKS)
+                .start()
+                .whenComplete((result, failure) -> {
+                    if (failure != null) {
+                        plugin.getLogger().warning("牌桌清理屏障异常结束: " + failure.getMessage());
+                    } else if (result == null || result.status() != RegionTaskBarrier.Status.COMPLETED) {
+                        plugin.getLogger().warning("牌桌清理屏障未全部完成，状态="
+                            + (result == null ? "null" : result.status()));
+                    }
+                });
+        } catch (Throwable failure) {
+            plugin.getLogger().warning("牌桌清理屏障无法提交，跳过残留清理: " + failure.getMessage());
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /** 返回最近一次 reload 关闭清理的完成屏障（未关闭时为已完成空 future），供关闭流程观察，不阻塞等待。 */
+    public CompletableFuture<RegionTaskBarrier.Result> shutdownCompletion() {
+        return shutdownCompletion;
     }
 
     private void ensureWorldVisualsReady(String action) {
@@ -1642,36 +3271,69 @@ public final class PhysicalTableManager {
         return configured != null && configured.getType().isBlock();
     }
 
-    public void tick() {
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            GameTable table = plugin.getTableManager().getTableOf(viewer);
-            if (table == null) {
-                clearHover(viewer.getUniqueId());
-                // 离桌就把线框收掉，否则实体会留在原地，而且签名不变永远不会自愈。
-                clearPickDebug(viewer.getUniqueId());
+    /**
+     * 在指定牌桌的 owner region 内推进一次世界刷新。
+     *
+     * <p>这里故意只接收一张牌桌：桌面 hover、私有手牌/调试实体和桌边动态都必须由
+     * 该桌自己的周期任务触发，不能再由 global 任务遍历全服玩家或全部已放置牌桌。
+     * 入座玩家的 Player 解析仍按 UUID 进行；没有在线 Player 时只清理该 UUID 的缓存，
+     * 不会跨桌扫描或直接读取其它玩家。
+     */
+    public void tickTable(GameTable table) {
+        if (table == null) {
+            return;
+        }
+        // 世界体门禁：重建在飞时旧实体正在被替换，鼠标悬停/桌边动态都不能再按旧快照生成实体。
+        PlacedTable placed = placedTableForWorldBody(table.getName());
+        if (placed == null) {
+            // 未放置的纯逻辑桌没有世界实体，不执行任何世界 tick。
+            return;
+        }
+        for (UUID viewerId : table.getSeats()) {
+            if (viewerId == null || table.isBot(viewerId)) {
+                if (viewerId != null) {
+                    clearHover(viewerId);
+                    clearPickDebug(viewerId);
+                }
                 continue;
             }
-            updateHoverState(table, viewer);
-            PlacedTable placed = placedTable(table.getName());
-            if (placed != null && !table.isOpeningHandLocked()) {
-                updatePrivateSelection(table, placed, viewer.getUniqueId());
-                updateBacksideSelection(table, placed, viewer.getUniqueId());
-                // 排在悬停之后：线框要读 pickHandCard 的结果，那是悬停算出来的同一份。
-                if (pickDebugViewers.contains(viewer.getUniqueId())) {
-                    refreshPickDebug(table, placed, viewer);
-                }
-            }
+            dispatchTickPlayerSnapshot(table, viewerId);
         }
         long bucket = System.currentTimeMillis() / 2000L;
-        if (bucket != playDetailLastRefreshBucket) {
-            playDetailLastRefreshBucket = bucket;
-            for (PlacedTable placed : placedTables.values()) {
-                GameTable table = plugin.getTableManager().getTable(placed.tableName());
-                if (table != null) {
-                    refreshPlayDetail(table, placed);
-                }
-            }
+        String tableKey = normalize(table.getName());
+        Long previousBucket = playDetailLastRefreshBucketByTable.get(tableKey);
+        if (previousBucket == null || bucket != previousBucket) {
+            playDetailLastRefreshBucketByTable.put(tableKey, bucket);
+            refreshPlayDetail(table, placed);
         }
+    }
+
+    /**
+     * region owner 只拍桌内玩家 UUID；眼睛位置和朝向在 player lane 快照，再回到同桌 owner 做实体计算。
+     */
+    private void dispatchTickPlayerSnapshot(GameTable table, UUID viewerId) {
+        playerOutput.runPlayer(viewerId, viewer -> {
+            if (!viewer.isOnline()) {
+                return;
+            }
+            Location eye = viewer.getEyeLocation().clone();
+            org.bukkit.util.Vector direction = eye.getDirection().normalize();
+            plugin.getTableManager().runTableNow(table, () -> {
+                PlacedTable current = placedTableForWorldBody(table.getName());
+                if (current == null || plugin.isShuttingDown()) {
+                    return;
+                }
+                updateHoverState(table, current, viewerId, eye, direction);
+                if (!table.isOpeningHandLocked()) {
+                    updatePrivateSelection(table, current, viewerId);
+                    updateBacksideSelection(table, current, viewerId);
+                    // 排在悬停之后：线框要读 pickHandCard 的结果，那是悬停算出来的同一份。
+                    if (pickDebugViewers.contains(viewerId)) {
+                        refreshPickDebug(table, current, viewerId, eye, direction);
+                    }
+                }
+            });
+        });
     }
 
     /**
@@ -2124,7 +3786,7 @@ public final class PhysicalTableManager {
         if (previousSeat >= 0) {
             placed.seatAssignments().remove(previousSeat);
             placed.seatAssignments().put(seatIndex, playerId);
-            hint(player, "你已切换到座位 " + (seatIndex + 1) + "。", NamedTextColor.GREEN);
+            hint(player.getUniqueId(), "你已切换到座位 " + (seatIndex + 1) + "。", NamedTextColor.GREEN);
             return;
         }
         placed.seatAssignments().put(seatIndex, player.getUniqueId());
@@ -2135,26 +3797,36 @@ public final class PhysicalTableManager {
             throw exception;
         }
         placed.seatAssignments().entrySet().removeIf(entry -> !entry.getKey().equals(seatIndex) && entry.getValue().equals(player.getUniqueId()));
-        hint(player, "你已加入 " + table.getName() + " 号牌桌的座位 " + (seatIndex + 1) + "。", NamedTextColor.GREEN);
+        hint(player.getUniqueId(), "你已加入 " + table.getName() + " 号牌桌的座位 " + (seatIndex + 1) + "。", NamedTextColor.GREEN);
     }
 
-    private void hint(Player player, String text, NamedTextColor color) {
-        player.sendActionBar(message(text, color));
+    private void hint(UUID playerId, String text, NamedTextColor color) {
+        playerOutput.sendActionBar(playerId, message(text, color));
     }
 
     private void applyJoinVisibility(GameTable table, Entity entity) {
         if (plugin.isShuttingDown()) {
             return;
         }
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            viewer.showEntity(plugin, entity);
+        for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+            playerOutput.showEntity(viewerId, plugin, entity);
         }
     }
 
+    /**
+     * 共享保护链的实体保护判定：牌桌自有实体与麻将自有实体都算受保护。
+     *
+     * <p>破坏/攻击类入口直接用它（麻将实体也不该被玩家拆掉）。但右键入口不能只看这个结果，
+     * 必须再经 {@code WorldTableInteractionListener.shouldCancelProtectedInteract} 的放行口，
+     * 否则会取消麻将入座 Interaction —— 麻将实体既不是椅子家具、也不是动作按钮。
+     */
     public boolean isProtectedEntity(UUID entityId) {
         Entity entity = Bukkit.getEntity(entityId);
         while (entity != null) {
-            if (entity.getScoreboardTags().contains(PROTECTED_ENTITY_TAG)) {
+            // 共享保护链：牌桌与麻将各自的保护 tag 都由 TableEntityGeometry 登记，
+            // 这里必须走共用的 hasProtectionTag，否则麻将实体会漏掉破坏保护。
+            // 注意只在这里放宽：本类的残留清理仍只认牌桌 tag（见 PROTECTED_ENTITY_TAG 的注释）。
+            if (TableEntityGeometry.hasProtectionTag(entity)) {
                 return true;
             }
             UUID currentId = entity.getUniqueId();
@@ -2304,8 +3976,8 @@ public final class PhysicalTableManager {
             table.getName(),
             anchor.clone(),
             yaw,
-            ownerId,
-            ownerName,
+            tableOwner(table.getName(), ownerId, ownerName),
+            footprintChunkKeys(anchor),
             staticEntities,
             new ArrayList<>(),
             new ArrayList<>(),
@@ -2331,11 +4003,12 @@ public final class PhysicalTableManager {
                 collectEntityTreeIds(tablePlacement.entityId(), staticEntities);
                 collectEntityTreeIds(tablePlacement.entityId(), placed.craftEngineVisualEntities());
             } else {
-                addEntityTreeIds(tablePlacement.entityId(), staticEntities);
+                addEntityTreeIds(tablePlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_TABLE);
             }
             tableVisualId = tablePlacement.entityId();
         } else {
-            ItemDisplay fallbackTableDisplay = spawnFurnitureDisplay(tableLocation, tableItem(), plugin.getTableScale());
+            ItemDisplay fallbackTableDisplay = spawnFurnitureDisplay(
+                tableLocation, tableItem(), plugin.getTableScale(), placed.owner(), ENTITY_ROLE_TABLE);
             staticEntities.add(fallbackTableDisplay.getUniqueId());
             tableVisualId = fallbackTableDisplay.getUniqueId();
         }
@@ -2352,7 +4025,7 @@ public final class PhysicalTableManager {
                     collectEntityTreeIds(chairPlacement.entityId(), staticEntities);
                     collectEntityTreeIds(chairPlacement.entityId(), placed.craftEngineVisualEntities());
                 } else {
-                    addEntityTreeIds(chairPlacement.entityId(), staticEntities);
+                    addEntityTreeIds(chairPlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_CHAIR);
                 }
             }
             if (chairPlacement.blockRestore() != null) {
@@ -2369,7 +4042,10 @@ public final class PhysicalTableManager {
                 seatName(table, index),
                 Display.Billboard.CENTER,
                 false,
-                seatNameScale(table, index)
+                seatNameScale(table, index),
+                true,
+                placed.owner(),
+                "seat-name"
             );
             staticEntities.add(seatName.getUniqueId());
             placed.seatNameDisplayIds().add(seatName.getUniqueId());
@@ -2379,7 +4055,10 @@ public final class PhysicalTableManager {
                 seatInfo(table, index),
                 Display.Billboard.CENTER,
                 false,
-                plugin.getSmallTextScale()
+                plugin.getSmallTextScale(),
+                true,
+                placed.owner(),
+                "seat-info"
             );
             staticEntities.add(seatInfo.getUniqueId());
             placed.seatInfoDisplayIds().add(seatInfo.getUniqueId());
@@ -2390,7 +4069,10 @@ public final class PhysicalTableManager {
             buildStatus(table),
             Display.Billboard.CENTER,
             false,
-            plugin.getStatusTextScale()
+            plugin.getStatusTextScale(),
+            true,
+            placed.owner(),
+            "status"
         );
         placed = placed.withStatusDisplayId(status.getUniqueId());
         staticEntities.add(status.getUniqueId());
@@ -2400,7 +4082,10 @@ public final class PhysicalTableManager {
             buildPlayDetail(table),
             Display.Billboard.CENTER,
             false,
-            plugin.getSmallTextScale()
+            plugin.getSmallTextScale(),
+            true,
+            placed.owner(),
+            "play-detail"
         );
         placed = placed.withPlayDetailDisplayId(playDetail.getUniqueId());
         staticEntities.add(playDetail.getUniqueId());
@@ -2408,16 +4093,152 @@ public final class PhysicalTableManager {
         return placed;
     }
 
+    /**
+     * 恢复/重建与放桌入口的锚点区块就绪检查。**按核心类型（{@link #REGIONIZED}）分支**。
+     *
+     * <p><b>非区域化核心（Paper/Leaf）</b>：恢复成本轮改动前的阻塞强加载。原英文注释保留其意图：
+     * Startup restore can run before the destination chunk has been warmed up.
+     * Force the anchor chunk loaded first so chairs, text, and CraftEngine furniture do not half-spawn.
+     * 主线程允许同步加载区块，且放置/重建路径依赖「执行前锚点区块已加载」——区块未加载时实体与
+     * 方块操作静默失效，会把整桌实体清掉却建不回来（真实 Leaf 26.1.2 实服复现的回归）。
+     *
+     * <p><b>区域化核心（Folia）</b>：只读判断 + 未加载时告警。原实现在这里调 {@code anchor.getChunk()}
+     * （内部 {@code World#getChunkAt}）与 {@code chunk.load()}，在真实 Folia 上直接抛
+     * {@code Async chunk retrieval}，导致存档牌桌永远恢复不了。区块加载必须由
+     * {@link #ensureChunkLoadedAsync} 在异步侧完成，这里退化为「只检查 + 未加载时告警」：
+     * 若仍走到未加载分支，说明调用方漏了异步加载，属于流程缺陷，必须出声而不是静默半生成。
+     *
+     * <p>实际逻辑收口到包内可见、不依赖实例的静态核心 {@link #ensureChunkReadyCore}，
+     * 使「区域化核心不得同步拉区块」可以用 fake World 做真实行为测试；本方法只做入口归一化。
+     */
     private void ensureChunkReady(Location anchor) {
         if (anchor == null || anchor.getWorld() == null) {
             return;
         }
-        // Startup restore can run before the destination chunk has been warmed up.
-        // Force the anchor chunk loaded first so chairs, text, and CraftEngine furniture do not half-spawn.
-        org.bukkit.Chunk chunk = anchor.getChunk();
+        ensureChunkReadyCore(anchor.getWorld(), anchor.getBlockX(), anchor.getBlockZ(), REGIONIZED,
+            message -> plugin.getLogger().warning(message));
+    }
+
+    /**
+     * 锚点区块就绪检查的核心，**按核心类型分支**，且不依赖实例——便于以 fake World 做真实行为测试。
+     *
+     * <p>分支语义与 {@link #ensureChunkReady} 的文档一致：区域化核心只做只读检查 + 未加载时告警，
+     * 非区域化核心（Paper/Leaf）才允许同步强加载。这里的 {@code regionized} 由调用方从
+     * {@link #REGIONIZED} 传入，绝不能在非区域化分支硬编码放行同步获取。
+     *
+     * @param world      牌桌锚点所在世界；null 直接返回
+     * @param blockX     锚点方块 X
+     * @param blockZ     锚点方块 Z
+     * @param regionized 当前核心是否区域化（Folia）
+     * @param warn       未加载告警出口，调用方负责落到服务器日志
+     */
+    static void ensureChunkReadyCore(World world, int blockX, int blockZ, boolean regionized, Consumer<String> warn) {
+        if (world == null) {
+            return;
+        }
+        int chunkX = blockX >> 4;
+        int chunkZ = blockZ >> 4;
+        if (regionized) {
+            // 区域化核心不能同步拉区块：Location#getChunk() 内部即 World#getChunkAt，Folia 上非法且阻塞。
+            // 该「先把锚点区块拉起来」的职责已上移到 ensureChunkLoadedAsync（异步侧），此处只负责发现漏网。
+            if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                warn.accept("牌桌锚点区块尚未加载，本应已由异步加载保证: world="
+                    + world.getName() + " chunk=[" + chunkX + ", " + chunkZ + "]");
+            }
+            return;
+        }
+        // 非区域化核心（Paper/Leaf）主线程可同步加载区块：这正是放置/重建路径原本依赖的保证。
+        org.bukkit.Chunk chunk = world.getChunkAt(chunkX, chunkZ);
         if (!chunk.isLoaded()) {
             chunk.load();
         }
+    }
+
+    /**
+     * 异步把锚点所在区块拉起来。
+     *
+     * <p>真实 Folia 上 {@code World#getChunkAt} / {@code Location#getChunk} 会抛
+     * {@code Async chunk retrieval}（region 线程与主线程都失败），所以恢复存档牌桌必须走
+     * {@code World#getChunkAtAsync}。这里只加载锚点所在那一个区块，区块坐标算法与
+     * {@link #anchorChunkKeys} 一致（{@code blockX >> 4}）。
+     *
+     * <p>异步获取与回调归一化收口到不依赖实例的静态核心 {@link #loadChunkAsyncCore}，
+     * 使「异步加载」可用 fake World 做真实行为测试；本方法只做入口归一化。
+     *
+     * @param anchor 牌桌锚点
+     * @return 区块加载完成后完成的 stage；世界缺失或加载失败时以异常完成
+     */
+    private CompletionStage<Void> ensureChunkLoadedAsync(Location anchor) {
+        World world = anchor == null ? null : anchor.getWorld();
+        if (world == null) {
+            return failedStage(new IllegalStateException("恢复牌桌缺少有效世界"));
+        }
+        return loadChunkAsyncCore(world, anchor.getBlockX() >> 4, anchor.getBlockZ() >> 4);
+    }
+
+    /**
+     * 异步把一张牌桌的 3x3 footprint（锚点所在区块及其八邻域）全部拉起来。
+     *
+     * <p>【为什么不复用单锚点的 {@link #ensureChunkLoadedAsync}】桌椅、判定框与残留方块可能落在
+     * 锚点相邻区块里；重建/位移前只加载锚点那一格，相邻区块里的旧实体依然删不掉、新实体也建不出来。
+     * 因此重建路径要的是整份 footprint。反过来，存档恢复链只需要锚点单区块，**绝不能**顺手把它
+     * 改成 3x3：那会把恢复成本放大九倍，并扩大对邻桌区块的副作用。
+     *
+     * <p>九个区块并行发起异步加载，全部完成后 stage 才完成；任一失败即整体失败，不做部分成功——
+     * 半加载状态下清旧实体同样会丢整桌。
+     */
+    private CompletionStage<Void> ensureFootprintLoadedAsync(Location anchor) {
+        World world = anchor == null ? null : anchor.getWorld();
+        if (world == null) {
+            return failedStage(new IllegalStateException("牌桌 footprint 缺少有效世界"));
+        }
+        return ensureFootprintLoadedAsyncCore(world, anchor.getBlockX(), anchor.getBlockZ());
+    }
+
+    /**
+     * {@link #ensureFootprintLoadedAsync} 的静态核心：不依赖实例，便于用 fake World 做真实行为
+     * 测试（断言真正请求的是锚点 3x3、且整体在九个区块全部加载完成后才完成）。
+     */
+    static CompletionStage<Void> ensureFootprintLoadedAsyncCore(World world, int blockX, int blockZ) {
+        if (world == null) {
+            CompletableFuture<Void> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException("牌桌 footprint 缺少有效世界"));
+            return failed;
+        }
+        int chunkX = blockX >> 4;
+        int chunkZ = blockZ >> 4;
+        List<CompletableFuture<Void>> loads = new ArrayList<>(9);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                loads.add(loadChunkAsyncCore(world, chunkX + dx, chunkZ + dz));
+            }
+        }
+        return CompletableFuture.allOf(loads.toArray(new CompletableFuture[0]));
+    }
+
+    /**
+     * 单个区块的异步加载核：把 {@code World#getChunkAtAsync} 的回调归一化成 Void stage。
+     *
+     * <p>{@code getChunkAtAsync} 的回调完成线程在 Folia 上没有源码可证的保证（Paper 的
+     * {@code CompletableFuture} 回调线程同样未文档化），因此回调里不做任何世界操作，只完成这个
+     * stage；真正的世界体由 {@link #runRegionStage} / {@link #runRegionStageValue} 再显式投递到
+     * 锚点 region 兜底；即便 {@code getChunkAtAsync} 已在正确的 region 线程回调，重复投到同一
+     * region 也是安全的。
+     */
+    private static CompletableFuture<Void> loadChunkAsyncCore(World world, int chunkX, int chunkZ) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        try {
+            world.getChunkAtAsync(chunkX, chunkZ).whenComplete((chunk, failure) -> {
+                if (failure != null) {
+                    result.completeExceptionally(failure);
+                } else {
+                    result.complete(null);
+                }
+            });
+        } catch (Throwable failure) {
+            result.completeExceptionally(failure);
+        }
+        return result;
     }
 
     private void refreshActionButtons(GameTable table, PlacedTable placed) {
@@ -2520,14 +4341,17 @@ public final class PhysicalTableManager {
                 while (placed.actionEntities().size() > base) {
                     UUID removedId = placed.actionEntities().remove(placed.actionEntities().size() - 1);
                     clearActionMappings(List.of(removedId));
-                    clearEntities(new ArrayList<>(List.of(removedId)), false);
+                    clearOwnedEntities(placed.owner(), new ArrayList<>(List.of(removedId)), false);
                 }
                 label = spawnText(
                     spec.labelLocation(),
                     spec.labelText(),
                     Display.Billboard.CENTER,
                     false,
-                    labelScale
+                    labelScale,
+                    true,
+                    placed.owner(),
+                    ENTITY_ROLE_ACTION_LABEL
                 );
                 float boxHeight = actionHitboxHeight(spec.labelText(), labelScale);
                 Location boxLocation = spec.interactionLocation().clone();
@@ -2535,7 +4359,9 @@ public final class PhysicalTableManager {
                 interaction = spawnInteraction(
                     boxLocation,
                     actionHitboxWidth(spec.labelText(), labelScale),
-                    boxHeight
+                    boxHeight,
+                    placed.owner(),
+                    ENTITY_ROLE_ACTION_HITBOX
                 );
                 placed.actionEntities().add(label.getUniqueId());
                 placed.actionEntities().add(interaction.getUniqueId());
@@ -2629,7 +4455,7 @@ public final class PhysicalTableManager {
      * CE 不在本项目依赖里、读不到 showHitboxes 实现，这一步是按调用频率与
      * "离散单次抖动、无周期任务、这是刷新链路里唯一碰椅子的操作"推出来的成因。
      */
-    private void restoreOccupiedChairHitboxVisibility(PlacedTable placed, List<Player> viewers) {
+    private void restoreOccupiedChairHitboxVisibility(PlacedTable placed, Collection<UUID> viewerIds) {
         if (plugin.isShuttingDown()) {
             return;
         }
@@ -2654,11 +4480,13 @@ public final class PhysicalTableManager {
                 // 无条件恢复可见，不再看座位是否被占。
                 // 只发给传进来的 viewer：重发 hitbox 包会把正坐在这把椅子上的玩家挤开，
                 // 所以别人上线时不该顺带惊动全场，只补他自己那一份。
-                for (Player viewer : viewers) {
-                    if (plugin.getCraftEngineFurnitureService() != null) {
-                        plugin.getCraftEngineFurnitureService().setFurnitureHitboxesVisible(nearby, viewer, true);
-                    }
-                    viewer.showEntity(plugin, nearby);
+                for (UUID viewerId : viewerIds) {
+                    playerOutput.runPlayer(viewerId, viewer -> {
+                        if (plugin.getCraftEngineFurnitureService() != null) {
+                            plugin.getCraftEngineFurnitureService().setFurnitureHitboxesVisible(nearby, viewer, true);
+                        }
+                    });
+                    playerOutput.showEntity(viewerId, plugin, nearby);
                 }
             }
         }
@@ -2725,7 +4553,7 @@ public final class PhysicalTableManager {
             return;
         }
         // 实体缺失时静默跳过是有意的：区块未加载时 Bukkit.getEntity 返回 null 属正常情况，
-        // 且本方法在 tick() 中每 2 秒调用一次，加日志会刷屏
+        // 且本方法由每桌 owner tick 每 2 秒调用一次，加日志会刷屏
         Entity entity = Bukkit.getEntity(placed.playDetailDisplayId());
         updateTextEntity(entity, buildPlayDetail(table));
         // 开局后（非 LOBBY）对入座真人隐藏桌边动态，避免浮空字挡住其低头看牌；文本刷新后立即重算可见性。
@@ -2744,9 +4572,9 @@ public final class PhysicalTableManager {
 
     /**
      * 桌边动态浮空字是公共实体（默认对所有人可见），这里按阶段+入座情况做按人可见性控制。
-     * hideEntity 的隐藏状态按玩家持久，故每次都对全体在线玩家显式 show/hide；
-     * 玩家离桌或本局结束回到 LOBBY 后，下一次 refresh/tick 会把可见性重新算回来，无需单独在离桌路径补代码。
-     * 写法与 {@link #updateSeatInfoVisibility} 一致（同样遍历在线玩家、排除机器人）。
+     * hideEntity 的隐藏状态按玩家持久，故每次都对在线玩家显式 show/hide；
+     * 玩家离桌或本局结束回到 LOBBY 后，下一次 refresh/owner tick 会把可见性重新算回来。
+     * 写法与 {@link #updateSeatInfoVisibility} 一致（同样排除机器人）。
      */
     private void updatePlayDetailVisibility(GameTable table, PlacedTable placed) {
         if (plugin.isShuttingDown()) {
@@ -2760,14 +4588,13 @@ public final class PhysicalTableManager {
             return;
         }
         GamePhase phase = table.getPhase();
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            UUID viewerId = viewer.getUniqueId();
+        for (UUID viewerId : onlinePlayerIdsSnapshot()) {
             // 坐在本桌且不是机器人的真人，开局后对本人隐藏桌边动态；旁观者与大厅阶段一律显示。
             boolean seatedHuman = table.contains(viewerId) && !table.isBot(viewerId);
             if (playDetailHiddenForSeatedPlayer(phase, seatedHuman)) {
-                viewer.hideEntity(plugin, entity);
+                playerOutput.hideEntity(viewerId, plugin, entity);
             } else {
-                viewer.showEntity(plugin, entity);
+                playerOutput.showEntity(viewerId, plugin, entity);
             }
         }
     }
@@ -2800,11 +4627,11 @@ public final class PhysicalTableManager {
                 continue;
             }
             UUID owner = placed.seatAssignments().get(index);
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                if (owner != null && viewer.getUniqueId().equals(owner) && !table.isBot(owner)) {
-                    viewer.hideEntity(plugin, entity);
+            for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+                if (owner != null && viewerId.equals(owner) && !table.isBot(owner)) {
+                    playerOutput.hideEntity(viewerId, plugin, entity);
                 } else {
-                    viewer.showEntity(plugin, entity);
+                    playerOutput.showEntity(viewerId, plugin, entity);
                 }
             }
         }
@@ -2814,11 +4641,11 @@ public final class PhysicalTableManager {
                 continue;
             }
             UUID owner = placed.seatAssignments().get(index);
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                if (owner != null && viewer.getUniqueId().equals(owner) && !table.isBot(owner)) {
-                    viewer.hideEntity(plugin, entity);
+            for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+                if (owner != null && viewerId.equals(owner) && !table.isBot(owner)) {
+                    playerOutput.hideEntity(viewerId, plugin, entity);
                 } else {
-                    viewer.showEntity(plugin, entity);
+                    playerOutput.showEntity(viewerId, plugin, entity);
                 }
             }
         }
@@ -2888,7 +4715,7 @@ public final class PhysicalTableManager {
             if (created) {
                 display = spawnOpeningCard(location,
                     cardId < 0 ? new ItemStack(Material.AIR) : (backside ? backCardItem() : cardItem(hand.get(index))),
-                    privateCardScale(false, false), handCardYaw(placed.yaw(), seatIndex), flipDegrees);
+                    privateCardScale(false, false), handCardYaw(placed.yaw(), seatIndex), flipDegrees, placed.owner());
                 replaceOpeningEntityId(entityIds, index, display.getUniqueId());
             } else {
                 teleportIfMoved(display, location, CARD_TRACK_EPSILON_SQUARED);
@@ -2947,7 +4774,14 @@ public final class PhysicalTableManager {
         );
     }
 
-    private ItemDisplay spawnOpeningCard(Location location, ItemStack item, Vector3f scale, float yaw, double degrees) {
+    private ItemDisplay spawnOpeningCard(
+        Location location,
+        ItemStack item,
+        Vector3f scale,
+        float yaw,
+        double degrees,
+        TableOwner owner
+    ) {
         ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             // 开局牌先以不可见默认值出生；授权可见性在实体创建后统一按牌主/旁观者逐人放行。
             spawned.setVisibleByDefault(false);
@@ -2955,7 +4789,7 @@ public final class PhysicalTableManager {
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(openingCardTransformation(scale, 0.0f, degrees));
             configureOpeningAnimation(spawned);
-            protectEntity(spawned);
+            protectEntity(spawned, owner, ENTITY_ROLE_CARD);
         });
         applyStableYaw(display, yaw);
         return display;
@@ -2991,11 +4825,11 @@ public final class PhysicalTableManager {
         if (plugin.isShuttingDown()) {
             return;
         }
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            if (viewer.getUniqueId().equals(ownerId)) {
-                viewer.hideEntity(plugin, entity);
+        for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+            if (viewerId.equals(ownerId)) {
+                playerOutput.hideEntity(viewerId, plugin, entity);
             } else {
-                viewer.showEntity(plugin, entity);
+                playerOutput.showEntity(viewerId, plugin, entity);
             }
         }
     }
@@ -3004,8 +4838,8 @@ public final class PhysicalTableManager {
         if (plugin.isShuttingDown()) {
             return;
         }
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            viewer.hideEntity(plugin, entity);
+        for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+            playerOutput.hideEntity(viewerId, plugin, entity);
         }
     }
 
@@ -3020,11 +4854,11 @@ public final class PhysicalTableManager {
         placed.backsideVisualsByPlayer().remove(playerId);
         if (privateIds != null) {
             privateIds.forEach(cardBindings::remove);
-            clearEntities(privateIds, false);
+            clearOwnedEntities(placed.owner(), privateIds, false);
         }
         if (backsideIds != null) {
             backsideIds.forEach(cardBindings::remove);
-            clearEntities(backsideIds, false);
+            clearOwnedEntities(placed.owner(), backsideIds, false);
         }
     }
 
@@ -3127,8 +4961,8 @@ public final class PhysicalTableManager {
                 HandDealPresentation.Slot slot = dealSeat.privateSlot(index);
                 ItemDisplay display = slot == null ? null : asItemDisplay(slot.displayId());
                 if (display == null) {
-                    clearEntities(privateIds, false);
-                    clearEntities(backsideIds, false);
+                    clearOwnedEntities(placed.owner(), privateIds, false);
+                    clearOwnedEntities(placed.owner(), backsideIds, false);
                     return false;
                 }
                 privateIds.add(display.getUniqueId());
@@ -3155,11 +4989,11 @@ public final class PhysicalTableManager {
                     table, placed, playerId, card, cardBaseLocation,
                     capturerEnvelope, capturerWidth, capturerHeight, privateIds);
                 UUID leftEdgeTileId = index == 0
-                    ? placeHandCardEdgeTile(table, playerId, card, HandEdge.LEFT, cardBaseLocation, privateStep,
+                    ? placeHandCardEdgeTile(table, placed.owner(), playerId, card, HandEdge.LEFT, cardBaseLocation, privateStep,
                         capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth, null, privateIds)
                     : null;
                 UUID rightEdgeTileId = index == hand.size() - 1
-                    ? placeHandCardEdgeTile(table, playerId, card, HandEdge.RIGHT, cardBaseLocation, privateStep,
+                    ? placeHandCardEdgeTile(table, placed.owner(), playerId, card, HandEdge.RIGHT, cardBaseLocation, privateStep,
                         capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth, null, privateIds)
                     : null;
                 UUID labelId = null;
@@ -3169,7 +5003,10 @@ public final class PhysicalTableManager {
                         MuzTheme.cardLabel(card.rank().label()),
                         Display.Billboard.CENTER,
                         false,
-                        plugin.getLabelTextScale(), false
+                        plugin.getLabelTextScale(),
+                        false,
+                        placed.owner(),
+                        ENTITY_ROLE_CARD_LABEL
                     );
                     mountTextDisplay(display, label, label.getLocation(), false);
                     privateIds.add(label.getUniqueId());
@@ -3181,7 +5018,7 @@ public final class PhysicalTableManager {
                     display.getUniqueId(), labelId, capturerId, leftEdgeTileId, rightEdgeTileId));
                 applyPrivateVisibility(playerId, display, revealed);
             }
-            clearEntities(openingPrivateIds.stream()
+            clearOwnedEntities(placed.owner(), openingPrivateIds.stream()
                 .filter(Objects::nonNull)
                 .filter(id -> !privateIds.contains(id))
                 .toList(), false);
@@ -3189,7 +5026,7 @@ public final class PhysicalTableManager {
             placed.privateVisualsByPlayer().put(playerId, visuals);
 
             if (revealed) {
-                clearEntities(openingBacksideIds.stream().filter(Objects::nonNull).toList(), false);
+                clearOwnedEntities(placed.owner(), openingBacksideIds.stream().filter(Objects::nonNull).toList(), false);
                 placed.backsideEntitiesByPlayer().remove(playerId);
                 placed.backsideVisualsByPlayer().remove(playerId);
             } else {
@@ -3198,8 +5035,8 @@ public final class PhysicalTableManager {
                     HandDealPresentation.Slot slot = dealSeat.backsideSlot(index);
                     ItemDisplay display = slot == null ? null : asItemDisplay(slot.displayId());
                     if (display == null) {
-                        clearEntities(privateIds, false);
-                        clearEntities(backsideIds, false);
+                        clearOwnedEntities(placed.owner(), privateIds, false);
+                        clearOwnedEntities(placed.owner(), backsideIds, false);
                         return false;
                     }
                     backsideIds.add(display.getUniqueId());
@@ -3222,7 +5059,7 @@ public final class PhysicalTableManager {
                     applyBacksideVisibility(playerId, display);
                     backsideVisuals.put(card.id(), display.getUniqueId());
                 }
-                clearEntities(openingBacksideIds.stream()
+                clearOwnedEntities(placed.owner(), openingBacksideIds.stream()
                     .filter(Objects::nonNull)
                     .filter(id -> !backsideIds.contains(id))
                     .toList(), false);
@@ -3233,8 +5070,8 @@ public final class PhysicalTableManager {
         } catch (RuntimeException exception) {
             plugin.getLogger().log(java.util.logging.Level.WARNING,
                 "开局手牌接管失败，将重建牌桌 " + table.getName() + " 的手牌", exception);
-            clearEntities(privateIds, false);
-            clearEntities(backsideIds, false);
+            clearOwnedEntities(placed.owner(), privateIds, false);
+            clearOwnedEntities(placed.owner(), backsideIds, false);
             return false;
         }
     }
@@ -3319,15 +5156,22 @@ public final class PhysicalTableManager {
                 center.z() + adjustment.z() + step.z() * delta + depth.z() * delta
             );
             double lift = selectedCardLift(isSelected, false);
-            ItemDisplay cardDisplay = spawnPlacedCard(cardBaseLocation, backCardItem(), privateCardScale(false, false), cardYaw, (float) lift);
+            ItemDisplay cardDisplay = spawnPlacedCard(
+                cardBaseLocation,
+                backCardItem(),
+                privateCardScale(false, false),
+                cardYaw,
+                (float) lift,
+                placed.owner()
+            );
             applyCardGlow(cardDisplay, playerId, isSelected, false);
             spawned.add(cardDisplay.getUniqueId());
             visuals.put(card.id(), cardDisplay.getUniqueId());
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                if (viewer.getUniqueId().equals(playerId) && !table.isBot(playerId)) {
-                    viewer.hideEntity(plugin, cardDisplay);
+            for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+                if (viewerId.equals(playerId) && !table.isBot(playerId)) {
+                    playerOutput.hideEntity(viewerId, plugin, cardDisplay);
                 } else {
-                    viewer.showEntity(plugin, cardDisplay);
+                    playerOutput.showEntity(viewerId, plugin, cardDisplay);
                 }
             }
         }
@@ -3351,8 +5195,8 @@ public final class PhysicalTableManager {
             // 没被这次铺牌认领的旧捕获器（对应的牌已经打出去了）必须销毁：
             // 它已经不在 privateEntitiesByPlayer 里，漏掉就是永久的孤儿实体，
             // 留在原地继续接事件，表现为「点空气选中了一张不存在的牌」。
-            discardUnclaimedCapturers(reusableCapturers);
-            discardUnclaimedEdgeTiles(reusableTiles);
+            discardUnclaimedCapturers(placed.owner(), reusableCapturers);
+            discardUnclaimedEdgeTiles(placed.owner(), reusableTiles);
         }
     }
 
@@ -3437,11 +5281,12 @@ public final class PhysicalTableManager {
         }
     }
 
-    private void discardUnclaimedCapturers(Map<Integer, Interaction> unclaimed) {
+    private void discardUnclaimedCapturers(TableOwner owner, Map<Integer, Interaction> unclaimed) {
         if (unclaimed.isEmpty()) {
             return;
         }
-        clearEntities(
+        clearOwnedEntities(
+            owner,
             unclaimed.values().stream().map(Entity::getUniqueId).collect(java.util.stream.Collectors.toList()),
             false
         );
@@ -3454,11 +5299,12 @@ public final class PhysicalTableManager {
      * <p>端位会变化：手牌从 N≥2 掉到 N=1 时两块瓦片改挂同一张牌，
      * 从 N≥1 掉到 0 时两块都不再需要。不收就是孤儿实体。
      */
-    private void discardUnclaimedEdgeTiles(Map<HandEdge, Interaction> unclaimed) {
+    private void discardUnclaimedEdgeTiles(TableOwner owner, Map<HandEdge, Interaction> unclaimed) {
         if (unclaimed.isEmpty()) {
             return;
         }
-        clearEntities(
+        clearOwnedEntities(
+            owner,
             unclaimed.values().stream().map(Entity::getUniqueId).collect(java.util.stream.Collectors.toList()),
             false
         );
@@ -3475,7 +5321,7 @@ public final class PhysicalTableManager {
         // 明牌的牌面要给全场看，所以牌主掉线时也得照常铺。
         // 只有未明牌时才需要牌主在线：那种情况下这层牌只有他自己能看见。
         boolean revealed = table.isHandRevealed(playerId);
-        if (!revealed && Bukkit.getPlayer(playerId) == null) {
+        if (!revealed && !onlinePlayerIdsSnapshot().contains(playerId)) {
             return;
         }
         if (table.getPhase() == GamePhase.LOBBY) {
@@ -3540,7 +5386,14 @@ public final class PhysicalTableManager {
             float hoverProgress = currentAnimationProgress(hoverProgressByPlayer, playerId, card.id());
             double lift = animatedCardLift(selectedProgress, hoverProgress);
 
-            ItemDisplay cardDisplay = spawnPlacedCard(cardBaseLocation, cardItem(card), privateCardScale(hoverProgress), cardYaw, (float) lift);
+            ItemDisplay cardDisplay = spawnPlacedCard(
+                cardBaseLocation,
+                cardItem(card),
+                privateCardScale(hoverProgress),
+                cardYaw,
+                (float) lift,
+                placed.owner()
+            );
             applyCardGlow(cardDisplay, playerId, isSelected, isHovered);
             spawned.add(cardDisplay.getUniqueId());
             cardBindings.put(cardDisplay.getUniqueId(), new CardBinding(table.getName(), playerId, card.id()));
@@ -3548,7 +5401,7 @@ public final class PhysicalTableManager {
             Interaction reusedCapturer = reusableCapturers.remove(card.id());
             UUID capturerId = reusedCapturer != null
                 ? reuseHandCardCapturer(
-                    table, playerId, card, reusedCapturer, cardBaseLocation,
+                    table, placed.owner(), playerId, card, reusedCapturer, cardBaseLocation,
                     capturerEnvelope, capturerWidth, capturerHeight, spawned)
                 : spawnHandCardCapturer(
                     table, placed, playerId, card, cardBaseLocation,
@@ -3559,13 +5412,13 @@ public final class PhysicalTableManager {
             // 而斗地主每局必然经过「手上 1 张、必须点它出牌获胜」这个状态。
             UUID leftEdgeTileId = index == 0
                 ? placeHandCardEdgeTile(
-                    table, playerId, card, HandEdge.LEFT, cardBaseLocation, step,
+                    table, placed.owner(), playerId, card, HandEdge.LEFT, cardBaseLocation, step,
                     capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth,
                     reusableEdgeTiles.remove(HandEdge.LEFT), spawned)
                 : null;
             UUID rightEdgeTileId = index == hand.size() - 1
                 ? placeHandCardEdgeTile(
-                    table, playerId, card, HandEdge.RIGHT, cardBaseLocation, step,
+                    table, placed.owner(), playerId, card, HandEdge.RIGHT, cardBaseLocation, step,
                     capturerEnvelope, capturerWidth, capturerHeight, edgeTileWidth,
                     reusableEdgeTiles.remove(HandEdge.RIGHT), spawned)
                 : null;
@@ -3577,7 +5430,10 @@ public final class PhysicalTableManager {
                     MuzTheme.cardLabel(card.rank().label()),
                     Display.Billboard.CENTER,
                     false,
-                    plugin.getLabelTextScale(), false
+                    plugin.getLabelTextScale(),
+                    false,
+                    placed.owner(),
+                    ENTITY_ROLE_CARD_LABEL
                 );
                 mountTextDisplay(cardDisplay, label, labelLocation, false);
                 spawned.add(label.getUniqueId());
@@ -3684,7 +5540,13 @@ public final class PhysicalTableManager {
     ) {
         Location capturerLocation = handCardCapturerLocation(
             cardBaseLocation, capturerEnvelope, capturerHeight);
-        Interaction capturer = spawnInteraction(capturerLocation, capturerWidth, capturerHeight);
+        Interaction capturer = spawnInteraction(
+            capturerLocation,
+            capturerWidth,
+            capturerHeight,
+            placed.owner(),
+            ENTITY_ROLE_CARD_CAPTURER
+        );
         spawned.add(capturer.getUniqueId());
         cardBindings.put(capturer.getUniqueId(),
             new CardBinding(table.getName(), playerId, card.id()));
@@ -3738,6 +5600,7 @@ public final class PhysicalTableManager {
      */
     private UUID placeHandCardEdgeTile(
         GameTable table,
+        TableOwner owner,
         UUID playerId,
         DoudizhuCard anchorCard,
         HandEdge edge,
@@ -3777,8 +5640,15 @@ public final class PhysicalTableManager {
             reused.setInteractionHeight(capturerHeight);
             tile = reused;
         } else {
-            tile = spawnInteraction(tileLocation, (float) tileWidth, capturerHeight);
+            tile = spawnInteraction(
+                tileLocation,
+                (float) tileWidth,
+                capturerHeight,
+                owner,
+                ENTITY_ROLE_CARD_EDGE
+            );
         }
+        protectEntity(tile, owner, ENTITY_ROLE_CARD_EDGE);
         spawned.add(tile.getUniqueId());
         cardBindings.put(tile.getUniqueId(),
             new CardBinding(table.getName(), playerId, anchorCard.id()));
@@ -3799,6 +5669,7 @@ public final class PhysicalTableManager {
      */
     private UUID reuseHandCardCapturer(
         GameTable table,
+        TableOwner owner,
         UUID playerId,
         DoudizhuCard card,
         Interaction capturer,
@@ -3817,6 +5688,7 @@ public final class PhysicalTableManager {
         );
         capturer.setInteractionWidth(capturerWidth);
         capturer.setInteractionHeight(capturerHeight);
+        protectEntity(capturer, owner, ENTITY_ROLE_CARD_CAPTURER);
         spawned.add(capturer.getUniqueId());
         cardBindings.put(capturer.getUniqueId(),
             new CardBinding(table.getName(), playerId, card.id()));
@@ -3933,6 +5805,7 @@ public final class PhysicalTableManager {
         List<DoudizhuCard> hand = table.getHand(playerId);
         if (visuals == null || visuals.size() != hand.size()) {
             renderPrivateHand(table, placed, playerId);
+            reindexPlacedTableEntities(normalize(placed.tableName()), placed);
             return;
         }
 
@@ -3969,6 +5842,7 @@ public final class PhysicalTableManager {
             HandCardVisual visual = visuals.get(card.id());
             if (visual == null) {
                 renderPrivateHand(table, placed, playerId);
+                reindexPlacedTableEntities(normalize(placed.tableName()), placed);
                 return;
             }
             boolean isSelected = selected.contains(card.id());
@@ -3988,6 +5862,7 @@ public final class PhysicalTableManager {
             Entity labelEntity = visual.labelId() == null ? null : Bukkit.getEntity(visual.labelId());
             if (!(cardEntity instanceof ItemDisplay cardDisplay)) {
                 renderPrivateHand(table, placed, playerId);
+                reindexPlacedTableEntities(normalize(placed.tableName()), placed);
                 return;
             }
             // 捕获器缺失就整手重建，和牌本体缺失同口径：它是右键选牌唯一的事件入口，
@@ -3997,6 +5872,7 @@ public final class PhysicalTableManager {
                 : Bukkit.getEntity(visual.capturerId());
             if (!(capturerEntity instanceof Interaction)) {
                 renderPrivateHand(table, placed, playerId);
+                reindexPlacedTableEntities(normalize(placed.tableName()), placed);
                 return;
             }
 
@@ -4053,6 +5929,7 @@ public final class PhysicalTableManager {
         List<DoudizhuCard> hand = table.getHand(playerId);
         if (visuals == null || visuals.size() != hand.size()) {
             renderBacksideHand(table, placed, playerId);
+            reindexPlacedTableEntities(normalize(placed.tableName()), placed);
             return;
         }
 
@@ -4077,6 +5954,7 @@ public final class PhysicalTableManager {
             Entity entity = entityId == null ? null : Bukkit.getEntity(entityId);
             if (!(entity instanceof ItemDisplay cardDisplay)) {
                 renderBacksideHand(table, placed, playerId);
+                reindexPlacedTableEntities(normalize(placed.tableName()), placed);
                 return;
             }
             boolean isSelected = selected.contains(card.id());
@@ -4133,14 +6011,14 @@ public final class PhysicalTableManager {
             return;
         }
         if (keepCapturers.isEmpty() && keepEdgeTiles.isEmpty()) {
-            clearEntities(entities, false);
+            clearOwnedEntities(placed.owner(), entities, false);
             return;
         }
         Set<UUID> kept = java.util.stream.Stream
             .concat(keepCapturers.values().stream(), keepEdgeTiles.values().stream())
             .map(Entity::getUniqueId)
             .collect(java.util.stream.Collectors.toSet());
-        clearEntities(entities.stream().filter(id -> !kept.contains(id)).toList(), false);
+            clearOwnedEntities(placed.owner(), entities.stream().filter(id -> !kept.contains(id)).toList(), false);
     }
 
     private void clearBacksideEntities(PlacedTable placed, UUID playerId) {
@@ -4148,16 +6026,16 @@ public final class PhysicalTableManager {
         placed.backsideVisualsByPlayer().remove(playerId);
         selectedProgressByPlayer.remove(playerId);
         if (entities != null) {
-            clearEntities(entities, false);
+            clearOwnedEntities(placed.owner(), entities, false);
         }
     }
 
-    private void clearEntities(List<UUID> entityIds, boolean publicCards) {
+    private void clearOwnedEntities(TableOwner owner, List<UUID> entityIds, boolean publicCards) {
         for (UUID entityId : entityIds) {
             actionBindings.remove(entityId);
             cardBindings.remove(entityId);
             Entity entity = Bukkit.getEntity(entityId);
-            if (entity != null) {
+            if (entity != null && ownedBy(entity, owner)) {
                 entity.remove();
             }
         }
@@ -4166,25 +6044,138 @@ public final class PhysicalTableManager {
         }
     }
 
+    /**
+     * 拆桌的世界操作必须投递到桌锚点 region。
+     *
+     * <p>牌桌实体属于桌的 owner region，不是发起拆桌的玩家所在 region：两者可以不在同一个区域，
+     * 在错误 region 上动实体会在 Folia 上直接非法。方向与麻将 {@code removeVisuals} 的收口一致。
+     *
+     * <p>异步提交，因此调用方不再等实体真正删除；失败必须记录日志，不能静默吞掉
+     * （{@code runRegionStage} 只在 future 上完成异常，不抛回调用线程）。
+     */
+    private void cleanupPlacedTableOnOwnerRegion(PlacedTable placed) {
+        runRegionStage(placed.anchor(), () -> {
+            cleanupPlacedTable(placed);
+            purgeResidualWorldArtifacts(placed.anchor(), placed.yaw());
+        }).exceptionally(failure -> {
+            plugin.getLogger().warning("拆桌清理失败: " + placed.tableName() + "，原因=" + failure.getMessage());
+            return null;
+        });
+    }
+
     private void cleanupPlacedTable(PlacedTable placed) {
-        clearCraftEngineEntities(placed.craftEngineVisualEntities());
+        cleanupPlacedTable(placed == null ? null : placed.owner(), placed);
+    }
+
+    private void cleanupPlacedTable(TableOwner owner, PlacedTable placed) {
+        requireOwner(owner, placed);
+        clearCraftEngineEntities(owner, placed.craftEngineVisualEntities());
         String tableKey = normalize(placed.tableName());
         actionSignatureByTable.remove(tableKey);
         privateHandSignatureByTable.remove(tableKey);
         backsideHandSignatureByTable.remove(tableKey);
         handDealPresentations.remove(tableKey);
-        clearEntities(placed.actionEntities(), false);
+        clearOwnedEntities(owner, placed.actionEntities(), false);
         for (UUID playerId : new ArrayList<>(placed.backsideEntitiesByPlayer().keySet())) {
             clearBacksideEntities(placed, playerId);
         }
         for (UUID playerId : new ArrayList<>(placed.privateEntitiesByPlayer().keySet())) {
             clearPrivateEntities(placed, playerId);
         }
-        clearEntities(placed.staticEntities(), false);
+        clearOwnedEntities(owner, placed.staticEntities(), false);
         restoreBlocks(placed.blockRestores());
     }
 
-    private void clearCraftEngineEntities(List<UUID> entityIds) {
+    static boolean matchesEntityOwner(
+        TableOwner expected,
+        String actualOwnerId,
+        String actualOwnerName,
+        String actualTableName,
+        String actualRole,
+        Long actualGeneration
+    ) {
+        if (expected == null
+            || actualOwnerId == null
+            || actualOwnerName == null
+            || actualTableName == null
+            || actualRole == null
+            || actualRole.isBlank()
+            || actualGeneration == null) {
+            return false;
+        }
+        String expectedOwnerId = expected.id() == null ? "" : expected.id().toString();
+        String expectedOwnerName = expected.name() == null ? "" : expected.name();
+        return expectedOwnerId.equals(actualOwnerId)
+            && expectedOwnerName.equals(actualOwnerName)
+            && expected.tableName().equals(actualTableName)
+            && expected.generation() == actualGeneration;
+    }
+
+    private boolean ownedBy(Entity entity, TableOwner owner) {
+        if (entity == null || owner == null) {
+            diagnoseOwnershipMismatch(entity, owner, null, null, null, null, null);
+            return false;
+        }
+        var pdc = entity.getPersistentDataContainer();
+        String actualOwnerId = pdc.get(entityOwnerKey, PersistentDataType.STRING);
+        String actualOwnerName = pdc.get(entityOwnerNameKey, PersistentDataType.STRING);
+        String actualTableName = pdc.get(entityTableKey, PersistentDataType.STRING);
+        String actualRole = pdc.get(entityRoleKey, PersistentDataType.STRING);
+        Long actualGeneration = pdc.get(entityGenerationKey, PersistentDataType.LONG);
+        boolean matches = matchesEntityOwner(
+            owner,
+            actualOwnerId,
+            actualOwnerName,
+            actualTableName,
+            actualRole,
+            actualGeneration
+        );
+        if (!matches) {
+            diagnoseOwnershipMismatch(
+                entity,
+                owner,
+                actualOwnerId,
+                actualOwnerName,
+                actualTableName,
+                actualRole,
+                actualGeneration
+            );
+        }
+        return matches;
+    }
+
+    private void diagnoseOwnershipMismatch(
+        Entity entity,
+        TableOwner expected,
+        String actualOwnerId,
+        String actualOwnerName,
+        String actualTableName,
+        String actualRole,
+        Long actualGeneration
+    ) {
+        plugin.getLogger().warning(
+            "跳过牌桌实体清理：owner PDC 不匹配"
+                + " entity=" + (entity == null ? "null" : entity.getUniqueId())
+                + " expectedTable=" + (expected == null ? "null" : expected.tableName())
+                + " expectedGeneration=" + (expected == null ? "null" : expected.generation())
+                + " actualTable=" + actualTableName
+                + " actualGeneration=" + actualGeneration
+                + " actualRole=" + actualRole
+                + " actualOwnerId=" + actualOwnerId
+                + " actualOwnerName=" + actualOwnerName
+        );
+    }
+
+    private void requireOwner(TableOwner owner, PlacedTable placed) {
+        if (placed == null) {
+            return;
+        }
+        if (owner != null && placed.owner() != null && !Objects.equals(owner, placed.owner())) {
+            throw new IllegalStateException("牌桌实体 owner 不匹配: " + placed.tableName());
+        }
+    }
+
+    private void clearCraftEngineEntities(TableOwner owner, List<UUID> entityIds) {
         java.util.LinkedHashSet<UUID> uniqueIds = new java.util.LinkedHashSet<>(entityIds);
         for (UUID entityId : uniqueIds) {
             Entity entity = Bukkit.getEntity(entityId);
@@ -4278,14 +6269,12 @@ public final class PhysicalTableManager {
      * @param entityId 实体 id
      * @return 属于任意牌桌的牌实体时返回 true
      */
+    static boolean isTrackedEntity(Map<UUID, TableOwner> trackedOwners, UUID entityId) {
+        return entityId != null && trackedOwners != null && trackedOwners.containsKey(entityId);
+    }
+
     private boolean isTrackedCardEntity(UUID entityId) {
-        for (PlacedTable placed : placedTables.values()) {
-            if (placed.privateEntitiesByPlayer().values().stream().anyMatch(ids -> ids.contains(entityId))
-                || placed.backsideEntitiesByPlayer().values().stream().anyMatch(ids -> ids.contains(entityId))) {
-                return true;
-            }
-        }
-        return false;
+        return isTrackedEntity(trackedEntityOwnersById, entityId);
     }
 
     private void clearResidualEntities(List<Location> hotspots, double radiusXz, double radiusY) {
@@ -4312,6 +6301,12 @@ public final class PhysicalTableManager {
                     continue;
                 }
                 if (entity instanceof ItemDisplay || entity instanceof TextDisplay || entity instanceof Interaction) {
+                    if (entity.getScoreboardTags().contains(PROTECTED_ENTITY_TAG)) {
+                        plugin.getLogger().warning(
+                            "跳过残留实体清理：MUZ 实体缺少当前牌桌 owner 匹配，避免误删邻桌实体: "
+                                + entity.getUniqueId());
+                        continue;
+                    }
                     forceRemoveEntityTree(entity);
                     continue;
                 }
@@ -4334,11 +6329,11 @@ public final class PhysicalTableManager {
         if (plugin.isShuttingDown()) {
             return;
         }
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            if (revealed || viewer.getUniqueId().equals(ownerId)) {
-                viewer.showEntity(plugin, entity);
+        for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+            if (revealed || viewerId.equals(ownerId)) {
+                playerOutput.showEntity(viewerId, plugin, entity);
             } else {
-                viewer.hideEntity(plugin, entity);
+                playerOutput.hideEntity(viewerId, plugin, entity);
             }
         }
     }
@@ -4352,13 +6347,19 @@ public final class PhysicalTableManager {
             if (entity == null) {
                 continue;
             }
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                viewer.hideEntity(plugin, entity);
+            for (UUID viewerId : onlinePlayerIdsSnapshot()) {
+                playerOutput.hideEntity(viewerId, plugin, entity);
             }
         }
     }
 
-    private ItemDisplay spawnFurnitureDisplay(Location location, ItemStack item, float scale) {
+    private ItemDisplay spawnFurnitureDisplay(
+        Location location,
+        ItemStack item,
+        float scale,
+        TableOwner owner,
+        String role
+    ) {
         return VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(item);
             spawned.setBillboard(Display.Billboard.FIXED);
@@ -4368,15 +6369,28 @@ public final class PhysicalTableManager {
                 new Vector3f(scale, scale, scale),
                 new AxisAngle4f()
             ));
-            protectEntity(spawned);
+            protectEntity(spawned, owner, role);
         });
     }
 
-    private ItemDisplay spawnPlacedCard(Location location, ItemStack item, Vector3f scale, float yaw) {
-        return spawnPlacedCard(location, item, scale, yaw, 0.0f);
+    private ItemDisplay spawnPlacedCard(
+        Location location,
+        ItemStack item,
+        Vector3f scale,
+        float yaw,
+        TableOwner owner
+    ) {
+        return spawnPlacedCard(location, item, scale, yaw, 0.0f, owner);
     }
 
-    private ItemDisplay spawnPlacedCard(Location location, ItemStack item, Vector3f scale, float yaw, float lift) {
+    private ItemDisplay spawnPlacedCard(
+        Location location,
+        ItemStack item,
+        Vector3f scale,
+        float yaw,
+        float lift,
+        TableOwner owner
+    ) {
         ItemDisplay display = VersionCompat.spawnEntity(location.getWorld(), location, ItemDisplay.class, spawned -> {
             // 与开局槽位同样先隐藏，再由牌主/背面可见性路由放行，重建也不能先泄露牌面。
             spawned.setVisibleByDefault(false);
@@ -4384,22 +6398,22 @@ public final class PhysicalTableManager {
             spawned.setBillboard(Display.Billboard.FIXED);
             spawned.setTransformation(cardTransformation(scale, lift));
             configureCardAnimation(spawned);
-            protectEntity(spawned);
+            protectEntity(spawned, owner, ENTITY_ROLE_CARD);
         });
         applyStableYaw(display, yaw);
         return display;
     }
 
-    private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background) {
-        return spawnText(location, text, billboard, background, 1.0f);
-    }
-
-    private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background, float scale) {
-        return spawnText(location, text, billboard, background, scale, true);
-    }
-
-    private TextDisplay spawnText(Location location, Component text, Display.Billboard billboard, boolean background,
-                                  float scale, boolean visibleByDefault) {
+    private TextDisplay spawnText(
+        Location location,
+        Component text,
+        Display.Billboard billboard,
+        boolean background,
+        float scale,
+        boolean visibleByDefault,
+        TableOwner owner,
+        String role
+    ) {
         return VersionCompat.spawnEntity(location.getWorld(), location, TextDisplay.class, spawned -> {
             // 私有牌点数标签与牌面同步，出生即隐藏，不能在后续 hide 前暴露一次。
             spawned.setVisibleByDefault(visibleByDefault);
@@ -4411,7 +6425,7 @@ public final class PhysicalTableManager {
                 spawned.setCustomNameVisible(true);
             }
             TypewriterTextStyle.apply(spawned, billboard, background, scale);
-            protectEntity(spawned);
+            protectEntity(spawned, owner, role);
         });
     }
 
@@ -4434,12 +6448,18 @@ public final class PhysicalTableManager {
         }
     }
 
-    private Interaction spawnInteraction(Location location, float width, float height) {
+    private Interaction spawnInteraction(
+        Location location,
+        float width,
+        float height,
+        TableOwner owner,
+        String role
+    ) {
         return VersionCompat.spawnEntity(location.getWorld(), location, Interaction.class, spawned -> {
             spawned.setInteractionWidth(width);
             spawned.setInteractionHeight(height);
             spawned.setResponsive(true);
-            protectEntity(spawned);
+            protectEntity(spawned, owner, role);
         });
     }
 
@@ -4456,7 +6476,12 @@ public final class PhysicalTableManager {
         Location moved = target.clone();
         moved.setYaw(current.getYaw());
         moved.setPitch(current.getPitch());
-        entity.teleport(moved);
+        // IMPORTANT FOLIA: 区域线程里禁止同步传送，必须走 teleportAsync。
+        // 实服验收证据：/muz bot add → refreshActionButtons → syncActionWidgets 链在一条 region
+        // 线程上触发 UnsupportedOperationException("Must use teleportAsync while in region threading")。
+        // teleportAsync 在 Paper 上同样可用，故两条后端共用这一条路径，不做平台分支。
+        // 返回的 future 刻意不消费：这是「每 tick 校正一次」的幂等位置写入，下一次 refresh 会重新判定。
+        entity.teleportAsync(moved);
     }
 
     /**
@@ -4479,8 +6504,32 @@ public final class PhysicalTableManager {
         display.setRotation(normalizedTarget, 0.0f);
     }
 
-    private void protectEntity(Entity entity) {
+    private void protectEntity(Entity entity, TableOwner owner, String role) {
         TableEntityGeometry.protectEntity(entity, PROTECTED_ENTITY_TAG);
+        writeEntityOwnership(entity, owner, role);
+    }
+
+    private void writeEntityOwnership(Entity entity, TableOwner owner, String role) {
+        if (entity == null || owner == null) {
+            return;
+        }
+        entity.getPersistentDataContainer().set(
+            entityOwnerKey,
+            PersistentDataType.STRING,
+            owner.id() == null ? "" : owner.id().toString()
+        );
+        entity.getPersistentDataContainer().set(
+            entityOwnerNameKey,
+            PersistentDataType.STRING,
+            owner.name() == null ? "" : owner.name()
+        );
+        entity.getPersistentDataContainer().set(entityTableKey, PersistentDataType.STRING, owner.tableName());
+        entity.getPersistentDataContainer().set(
+            entityRoleKey,
+            PersistentDataType.STRING,
+            role == null || role.isBlank() ? ENTITY_ROLE_UNKNOWN : role
+        );
+        entity.getPersistentDataContainer().set(entityGenerationKey, PersistentDataType.LONG, owner.generation());
     }
 
     private boolean matchesExpectedPlacedBlock(org.bukkit.block.Block block, PlacedTable placed) {
@@ -4578,7 +6627,7 @@ public final class PhysicalTableManager {
             && location.getBlockZ() == block.getZ();
     }
 
-    private void addEntityTreeIds(UUID rootId, List<UUID> target) {
+    private void addEntityTreeIds(UUID rootId, List<UUID> target, TableOwner owner, String role) {
         Entity root = Bukkit.getEntity(rootId);
         if (root == null) {
             if (!target.contains(rootId)) {
@@ -4586,7 +6635,7 @@ public final class PhysicalTableManager {
             }
             return;
         }
-        protectEntityTree(root);
+        protectEntityTree(root, owner, role);
         collectEntityTreeIds(root, target);
     }
 
@@ -4622,13 +6671,13 @@ public final class PhysicalTableManager {
         }
     }
 
-    private void protectEntityTree(Entity entity) {
+    private void protectEntityTree(Entity entity, TableOwner owner, String role) {
         if (entity == null) {
             return;
         }
-        protectEntity(entity);
+        protectEntity(entity, owner, role);
         for (Entity passenger : entity.getPassengers()) {
-            protectEntityTree(passenger);
+            protectEntityTree(passenger, owner, role);
         }
     }
 
@@ -4804,6 +6853,17 @@ public final class PhysicalTableManager {
         return base.add(0.5, 0.0, 0.5);
     }
 
+    private TableOwner tableOwner(String tableName, UUID ownerId, String ownerName) {
+        String normalized = normalize(tableName);
+        long current = tableGenerationByName.getOrDefault(normalized, 0L);
+        if (current == Long.MAX_VALUE) {
+            throw new IllegalStateException("牌桌实体 owner 代次已耗尽: " + tableName);
+        }
+        long generation = current + 1L;
+        tableGenerationByName.put(normalized, generation);
+        return new TableOwner(ownerId, ownerName, normalized, generation);
+    }
+
     private PlacedTable placedTable(String tableName) {
         if (tableName == null) {
             return null;
@@ -4828,15 +6888,41 @@ public final class PhysicalTableManager {
         String normalized = normalize(tableName);
         PlacedTable removed = placedTables.remove(normalized);
         if (removed != null) {
+            unindexPlacedTable(normalized, removed);
+            playDetailLastRefreshBucketByTable.remove(normalized);
+            plugin.getTableManager().markTableUnplaced(removed.tableName());
             return removed;
         }
         for (Map.Entry<String, PlacedTable> entry : new ArrayList<>(placedTables.entrySet())) {
             if (entry.getValue().tableName().equalsIgnoreCase(tableName.trim())) {
                 placedTables.remove(entry.getKey());
+                unindexPlacedTable(entry.getKey(), entry.getValue());
+                playDetailLastRefreshBucketByTable.remove(entry.getKey());
+                plugin.getTableManager().markTableUnplaced(entry.getValue().tableName());
                 return entry.getValue();
             }
         }
         return null;
+    }
+
+    /**
+     * 只允许按捕获时的对象身份摘除牌桌；身份变化必须显式失败，不能静默摘错桌或吞掉失败。
+     */
+    private void removePlacedTableIfSame(String tableName, PlacedTable expected) {
+        String normalized = normalize(tableName);
+        if (normalized == null || expected == null) {
+            throw new IllegalStateException("区块加载修复缺少放置身份: " + tableName);
+        }
+        PlacedTable current = placedTables.get(normalized);
+        if (current != expected) {
+            throw new IllegalStateException("区块加载修复放置身份不匹配，不摘除牌桌: " + tableName);
+        }
+        if (!placedTables.remove(normalized, expected)) {
+            throw new IllegalStateException("区块加载修复摘除牌桌失败，放置身份已变化: " + tableName);
+        }
+        unindexPlacedTable(normalized, expected);
+        playDetailLastRefreshBucketByTable.remove(normalized);
+        plugin.getTableManager().markTableUnplaced(expected.tableName());
     }
 
     private NamespacedKey configuredModelKey(String itemModelId, NamespacedKey fallback) {
@@ -4977,10 +7063,10 @@ public final class PhysicalTableManager {
                 new ActionButtonState("ready", "加倍", ButtonAction.DOUBLE_YES, 0.40)
             );
             case PLAYING -> List.of(
-                new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.72),
-                new ActionButtonState("pass", "不要", ButtonAction.PASS_TURN, -0.24),
-                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.24),
-                new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.72)
+                // 桌上「道具」按钮已删除：道具改由物品栏直接使用（默认鸡蛋/水桶/番茄 + 第九格聊天气泡）。
+                new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.60),
+                new ActionButtonState("pass", "不要", ButtonAction.PASS_TURN, 0.0),
+                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.60)
             );
             case LOBBY -> List.of(
                 new ActionButtonState("ready", "准备", ButtonAction.READY, -0.64),
@@ -5024,15 +7110,14 @@ public final class PhysicalTableManager {
             return phaseStates;
         }
         if (!owner.equals(table.getCurrentTurn())) {
-            return List.of(new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.0));
+            return List.of();
         }
         boolean canPass = table.getLeadPlayer() != null && !owner.equals(table.getLeadPlayer());
         return canPass
             ? phaseStates
             : List.of(
                 new ActionButtonState("inspect", "提示", ButtonAction.HINT_PLAY, -0.56),
-                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.56),
-                new ActionButtonState("gadget", "道具", ButtonAction.GADGET, 0.0)
+                new ActionButtonState("refresh", "清选", ButtonAction.CLEAR_SELECTION, 0.56)
             );
     }
 
@@ -5079,14 +7164,14 @@ public final class PhysicalTableManager {
         // “提示”按钮每按一次就切到下一组建议牌
         List<List<DoudizhuCard>> hints = buildHints(table, player.getUniqueId());
         if (hints.isEmpty()) {
-            hint(player, "这手没什么能出的。", NamedTextColor.GRAY);
+            hint(player.getUniqueId(), "这手没什么能出的。", NamedTextColor.GRAY);
             return;
         }
         int index = hintIndices.getOrDefault(player.getUniqueId(), 0) % hints.size();
         table.replaceSelection(player.getUniqueId(), hints.get(index));
         hintIndices.put(player.getUniqueId(), index + 1);
         refreshPrivateHand(table, player.getUniqueId());
-        hint(player, "提示第 " + (index + 1) + " 组，可再次点击切换。", NamedTextColor.YELLOW);
+        hint(player.getUniqueId(), "提示第 " + (index + 1) + " 组，可再次点击切换。", NamedTextColor.YELLOW);
     }
 
     private List<List<DoudizhuCard>> buildHints(GameTable table, UUID playerId) {
@@ -5381,13 +7466,18 @@ public final class PhysicalTableManager {
         };
     }
 
-    private void playSelectionSound(Player player, boolean selected) {
-        DoudizhuPlugin.SelectionSound sound = plugin.selectionSoundFor(player.getUniqueId());
+    private void playSelectionSound(UUID playerId, boolean selected) {
+        DoudizhuPlugin.SelectionSound sound = plugin.selectionSoundFor(playerId);
         if (sound.volume() <= 0.0f) {
             return;
         }
         float pitch = selected ? sound.selectedPitch() : sound.deselectedPitch();
-        player.playSound(player.getLocation(), sound.key(), sound.volume(), pitch);
+        playerOutput.playSound(playerId, sound.key(), sound.volume(), pitch);
+    }
+
+    /** 只读取连接生命周期提供的不可变 UUID 快照；后续玩家 API 一律交给 PlayerOutputDispatcher。 */
+    private List<UUID> onlinePlayerIdsSnapshot() {
+        return playerPresence.snapshot();
     }
 
     private Component message(String text, NamedTextColor color) {
@@ -5843,7 +7933,17 @@ public final class PhysicalTableManager {
     }
 
     private HandCardPickGeometry.Hit pickHandCard(GameTable table, PlacedTable placed, Player viewer) {
-        UUID playerId = viewer.getUniqueId();
+        Location eye = viewer.getEyeLocation();
+        return pickHandCard(table, placed, viewer.getUniqueId(), eye, eye.getDirection());
+    }
+
+    private HandCardPickGeometry.Hit pickHandCard(
+        GameTable table,
+        PlacedTable placed,
+        UUID playerId,
+        Location eye,
+        org.bukkit.util.Vector direction
+    ) {
         int seatIndex = placedSeatIndex(placed, playerId);
         if (seatIndex < 0) {
             return null;
@@ -5856,7 +7956,6 @@ public final class PhysicalTableManager {
         if (hand.isEmpty()) {
             return null;
         }
-        Location eye = viewer.getEyeLocation();
         if (eye.getWorld() == null || placed.anchor().getWorld() == null || !eye.getWorld().equals(placed.anchor().getWorld())) {
             return null;
         }
@@ -5894,7 +7993,6 @@ public final class PhysicalTableManager {
                 env.halfHeight()
             ));
         }
-        org.bukkit.util.Vector direction = eye.getDirection();
         HandCardPickGeometry.Hit hit = HandCardPickGeometry.pick(
             quads,
             eye.getX() * lateral.x() + eye.getZ() * lateral.z(),
@@ -6012,7 +8110,7 @@ public final class PhysicalTableManager {
             .decoration(TextDecoration.ITALIC, false);
         Component body = MuzTheme.named(raw, color)
             .decoration(TextDecoration.ITALIC, false);
-        player.sendMessage(prefix.append(body));
+        playerOutput.sendMessage(player.getUniqueId(), prefix.append(body));
         // 落盘用未上色的 raw，不走 Component：文件是给人和 AI 读的，
         // 颜色码/MiniMessage 标签在文本里只是噪音。
         appendTraceLine(player.getName(), raw);
@@ -6169,10 +8267,12 @@ public final class PhysicalTableManager {
      *
      * @param table 玩家所在牌桌
      * @param placed 对应的实体桌
-     * @param viewer 开了显示的玩家
+     * @param viewerId 开了显示的玩家 UUID
+     * @param eye 玩家在 player lane 拍下的视线位置
+     * @param direction 玩家在 player lane 拍下的视线方向
      */
-    private void refreshPickDebug(GameTable table, PlacedTable placed, Player viewer) {
-        UUID playerId = viewer.getUniqueId();
+    private void refreshPickDebug(GameTable table, PlacedTable placed, UUID viewerId, Location eye, org.bukkit.util.Vector direction) {
+        UUID playerId = viewerId;
         int seatIndex = placedSeatIndex(placed, playerId);
         Map<Integer, HandCardVisual> visuals = placed.privateVisualsByPlayer().get(playerId);
         List<DoudizhuCard> hand = table.getHand(playerId);
@@ -6180,7 +8280,7 @@ public final class PhysicalTableManager {
             clearPickDebug(playerId);
             return;
         }
-        HandCardPickGeometry.Hit hit = pickHandCard(table, placed, viewer);
+        HandCardPickGeometry.Hit hit = pickHandCard(table, placed, playerId, eye, direction);
         Set<Integer> selection = table.getSelection(playerId);
         // 签名覆盖所有会改变线框位置的输入：命中哪张、选中集合、手牌张数。
         // 手牌位置本身只在这三者之一变化时才动，所以不必把坐标纳入签名。
@@ -6245,7 +8345,7 @@ public final class PhysicalTableManager {
             collectRect(pending, isSelected ? unified[1] : unified[0],
                 centerU, centerN, baseY, PICK_DEBUG_EFFECTIVE_COLOR, 2, isSelected);
         }
-        applyPickDebugPool(viewer, pending, lateral, depth, panelYaw);
+        applyPickDebugPool(playerId, eye.getWorld(), placed.owner(), pending, lateral, depth, panelYaw);
     }
 
     /** 一块待落的实心判定区面板：中心局部坐标 (u, n)、世界 Y、半宽、半高、颜色与层序。 */
@@ -6296,14 +8396,14 @@ public final class PhysicalTableManager {
      * 光靠它纠不回朝向，所以复用与新建两条路都要显式落 yaw。
      */
     private void applyPickDebugPool(
-        Player viewer,
+        UUID playerId,
+        World world,
+        TableOwner owner,
         List<PendingDebugRect> pending,
         Vector lateral,
         Vector depth,
         float panelYaw
     ) {
-        UUID playerId = viewer.getUniqueId();
-        World world = viewer.getWorld();
         List<UUID> pool = pickDebugPool.computeIfAbsent(playerId, key -> new ArrayList<>());
         for (int i = 0; i < pending.size(); i++) {
             PendingDebugRect rect = pending.get(i);
@@ -6321,15 +8421,16 @@ public final class PhysicalTableManager {
                     // teleportIfMoved 只比位置、且刻意保留实体原有 yaw/pitch，复用旧面板时朝向不会被纠正。
                     // 少了这一步，改完 yaw 仍然看不见——池里的老实体会一直停在 yaw=0 被侧着看。
                     applyStableYaw(line, panelYaw);
+                    protectEntity(line, owner, ENTITY_ROLE_DEBUG_PANEL);
                 } else {
                     if (existing != null) {
                         existing.remove();
                     }
-                    line = spawnPickDebugPanel(viewer, target);
+                    line = spawnPickDebugPanel(playerId, target, owner);
                     pool.set(i, line.getUniqueId());
                 }
             } else {
-                line = spawnPickDebugPanel(viewer, target);
+                line = spawnPickDebugPanel(playerId, target, owner);
                 pool.add(line.getUniqueId());
             }
             stylePickDebugPanel(line, rect);
@@ -6361,7 +8462,7 @@ public final class PhysicalTableManager {
      * <p>关键设置：FIXED 朝向让面板贴牌面、不跟视角转；setSeeThrough(true) 让面板穿透牌本身，
      * 否则面板会被牌挡在背后白画了；setShadowed(false) + setTextOpacity 1 消除空格文字本体干扰。
      */
-    private TextDisplay spawnPickDebugPanel(Player viewer, Location location) {
+    private TextDisplay spawnPickDebugPanel(UUID viewerId, Location location, TableOwner owner) {
         return VersionCompat.spawnEntity(location.getWorld(), location, TextDisplay.class, spawned -> {
             // 单空格撑开背景板面积，绝不能换成空文本组件（面积为 0、静默不可见，见类上方 Javadoc）。
             spawned.text(Component.text(" "));
@@ -6374,13 +8475,14 @@ public final class PhysicalTableManager {
             // 消除空格文字本体的阴影与本影（空格本身不可见，但保险起见）
             spawned.setShadowed(false);
             spawned.setTextOpacity((byte) 1);
-            protectEntity(spawned);
-            // 只给开启者看：其余在线玩家一律隐藏
-            for (Player other : Bukkit.getOnlinePlayers()) {
-                if (!other.getUniqueId().equals(viewer.getUniqueId())) {
-                    other.hideEntity(plugin, spawned);
+            protectEntity(spawned, owner, ENTITY_ROLE_DEBUG_PANEL);
+            // 只给开启者看：其余在线玩家一律隐藏；玩家 API 由 dispatcher 投递到 player lane。
+            for (UUID otherId : onlinePlayerIdsSnapshot()) {
+                if (!otherId.equals(viewerId)) {
+                    playerOutput.hideEntity(otherId, plugin, spawned);
                 }
             }
+            playerOutput.showEntity(viewerId, plugin, spawned);
         });
     }
 
@@ -6405,28 +8507,29 @@ public final class PhysicalTableManager {
         ));
     }
 
-    private void updateHoverState(GameTable table, Player viewer) {
-        PlacedTable placed = placedTable(table.getName());
-        if (placed == null) {
-            clearHover(viewer.getUniqueId());
+    private void updateHoverState(GameTable table, PlacedTable placed, UUID viewerId, Location eye, org.bukkit.util.Vector direction) {
+        if (placed == null || viewerId == null || eye == null || direction == null) {
+            if (viewerId != null) {
+                clearHover(viewerId);
+            }
             return;
         }
-        HandCardPickGeometry.Hit hit = pickHandCard(table, placed, viewer);
+        HandCardPickGeometry.Hit hit = pickHandCard(table, placed, viewerId, eye, direction);
         Integer hovered = hit == null ? null : hit.cardId();
-        Integer previous = hoveredCardIds.get(viewer.getUniqueId());
+        Integer previous = hoveredCardIds.get(viewerId);
         // IMPORTANT REGRESSION GUARD:
         // Hover state must clear immediately when the pointer leaves a card.
         // Candidate/grace retention caused stale hover residue and made cards look stuck in an old hover frame.
-        hoverCandidateCardIds.remove(viewer.getUniqueId());
-        hoverCandidateTicksByViewer.remove(viewer.getUniqueId());
-        hoverGraceTicksByViewer.remove(viewer.getUniqueId());
+        hoverCandidateCardIds.remove(viewerId);
+        hoverCandidateTicksByViewer.remove(viewerId);
+        hoverGraceTicksByViewer.remove(viewerId);
         if ((previous == null && hovered == null) || (previous != null && previous.equals(hovered))) {
             return;
         }
         if (hovered == null) {
-            hoveredCardIds.remove(viewer.getUniqueId());
+            hoveredCardIds.remove(viewerId);
         } else {
-            hoveredCardIds.put(viewer.getUniqueId(), hovered);
+            hoveredCardIds.put(viewerId, hovered);
         }
     }
 
@@ -6442,8 +8545,8 @@ public final class PhysicalTableManager {
     /**
      * 玩家下线时清掉他在这里的所有按玩家分组的缓存。
      *
-     * <p>【为什么必须由退出事件显式调用】：{@link #tick()} 里的清理只遍历
-     * {@code Bukkit.getOnlinePlayers()}，离线玩家的 key 根本轮不到，
+     * <p>【为什么必须由退出事件显式调用】：单桌 owner tick 只处理当前牌桌座位，
+     * 不再遍历 {@code Bukkit.getOnlinePlayers()} 清理全服玩家；离线玩家的 key 根本轮不到，
      * 于是 hover/选中/调试面板这几张 map 会把已经下线的 UUID 永久留着。
      * 单个 key 很小，但服务器长期运行、玩家反复进出，累积量是无上限的。
      *
@@ -6833,12 +8936,118 @@ public final class PhysicalTableManager {
     ) {
     }
 
+    private record CleanupPlan(
+        String tableKey,
+        GameTable table,
+        TableOwner owner,
+        Location anchor,
+        float yaw,
+        Map<Integer, UUID> seatAssignments,
+        List<Long> footprintChunkKeys,
+        List<UUID> staticEntities,
+        List<UUID> craftEngineEntities,
+        List<UUID> actionEntities,
+        List<UUID> seatNameEntities,
+        List<UUID> seatInfoEntities,
+        List<UUID> privateEntities,
+        List<UUID> backsideEntities,
+        UUID statusDisplayId,
+        UUID playDetailDisplayId,
+        List<CleanupRegionPart> parts,
+        List<String> unresolved,
+        long epoch
+    ) {
+        private CleanupPlan {
+            anchor = anchor == null ? null : anchor.clone();
+            seatAssignments = Map.copyOf(new LinkedHashMap<>(seatAssignments));
+            footprintChunkKeys = List.copyOf(footprintChunkKeys);
+            staticEntities = List.copyOf(staticEntities);
+            craftEngineEntities = List.copyOf(craftEngineEntities);
+            actionEntities = List.copyOf(actionEntities);
+            seatNameEntities = List.copyOf(seatNameEntities);
+            seatInfoEntities = List.copyOf(seatInfoEntities);
+            privateEntities = List.copyOf(privateEntities);
+            backsideEntities = List.copyOf(backsideEntities);
+            parts = List.copyOf(parts);
+            unresolved = List.copyOf(unresolved);
+        }
+    }
+
+    private record CleanupRegionPart(
+        Location ownerLocation,
+        List<CleanupEntity> entities,
+        List<CleanupFurniture> furniture,
+        List<CleanupBlock> blocks
+    ) {
+        private CleanupRegionPart {
+            ownerLocation = ownerLocation.clone();
+            entities = List.copyOf(entities);
+            furniture = List.copyOf(furniture);
+            blocks = List.copyOf(blocks);
+        }
+    }
+
+    private record CleanupEntity(UUID entityId, Location location) {
+        private CleanupEntity {
+            location = location.clone();
+        }
+    }
+
+    private record CleanupFurniture(UUID rootId, Location rootLocation) {
+        private CleanupFurniture {
+            rootLocation = rootLocation.clone();
+        }
+    }
+
+    private record CleanupBlock(BlockState state, Location location) {
+        private CleanupBlock {
+            location = location.clone();
+        }
+    }
+
+    private static final class CleanupRegionPartBuilder {
+        private final Location ownerLocation;
+        private final List<CleanupEntity> entities = new ArrayList<>();
+        private final List<CleanupFurniture> furniture = new ArrayList<>();
+        private final List<CleanupBlock> blocks = new ArrayList<>();
+
+        private CleanupRegionPartBuilder(Location ownerLocation) {
+            this.ownerLocation = ownerLocation.clone();
+        }
+
+        private CleanupRegionPart freeze() {
+            return new CleanupRegionPart(ownerLocation, entities, furniture, blocks);
+        }
+    }
+
+    /**
+     * 一次异步重建的冻结参数快照。
+     *
+     * <p>异步流水线把「加载 → 清旧 → 生成新 → 收口索引 → 刷新」拆到不同 lane 上执行，期间共享的
+     * {@code placedTables} / footprint 索引 / 实体索引可能被别的路径改写。因此 region 回调
+     * **只允许**读取这份冻结快照（旧桌、旧/新锚点、座位归属、目标桌实例），新的
+     * {@code PlacedTable} 由 region 回调作为返回值交回，由 global 收口 stage 统一提交。
+     */
+    private record RebuildRequest(
+        String tableKey,
+        String tableName,
+        PlacedTable previous,
+        Location oldAnchor,
+        Location newAnchor,
+        float yaw,
+        UUID ownerId,
+        String ownerName,
+        Map<Integer, UUID> seatAssignments,
+        GameTable table
+    ) {
+    }
+
     private record PlacedTable(
         String tableName,
         Location anchor,
         float yaw,
-        UUID ownerId,
-        String ownerName,
+        TableOwner owner,
+        List<Long> footprintChunkKeys,
         List<UUID> staticEntities,
         List<UUID> craftEngineVisualEntities,
         List<BlockRestore> blockRestores,
@@ -6854,13 +9063,21 @@ public final class PhysicalTableManager {
         List<UUID> seatInfoDisplayIds,
         List<UUID> actionEntities
     ) {
+        private UUID ownerId() {
+            return owner == null ? null : owner.id();
+        }
+
+        private String ownerName() {
+            return owner == null ? null : owner.name();
+        }
+
         private PlacedTable withStatusDisplayId(UUID newStatusDisplayId) {
             return new PlacedTable(
                 tableName,
                 anchor,
                 yaw,
-                ownerId,
-                ownerName,
+                owner,
+                footprintChunkKeys,
                 staticEntities,
                 craftEngineVisualEntities,
                 blockRestores,
@@ -6883,8 +9100,8 @@ public final class PhysicalTableManager {
                 tableName,
                 anchor,
                 yaw,
-                ownerId,
-                ownerName,
+                owner,
+                footprintChunkKeys,
                 staticEntities,
                 craftEngineVisualEntities,
                 blockRestores,
@@ -6932,6 +9149,10 @@ public final class PhysicalTableManager {
     }
 
     private record BlockRestore(BlockState originalState) {
+    }
+
+    /** 单桌 footprint 的世界区块键；世界 UUID 与打包后的 chunk 坐标共同构成 owner 索引键。 */
+    private record ChunkOwnerKey(UUID worldId, long chunkKey) {
     }
 
     enum ButtonAction {

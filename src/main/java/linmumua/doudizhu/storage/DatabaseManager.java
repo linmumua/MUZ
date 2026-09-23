@@ -2,6 +2,7 @@ package linmumua.doudizhu.storage;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.room.TableLevel;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import java.io.File;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -11,12 +12,16 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import linmumua.doudizhu.config.MuzYamlConfig;
 
 public final class DatabaseManager {
@@ -38,13 +43,21 @@ public final class DatabaseManager {
      */
     private volatile SqlConfig config;
     private volatile boolean initialized;
+    private volatile boolean closing;
     private volatile String status = "尚未连接";
+    /** 所有异步数据库操作都登记在这里，关闭时等待其完成，避免任务被 Paper 直接取消。 */
+    private final Set<CompletableFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
+    /** 把关闭与新写入串起来，避免 flush 开始后又偷偷登记一笔新的数据库操作。 */
+    private final Object lifecycleLock = new Object();
 
     public DatabaseManager(DoudizhuPlugin plugin) {
         this.plugin = plugin;
     }
 
     public boolean initialize() {
+        synchronized (lifecycleLock) {
+            closing = false;
+        }
         config = SqlConfig.fromConfig(plugin, plugin.yamlConfig());
         try {
             if (config.type() == SqlType.SQLITE) {
@@ -82,16 +95,62 @@ public final class DatabaseManager {
     }
 
     public void close() {
-        initialized = false;
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return;
+            }
+            closing = true;
+            initialized = false;
+        }
+        status = "数据库已关闭";
+        flushPendingWrites(5000L);
     }
 
     /**
-     * 把一次写库丢到异步线程，关服时退化成同步。
+     * 等待已经提交的数据库操作完成。正常运行期不调用；关服时由插件入口调用，
+     * 让已排队的异步写库有机会落盘。超时只记录警告，不伪造“已完成”。
+     */
+    public void flushPendingWrites(long timeoutMillis) {
+        long timeout = Math.max(0L, timeoutMillis);
+        long deadline = System.nanoTime() + timeout * 1_000_000L;
+        while (!pendingOperations.isEmpty()) {
+            List<CompletableFuture<?>> snapshot = List.copyOf(pendingOperations);
+            try {
+                CompletableFuture.allOf(snapshot.toArray(CompletableFuture[]::new)).get(
+                    Math.max(1L, deadline - System.nanoTime()),
+                    java.util.concurrent.TimeUnit.NANOSECONDS
+                );
+                return;
+            } catch (java.util.concurrent.TimeoutException exception) {
+                plugin.getLogger().warning("等待数据库异步写入超时，仍有 " + pendingOperations.size() + " 个操作未完成");
+                return;
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                plugin.getLogger().warning("等待数据库异步写入时被中断");
+                return;
+            } catch (java.util.concurrent.ExecutionException exception) {
+                plugin.getLogger().warning("数据库异步操作失败: " + exception.getCause());
+                return;
+            }
+        }
+    }
+
+    /**
+     * 把一次写库丢到异步线程；关服/禁用时退化成同步执行。
      *
-     * <p>【为什么必须有同步回退】：Bukkit 在插件 disable 之后再调 runTaskAsynchronously
-     * 会抛 IllegalPluginAccessException；而且已排队未执行的异步任务会被直接取消——
-     * 关服那一刻提交的写库就丢了。所以关服路径上宁可阻塞主线程也要把数据落下去，
-     * 反正那时已经不在乎卡顿了。
+     * <p>【为什么关服必须有同步回退】：Bukkit 在插件 disable 之后再提交异步任务会抛
+     * IllegalPluginAccessException，而且已排队未执行的异步任务会被直接丢弃——
+     * 关服那一刻提交的写库就永久丢失了。所以关服路径上宁可阻塞调用线程也要把数据落盘，
+     * 防止关服/禁用阶段提交的写库被静默丢掉。
+     *
+     * <p>【如实记录代价】：同步回退会在调用线程（可能是 onDisable 主线程，也可能是迟到的
+     * region/owner 线程）直接执行同步 JDBC，会阻塞该线程。这是明确选择的取舍：宁可让关服/迟到
+     * 线程短暂卡住，也不接受关服那一刻的写库永久丢失。
+     *
+     * <p>【异步段仍保留】：插件仍启用时照常异步提交，由插件入口在 scheduler/backend 关闭前
+     * 调用 {@link #flushPendingWrites(long)} 等待已登记操作完成。若调度门面在「插件仍启用但
+     * scheduler 已关闭」这类残余窗口返回 null 或已取消句柄，则就地移除该 completion、以异常
+     * 结束并记 warning，避免 flush 空等到超时同时静默丢数据。
      *
      * <p>【为什么写操作可以 fire-and-forget】：upsertTable / deleteTable / insertMatch
      * 三个方法的返回值在所有调用点都被丢弃（insertMatch 虽然返回 matchId，但
@@ -101,19 +160,53 @@ public final class DatabaseManager {
      * @param what 失败时写进日志的操作名
      */
     private void runWrite(String what, SqlWrite write) {
+        CompletableFuture<Void> completion = new CompletableFuture<>();
+        synchronized (lifecycleLock) {
+            if (closing || !initialized) {
+                plugin.getLogger().warning(what + "被拒绝：数据库正在关闭或尚未初始化");
+                return;
+            }
+            pendingOperations.add(completion);
+        }
         Runnable body = () -> {
             try {
                 write.run();
+                completion.complete(null);
             } catch (SQLException exception) {
                 // 异步线程里的异常不会自动进控制台，必须自己记，否则数据静默丢失。
                 plugin.getLogger().warning(what + "失败: " + exception.getMessage());
+                completion.completeExceptionally(exception);
+            } catch (RuntimeException exception) {
+                plugin.getLogger().warning(what + "失败: " + exception.getMessage());
+                completion.completeExceptionally(exception);
+            } finally {
+                pendingOperations.remove(completion);
             }
         };
+        // 关服/禁用：退化成同步执行，防止关服那一刻提交的写库在异步队列里被永久丢弃。
+        // 如实记录代价：这会阻塞调用线程（可能是 onDisable 主线程，也可能是迟到的 region/owner
+        // 线程）直接跑同步 JDBC；这是明确选择的取舍，宁可短暂卡住也不接受写库丢失。
         if (plugin.isShuttingDown() || !plugin.isEnabled()) {
             body.run();
             return;
         }
-        plugin.scheduler().runAsync(body);
+        try {
+            // 插件仍启用时保持异步提交，flushPendingWrites() 会在 scheduler/backend 关闭前等待它。
+            MuzScheduler.TaskHandle handle = plugin.scheduler().runAsync(body);
+            if (handle == null || handle.isCancelled()) {
+                // 残余窗口：插件仍启用但 scheduler 已关闭，调度门面会拒绝注册并返回 null/已取消句柄，
+                // body 永远不会执行。必须在这里就地收尾，否则这个 completion 会永远留在 pendingOperations 里，
+                // 让 flushPendingWrites() 空等到超时，同时这条写库被静默丢弃。
+                pendingOperations.remove(completion);
+                completion.completeExceptionally(
+                    new IllegalStateException("关闭阶段拒绝了异步写库任务: " + what));
+                plugin.getLogger().warning(what + "提交失败：调度门面在关闭阶段拒绝了异步写库任务");
+            }
+        } catch (RuntimeException exception) {
+            pendingOperations.remove(completion);
+            completion.completeExceptionally(exception);
+            plugin.getLogger().warning(what + "提交异步任务失败: " + exception.getMessage());
+        }
     }
 
     /** 允许抛 SQLException 的写库动作，交给 {@link #runWrite} 统一兜异常与选线程。 */
@@ -176,11 +269,77 @@ public final class DatabaseManager {
         }
     }
 
+    /** 异步加载牌桌的不可变结果，区分数据库未就绪、成功空表和读取失败。 */
+    public record TableLoadResult(
+        boolean ready,
+        List<PersistedTableRecord> records,
+        Throwable failure
+    ) {
+        public TableLoadResult {
+            records = records == null ? List.of() : List.copyOf(records);
+        }
+
+        public static TableLoadResult success(List<PersistedTableRecord> records) {
+            return new TableLoadResult(true, records, null);
+        }
+
+        public static TableLoadResult notReady() {
+            return new TableLoadResult(false, List.of(), null);
+        }
+
+        public static TableLoadResult failure(Throwable failure) {
+            return new TableLoadResult(false, List.of(), failure);
+        }
+    }
+
     public List<PersistedTableRecord> loadTables() {
         List<PersistedTableRecord> result = new ArrayList<>();
         if (!initialized) {
             return result;
         }
+        return readTablesNow();
+    }
+
+    /**
+     * 异步读取持久化牌桌。DTO 明确携带成功状态，调用方不会把数据库失败误判为空表。
+     * 旧的 {@link #loadTables()} 保留给兼容调用方，但启动恢复应优先使用此入口。
+     */
+    public CompletableFuture<TableLoadResult> loadTablesAsync() {
+        CompletableFuture<TableLoadResult> completion = new CompletableFuture<>();
+        pendingOperations.add(completion);
+        Runnable body = () -> {
+            try {
+                if (!initialized) {
+                    completion.complete(TableLoadResult.notReady());
+                } else {
+                    completion.complete(TableLoadResult.success(readTablesNow()));
+                }
+            } catch (RuntimeException exception) {
+                plugin.getLogger().warning("读取持久化牌桌失败: " + exception.getMessage());
+                completion.complete(TableLoadResult.failure(exception));
+            } finally {
+                pendingOperations.remove(completion);
+            }
+        };
+        synchronized (lifecycleLock) {
+            if (closing || !initialized) {
+                pendingOperations.remove(completion);
+                completion.complete(TableLoadResult.notReady());
+                return completion;
+            }
+        }
+        try {
+            // 关闭阶段不再把读取退化到当前 owner 线程，避免迟到 region/player 回调同步触碰 JDBC。
+            plugin.scheduler().runAsync(body);
+        } catch (RuntimeException exception) {
+            pendingOperations.remove(completion);
+            completion.complete(TableLoadResult.failure(exception));
+        }
+        return completion;
+    }
+
+    private List<PersistedTableRecord> readTablesNow() {
+        List<PersistedTableRecord> result = new ArrayList<>();
         return withReadConnection("读取持久化牌桌失败", result, connection -> {
             Map<String, PersistedTableRecord> deduped = new LinkedHashMap<>();
             try (PreparedStatement statement = connection.prepareStatement(

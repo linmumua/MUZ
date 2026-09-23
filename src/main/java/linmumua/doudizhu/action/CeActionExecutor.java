@@ -1,15 +1,18 @@
 package linmumua.doudizhu.action;
 
-import linmumua.doudizhu.DoudizhuPlugin;
-import linmumua.doudizhu.game.GameTable;
-import linmumua.doudizhu.model.CardPattern;
-import linmumua.doudizhu.model.DoudizhuCard;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
+import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
+import linmumua.doudizhu.model.CardPattern;
+import linmumua.doudizhu.model.DoudizhuCard;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -31,9 +34,11 @@ public final class CeActionExecutor {
         List<DoudizhuCard> cards,
         DoudizhuPlugin.OptionProfile profile
     ) {
-        if (profile == null || profile.spec().isBlank()) {
+        if (plugin == null || player == null || profile == null || profile.spec().isBlank()) {
             return;
         }
+        UUID playerId = player.getUniqueId();
+        PlayerOutputDispatcher output = outputDispatcher(plugin);
         Map<String, String> args = parse(profile.spec());
         String type = args.getOrDefault("type", "none").toLowerCase(Locale.ROOT);
         if (type.equals("none")) {
@@ -42,53 +47,65 @@ public final class CeActionExecutor {
 
         try {
             switch (type) {
-                case "message" -> {
-                    String message = replace(args.getOrDefault("message", ""), player, table, pattern, cards);
+                case "message" -> output.runPlayer(playerId, current -> {
+                    String message = replace(args.getOrDefault("message", ""), current.getName(), table, pattern, cards);
                     if (!message.isBlank()) {
-                        player.sendMessage(MINI_MESSAGE.deserialize(message));
+                        current.sendMessage(MINI_MESSAGE.deserialize(message));
                     }
-                }
-                case "actionbar" -> {
-                    String actionbar = replace(args.getOrDefault("actionbar", args.getOrDefault("message", "")), player, table, pattern, cards);
+                });
+                case "actionbar" -> output.runPlayer(playerId, current -> {
+                    String actionbar = replace(
+                        args.getOrDefault("actionbar", args.getOrDefault("message", "")),
+                        current.getName(), table, pattern, cards
+                    );
                     if (!actionbar.isBlank()) {
-                        player.sendActionBar(MINI_MESSAGE.deserialize(actionbar));
+                        current.sendActionBar(MINI_MESSAGE.deserialize(actionbar));
                     }
-                }
-                case "title" -> {
-                    String title = replace(args.getOrDefault("title", ""), player, table, pattern, cards);
-                    String subtitle = replace(args.getOrDefault("subtitle", ""), player, table, pattern, cards);
+                });
+                case "title" -> output.runPlayer(playerId, current -> {
+                    String title = replace(args.getOrDefault("title", ""), current.getName(), table, pattern, cards);
+                    String subtitle = replace(args.getOrDefault("subtitle", ""), current.getName(), table, pattern, cards);
                     int fadeIn = intValue(args.get("fade-in"), 5);
                     int stay = intValue(args.get("stay"), 30);
                     int fadeOut = intValue(args.get("fade-out"), 10);
-                    player.showTitle(net.kyori.adventure.title.Title.title(
-                        MINI_MESSAGE.deserialize(title.isBlank() ? "<gradient:" + ACCENT + ":" + WARM + "><bold>出牌已确认</bold></gradient>" : title),
+                    current.showTitle(Title.title(
+                        MINI_MESSAGE.deserialize(title.isBlank()
+                            ? "<gradient:" + ACCENT + ":" + WARM + "><bold>出牌已确认</bold></gradient>"
+                            : title),
                         MINI_MESSAGE.deserialize(subtitle),
-                        net.kyori.adventure.title.Title.Times.times(
+                        Title.Times.times(
                             java.time.Duration.ofMillis(fadeIn * 50L),
                             java.time.Duration.ofMillis(stay * 50L),
                             java.time.Duration.ofMillis(fadeOut * 50L)
                         )
                     ));
-                }
+                });
                 case "command" -> {
-                    String command = replace(args.getOrDefault("command", ""), player, table, pattern, cards);
-                    if (!command.isBlank()) {
-                        if (booleanValue(args.get("as-player"))) {
-                            String normalized = command.startsWith("/") ? command.substring(1) : command;
-                            player.performCommand(normalized);
-                        } else {
-                            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command.startsWith("/") ? command.substring(1) : command);
+                    if (booleanValue(args.get("as-player"))) {
+                        output.runPlayer(playerId, current -> {
+                            String command = replace(args.getOrDefault("command", ""), current.getName(), table, pattern, cards);
+                            if (!command.isBlank()) {
+                                current.performCommand(normalizeCommand(command));
+                            }
+                        });
+                    } else {
+                        String playerName = player.getName();
+                        String command = replace(args.getOrDefault("command", ""), playerName, table, pattern, cards);
+                        if (!command.isBlank()) {
+                            plugin.scheduler().runGlobal(() -> Bukkit.dispatchCommand(
+                                Bukkit.getConsoleSender(), normalizeCommand(command)
+                            ));
                         }
                     }
                 }
-                case "play_sound" -> {
-                    String sound = replace(args.getOrDefault("sound", ""), player, table, pattern, cards);
+                case "play_sound" -> output.runPlayer(playerId, current -> {
+                    String sound = replace(args.getOrDefault("sound", ""), current.getName(), table, pattern, cards);
                     float volume = floatValue(args.get("volume"), 1.0f);
                     float pitch = floatValue(args.get("pitch"), 1.0f);
                     if (!sound.isBlank() && volume > 0.0f) {
-                        player.playSound(player.getLocation(), sound, volume, pitch);
+                        current.playSound(current.getLocation(), sound, volume, pitch);
                     }
-                }
+                });
                 default -> plugin.getLogger().warning("Unsupported CE action type in play profile: " + type);
             }
         } catch (RuntimeException exception) {
@@ -97,18 +114,32 @@ public final class CeActionExecutor {
     }
 
     public static void previewPlayProfile(DoudizhuPlugin plugin, Player player, DoudizhuPlugin.OptionProfile profile) {
+        if (plugin == null || player == null) {
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        PlayerOutputDispatcher output = outputDispatcher(plugin);
         if (profile == null || profile.spec().isBlank()) {
-            player.sendActionBar(MINI_MESSAGE.deserialize("<" + MUTED + ">当前方案没有可预览内容</" + MUTED + ">"));
+            output.sendActionBar(playerId, MINI_MESSAGE.deserialize("<" + MUTED + ">当前方案没有可预览内容</" + MUTED + ">"));
             return;
         }
         Map<String, String> args = parse(profile.spec());
         String type = args.getOrDefault("type", "none").toLowerCase(Locale.ROOT);
         try {
             switch (type) {
-                case "none" -> player.sendActionBar(MINI_MESSAGE.deserialize("<" + MUTED + ">当前行为方案不会额外执行操作</" + MUTED + ">"));
-                case "message" -> player.sendMessage(MINI_MESSAGE.deserialize("<" + ACCENT + ">行为预览</" + ACCENT + "><dark_gray> · </dark_gray><" + WARM + ">聊天提示</" + WARM + ">"));
-                case "actionbar" -> player.sendActionBar(MINI_MESSAGE.deserialize("<" + ACCENT + ">行为预览</" + ACCENT + "><dark_gray> · </dark_gray><" + WARM + ">动作栏提示</" + WARM + ">"));
-                case "title" -> player.showTitle(net.kyori.adventure.title.Title.title(
+                case "none" -> output.sendActionBar(
+                    playerId,
+                    MINI_MESSAGE.deserialize("<" + MUTED + ">当前行为方案不会额外执行操作</" + MUTED + ">")
+                );
+                case "message" -> output.sendMessage(
+                    playerId,
+                    MINI_MESSAGE.deserialize("<" + ACCENT + ">行为预览</" + ACCENT + "><dark_gray> · </dark_gray><" + WARM + ">聊天提示</" + WARM + ">")
+                );
+                case "actionbar" -> output.sendActionBar(
+                    playerId,
+                    MINI_MESSAGE.deserialize("<" + ACCENT + ">行为预览</" + ACCENT + "><dark_gray> · </dark_gray><" + WARM + ">动作栏提示</" + WARM + ">")
+                );
+                case "title" -> output.showTitle(playerId, Title.title(
                     MINI_MESSAGE.deserialize("<gradient:" + ACCENT + ":" + WARM + "><bold>行为预览</bold></gradient>"),
                     MINI_MESSAGE.deserialize("<" + MUTED + ">" + profile.label() + "</" + MUTED + ">")
                 ));
@@ -117,18 +148,38 @@ public final class CeActionExecutor {
                     float volume = floatValue(args.get("volume"), 1.0f);
                     float pitch = floatValue(args.get("pitch"), 1.0f);
                     if (!sound.isBlank() && volume > 0.0f) {
-                        player.playSound(player.getLocation(), sound, volume, pitch);
+                        output.playSound(playerId, sound, volume, pitch);
                     } else {
-                        player.sendActionBar(MINI_MESSAGE.deserialize("<" + WARM + ">这个行为方案没有可播放的声音</" + WARM + ">"));
+                        output.sendActionBar(
+                            playerId,
+                            MINI_MESSAGE.deserialize("<" + WARM + ">这个行为方案没有可播放的声音</" + WARM + ">")
+                        );
                     }
                 }
-                case "command" -> player.sendActionBar(MINI_MESSAGE.deserialize("<" + WARM + ">命令行为不能直接预览</" + WARM + ">"));
-                default -> player.sendActionBar(MINI_MESSAGE.deserialize("<" + DANGER + ">暂不支持预览这个行为类型</" + DANGER + ">"));
+                case "command" -> output.sendActionBar(
+                    playerId,
+                    MINI_MESSAGE.deserialize("<" + WARM + ">命令行为不能直接预览</" + WARM + ">")
+                );
+                default -> output.sendActionBar(
+                    playerId,
+                    MINI_MESSAGE.deserialize("<" + DANGER + ">暂不支持预览这个行为类型</" + DANGER + ">")
+                );
             }
         } catch (RuntimeException exception) {
             plugin.getLogger().warning("Failed to preview play action profile: " + exception.getMessage());
-            player.sendActionBar(MINI_MESSAGE.deserialize("<" + DANGER + ">行为预览失败</" + DANGER + ">"));
+            output.sendActionBar(playerId, MINI_MESSAGE.deserialize("<" + DANGER + ">行为预览失败</" + DANGER + ">"));
         }
+    }
+
+    private static PlayerOutputDispatcher outputDispatcher(DoudizhuPlugin plugin) {
+        if (plugin.getActionBarOverlayService() != null) {
+            return plugin.getActionBarOverlayService().outputDispatcher();
+        }
+        return new PlayerOutputDispatcher(plugin);
+    }
+
+    private static String normalizeCommand(String command) {
+        return command.startsWith("/") ? command.substring(1) : command;
     }
 
     private static Map<String, String> parse(String raw) {
@@ -149,11 +200,11 @@ public final class CeActionExecutor {
         return values;
     }
 
-    private static String replace(String raw, Player player, GameTable table, CardPattern pattern, List<DoudizhuCard> cards) {
+    private static String replace(String raw, String playerName, GameTable table, CardPattern pattern, List<DoudizhuCard> cards) {
         String cardsText = cards.stream().map(DoudizhuCard::displayLabel).collect(Collectors.joining(" "));
         String patternText = table.describePlayedCards(pattern, cards);
         return raw
-            .replace("<arg:player.name>", player.getName())
+            .replace("<arg:player.name>", playerName)
             .replace("<arg:table.name>", table.getName())
             .replace("<arg:pattern>", patternText)
             .replace("<arg:cards>", cardsText);

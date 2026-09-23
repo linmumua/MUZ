@@ -12,6 +12,19 @@ import org.bukkit.entity.Player;
  * 正数表示重复任务；实现必须保留 TaskHandle 的取消语义。
  */
 public interface SchedulerBackend {
+    /**
+     * 返回该后端所属的 owner 标识。后端未提供标识时由 MuzScheduler 使用实现类名称兜底。
+     */
+    default String ownerId() {
+        return getClass().getName();
+    }
+
+    /**
+     * 关闭后端并取消后端仍持有的任务。默认实现保持旧测试后端的兼容性。
+     */
+    default void close() {
+    }
+
     MuzScheduler.TaskHandle runGlobal(
         long delay,
         long period,

@@ -1,11 +1,14 @@
 package linmumua.doudizhu.game;
 
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.HudOverlayLayout;
@@ -19,7 +22,6 @@ import linmumua.doudizhu.ui.MuzTheme;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
 /**
@@ -360,6 +362,8 @@ final class TrickHudService {
     private final DoudizhuPlugin plugin;
     private final CraftEngineOffsetService offsetService;
     private final PlayerHeadRenderer headRenderer;
+    /** 玩家输出门面；BossBar/ActionBar 的客户端调用统一由 player lane 执行。 */
+    private final PlayerOutputDispatcher output;
 
     /**
      * 当前生效的配置快照。
@@ -390,6 +394,18 @@ final class TrickHudService {
     /** 上一次发给该观看者的那一行，内容没变就不重新解析 MiniMessage，也不重发。 */
     private final Map<UUID, String> lastLines = new HashMap<>();
 
+    /**
+     * 由 player lane 采集、供 table/region owner 消费的不可变玩家输入。
+     * URL 只作为皮肤下载 key 传给头像渲染器，owner lane 不再触碰 PlayerProfile 或背包。
+     */
+    private record PlayerInputSnapshot(boolean online, URL skinUrl, boolean hasCounterItem) {
+        private static final PlayerInputSnapshot UNKNOWN = new PlayerInputSnapshot(true, null, false);
+        private static final PlayerInputSnapshot OFFLINE = new PlayerInputSnapshot(false, null, false);
+    }
+
+    private final Map<UUID, PlayerInputSnapshot> playerInputs = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> pendingPlayerInputs = new ConcurrentHashMap<>();
+
     /** 已经收到过「偏移不可用」提示的人，避免每秒刷屏。 */
     private final java.util.Set<UUID> offsetWarnedViewers = new java.util.HashSet<>();
 
@@ -398,10 +414,36 @@ final class TrickHudService {
         CraftEngineOffsetService offsetService,
         PlayerHeadRenderer headRenderer
     ) {
-        this.plugin = plugin;
-        this.offsetService = offsetService;
-        this.headRenderer = headRenderer;
+        this(
+            plugin,
+            offsetService,
+            headRenderer,
+            outputDispatcherOf(plugin)
+        );
+    }
+
+    /**
+     * 测试与受控装配入口：表内状态仍由调用方所在的 table/region owner 驱动，只有玩家输出
+     * 借由注入的门面切到 player lane。
+     */
+    TrickHudService(
+        DoudizhuPlugin plugin,
+        CraftEngineOffsetService offsetService,
+        PlayerHeadRenderer headRenderer,
+        PlayerOutputDispatcher output
+    ) {
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.offsetService = Objects.requireNonNull(offsetService, "offsetService");
+        this.headRenderer = Objects.requireNonNull(headRenderer, "headRenderer");
+        this.output = Objects.requireNonNull(output, "output");
         this.snapshot = buildSnapshot();
+    }
+
+    private static PlayerOutputDispatcher outputDispatcherOf(DoudizhuPlugin plugin) {
+        ActionBarOverlayService actionBar = plugin.getActionBarOverlayService();
+        return actionBar == null
+            ? new PlayerOutputDispatcher(plugin)
+            : actionBar.outputDispatcher();
     }
 
     /**
@@ -431,6 +473,45 @@ final class TrickHudService {
             loaded.avatarDownOffsetTier(),
             PlayerHeadRenderer.advanceWidth(loaded.avatarScale(), isOutlined())
         );
+    }
+
+    /**
+     * 在 UUID 对应的 player lane 采集一次不可变输入；owner lane 只读取完成后的快照。
+     *
+     * <p>不能在这里用 {@code Bukkit.getPlayer}：这条路径由牌桌 owner 调用，玩家实体、profile
+     * 和背包都必须在 player lane 内读取。玩家离线时 runPlayer 返回 null，显式写入离线快照，
+     * 避免把上一次在线状态继续当成当前输入。
+     */
+    private void requestPlayerInput(UUID playerId) {
+        if (playerId == null || pendingPlayerInputs.putIfAbsent(playerId, Boolean.TRUE) != null) {
+            return;
+        }
+        try {
+            if (output.runPlayer(playerId, player -> {
+                PlayerInputSnapshot input = new PlayerInputSnapshot(
+                    player.isOnline(),
+                    PlayerHeadRenderer.skinUrlOf(player),
+                    plugin.hasCounterItem(player));
+                playerInputs.put(playerId, input);
+                pendingPlayerInputs.remove(playerId);
+            }) == null) {
+                playerInputs.put(playerId, PlayerInputSnapshot.OFFLINE);
+                pendingPlayerInputs.remove(playerId);
+            }
+        } catch (RuntimeException exception) {
+            pendingPlayerInputs.remove(playerId);
+            throw exception;
+        }
+    }
+
+    private PlayerInputSnapshot playerInputOf(UUID playerId) {
+        return playerInputs.getOrDefault(playerId, PlayerInputSnapshot.UNKNOWN);
+    }
+
+    private void requestSeatInput(Seat seat) {
+        if (seat != null && !seat.isBot()) {
+            requestPlayerInput(seat.playerId());
+        }
     }
 
     /**
@@ -472,9 +553,11 @@ final class TrickHudService {
                     headRenderer.miniMessageForBot(
                         tableBotIds, seat.playerId(), scale, tier, false, continuousFont);
                 } else {
-                    Player player = Bukkit.getPlayer(seat.playerId());
-                    if (player != null) {
-                        headRenderer.miniMessageFor(player, scale, tier, false, continuousFont);
+                    requestPlayerInput(seat.playerId());
+                    PlayerInputSnapshot input = playerInputOf(seat.playerId());
+                    if (input.online()) {
+                        headRenderer.miniMessageFor(
+                            input.skinUrl(), scale, tier, false, continuousFont);
                     }
                 }
             }
@@ -517,9 +600,11 @@ final class TrickHudService {
                 headRenderer.miniMessageForBot(
                     tableBotIds, seat.playerId(), scale, tier, true, continuousFont);
             } else {
-                Player player = Bukkit.getPlayer(seat.playerId());
-                if (player != null) {
-                    headRenderer.miniMessageFor(player, scale, tier, true, continuousFont);
+                requestPlayerInput(seat.playerId());
+                PlayerInputSnapshot input = playerInputOf(seat.playerId());
+                if (input.online()) {
+                    headRenderer.miniMessageFor(
+                        input.skinUrl(), scale, tier, true, continuousFont);
                 }
             }
         }
@@ -616,6 +701,12 @@ final class TrickHudService {
     ) {
         Snapshot current0 = snapshot;
         Settings settings = current0.settings();
+        UUID viewerId = viewer.getUniqueId();
+        requestPlayerInput(viewerId);
+        requestSeatInput(previous);
+        requestSeatInput(current);
+        requestSeatInput(next);
+        PlayerInputSnapshot viewerInput = playerInputOf(viewerId);
         if (!settings.enabled()) {
             hide(viewer);
             return;
@@ -639,7 +730,7 @@ final class TrickHudService {
         boolean showCards = (visibleRows & 1) != 0;
         boolean showAvatars = (visibleRows & 2) != 0;
         boolean showCounter = settings.counterEnabled()
-            && (forceCounterWithoutItem || plugin.hasCounterItem(viewer))
+            && (forceCounterWithoutItem || viewerInput.hasCounterItem())
             && (visibleRows & 4) != 0;
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
@@ -776,7 +867,7 @@ final class TrickHudService {
         if (!offsetWarnedViewers.add(viewer.getUniqueId())) {
             return;
         }
-        viewer.sendActionBar(MuzTheme.danger(
+        output.sendActionBar(viewer.getUniqueId(), MuzTheme.danger(
             "出牌 HUD 不可用：连续字体覆盖层未校验，请重新生成并加载资源包"));
         plugin.getLogger().warning("出牌 HUD 因连续字体覆盖层未就绪而隐藏：card="
             + settings.cardOffsetDown() + ", avatar=" + settings.avatarOffsetDown()
@@ -793,7 +884,7 @@ final class TrickHudService {
         if (!offsetWarnedViewers.add(viewer.getUniqueId())) {
             return;
         }
-        viewer.sendActionBar(MuzTheme.danger(
+        output.sendActionBar(viewer.getUniqueId(), MuzTheme.danger(
             "出牌 HUD 不可用：CraftEngine 字体偏移没就绪，请检查资源包是否加载成功"));
         plugin.getLogger().warning("出牌 HUD 因 CraftEngine 字体偏移不可用而未显示，"
             + "常见原因是资源包配置解析失败（例如 configuration 下某个 yml 超过 SnakeYAML "
@@ -806,17 +897,14 @@ final class TrickHudService {
         BossBar bar = bars.remove(viewerId);
         lastLines.remove(viewerId);
         if (bar != null) {
-            viewer.hideBossBar(bar);
+            output.hideBossBar(viewerId, bar);
         }
     }
 
     /** 桌子销毁时把所有还挂着的 HUD 收掉，避免玩家屏幕上留一条永久的空轨道。 */
     void hideAll() {
         for (Map.Entry<UUID, BossBar> entry : bars.entrySet()) {
-            Player viewer = Bukkit.getPlayer(entry.getKey());
-            if (viewer != null) {
-                viewer.hideBossBar(entry.getValue());
-            }
+            output.hideBossBar(entry.getKey(), entry.getValue());
         }
         bars.clear();
         lastLines.clear();
@@ -848,10 +936,11 @@ final class TrickHudService {
             // 万一贴图没加载成功也只会露出空槽而不是一条满血条。
             bar = BossBar.bossBar(name, 0.0f, BAR_COLOR, BAR_OVERLAY);
             bars.put(viewerId, bar);
-            viewer.showBossBar(bar);
+            output.showBossBar(viewerId, bar);
             return;
         }
-        bar.name(name);
+        BossBar currentBar = bar;
+        output.runPlayer(viewerId, ignored -> currentBar.name(name));
     }
 
     /** 描边开着的话头像矩阵是 10x10，宽度跟着涨两列，槽宽算式要用同一个判断。 */
@@ -912,11 +1001,13 @@ final class TrickHudService {
             rendered = headRenderer.miniMessageForBot(
                 tableBotIds, seat.playerId(), scale, avatarRowDownTier, crowned, continuousFont);
         } else {
-            Player player = Bukkit.getPlayer(seat.playerId());
-            offline = player == null;
+            requestPlayerInput(seat.playerId());
+            PlayerInputSnapshot input = playerInputOf(seat.playerId());
+            offline = !input.online();
             rendered = offline
                 ? null
-                : headRenderer.miniMessageFor(player, scale, avatarRowDownTier, crowned, continuousFont);
+                : headRenderer.miniMessageFor(
+                    input.skinUrl(), scale, avatarRowDownTier, crowned, continuousFont);
         }
         return avatarSlotOf(
             seat, scale, isOutlined(), rendered, avatarRowDownTier, offline, continuousFont);

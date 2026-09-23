@@ -220,6 +220,12 @@ class GameTableOpeningFlowTest {
     private static GameTable openingTable(List<UUID> seats, Set<UUID> bots, Map<UUID, String> botNames) throws Exception {
         GameTable table = (GameTable) unsafe().allocateInstance(GameTable.class);
         DoudizhuPlugin plugin = (DoudizhuPlugin) unsafe().allocateInstance(DoudizhuPlugin.class);
+        // Unsafe 分配出的插件实例没有 PluginMeta，而 PhysicalTableManager 构造器要用
+        // NamespacedKey(plugin, ...) 取 namespace，所以必须先补插件元数据桩再构造管理器（顺序不能反）。
+        setField(plugin, "pluginMeta", pluginMetaStub());
+        // revealHand 的通知投递要经 plugin.scheduler() 建任务；Unsafe 分配的插件没有 server，
+        // 直接落到 PaperSchedulerBackend 会 NPE，所以装一个只记录、不执行的后端替身（行为测试不建 Bukkit 任务）。
+        setField(plugin, "scheduler", new MuzScheduler(new NoopSchedulerBackend()));
         setField(plugin, "physicalTableManager", new PhysicalTableManager(plugin));
         setPluginLogger(plugin);
         setField(table, "plugin", plugin);
@@ -381,6 +387,88 @@ class GameTableOpeningFlowTest {
 
     private static void setPluginLogger(DoudizhuPlugin plugin) throws Exception {
         setField(plugin, "logger", Logger.getLogger("GameTableOpeningFlowTest"));
+    }
+
+    /**
+     * 只登记不执行的后端替身：开局行为测试只关心状态机（阶段、明牌、倍数），
+     * 不应因为一次通知投递就在测试里真的建 Bukkit 任务（也因此不依赖 Bukkit 服务器实例）。
+     */
+    private static final class NoopSchedulerBackend implements linmumua.doudizhu.scheduler.SchedulerBackend {
+        @Override
+        public MuzScheduler.TaskHandle runGlobal(long delay, long period,
+                                                 java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return new NoopTaskHandle();
+        }
+
+        @Override
+        public MuzScheduler.TaskHandle runRegion(org.bukkit.Location location, long delay, long period,
+                                                 java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return new NoopTaskHandle();
+        }
+
+        @Override
+        public MuzScheduler.TaskHandle runEntity(org.bukkit.entity.Entity entity, long delay, long period,
+                                                 java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return new NoopTaskHandle();
+        }
+
+        @Override
+        public MuzScheduler.TaskHandle runPlayer(org.bukkit.entity.Player player, long delay, long period,
+                                                 java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return new NoopTaskHandle();
+        }
+
+        @Override
+        public MuzScheduler.TaskHandle runAsync(long delay, long period,
+                                                java.util.function.Consumer<MuzScheduler.TaskHandle> task) {
+            return new NoopTaskHandle();
+        }
+    }
+
+    private static final class NoopTaskHandle implements MuzScheduler.TaskHandle {
+        @Override
+        public void cancel() {
+        }
+    }
+
+    /**
+     * Unsafe 分配的插件实例没有 PluginMeta，而 {@code new NamespacedKey(plugin, …)} 需要
+     * {@code plugin.getPluginMeta().namespace()}。这里给一个最小桩：只保证 namespace/name 可用，
+     * 其余集合类方法返回空集合，避免后续调用点被 null 砸中。
+     */
+    private static Object pluginMetaStub() {
+        return java.lang.reflect.Proxy.newProxyInstance(
+            GameTableOpeningFlowTest.class.getClassLoader(),
+            new Class<?>[] {io.papermc.paper.plugin.configuration.PluginMeta.class},
+            (proxy, method, args) -> {
+                String name = method.getName();
+                if ("namespace".equals(name) || "getName".equals(name)) {
+                    return "muz";
+                }
+                if ("toString".equals(name)) {
+                    return "MUZ-PluginMetaStub";
+                }
+                if ("equals".equals(name)) {
+                    return args != null && args.length == 1 && proxy == args[0];
+                }
+                if ("hashCode".equals(name)) {
+                    return System.identityHashCode(proxy);
+                }
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class) {
+                    return false;
+                }
+                if (returnType == int.class) {
+                    return 0;
+                }
+                if (java.util.List.class.isAssignableFrom(returnType)) {
+                    return java.util.List.of();
+                }
+                if (java.util.Set.class.isAssignableFrom(returnType)) {
+                    return java.util.Set.of();
+                }
+                return null;
+            });
     }
 
     private static void setField(Object target, String fieldName, Object value) throws Exception {

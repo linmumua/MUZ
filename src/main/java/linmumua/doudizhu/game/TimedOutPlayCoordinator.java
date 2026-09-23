@@ -3,6 +3,7 @@ package linmumua.doudizhu.game;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.ai.AiChatGateway;
 import linmumua.doudizhu.model.DoudizhuCard;
+import linmumua.doudizhu.scheduler.MuzScheduler;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -11,6 +12,9 @@ import java.util.concurrent.TimeUnit;
 final class TimedOutPlayCoordinator {
     interface Support {
         DoudizhuPlugin plugin();
+        default MuzScheduler.TaskHandle runTableNow(Runnable task) {
+            return plugin().scheduler().runSync(task);
+        }
         boolean canScheduleTasks();
         int botActionEpoch();
         GamePhase phase();
@@ -71,7 +75,7 @@ final class TimedOutPlayCoordinator {
                 140
             ))
             .orTimeout(support.botAiTimeoutMs(), TimeUnit.MILLISECONDS)
-            .whenComplete((response, error) -> support.plugin().scheduler().runSync(() -> {
+            .whenComplete((response, error) -> support.runTableNow(() -> {
                 if (!isDecisionStillValid(playerId, epoch)) {
                     clearPending(playerId, epoch);
                     return;

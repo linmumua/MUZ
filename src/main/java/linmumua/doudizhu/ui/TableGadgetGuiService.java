@@ -2,6 +2,7 @@ package linmumua.doudizhu.ui;
 
 import java.nio.file.Path;
 import java.util.function.Consumer;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 
 /**
  * 牌桌道具箱的主装配门面。
@@ -42,5 +43,16 @@ public class TableGadgetGuiService extends GadgetBoxGuiService {
         String bubbleName
     ) {
         super(store, actionConsumer, saveListener, title, bubbleName);
+    }
+
+    public TableGadgetGuiService(
+        VirtualGadgetBarStore store,
+        Consumer<GadgetBoxGuiService.Action> actionConsumer,
+        Consumer<java.util.UUID> saveListener,
+        String title,
+        String bubbleName,
+        PlayerOutputDispatcher output
+    ) {
+        super(store, actionConsumer, saveListener, title, bubbleName, output);
     }
 }

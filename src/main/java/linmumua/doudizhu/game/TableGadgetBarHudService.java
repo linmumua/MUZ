@@ -5,6 +5,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
@@ -42,9 +43,10 @@ public final class TableGadgetBarHudService implements Listener {
     private final Consumer<Player> voiceOpener;
     private final Map<UUID, VirtualGadgetBar> bars = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
-    private final Map<UUID, Boolean> loading = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> loading = new ConcurrentHashMap<>();
+    private final Map<UUID, RefreshState> refreshStates = new ConcurrentHashMap<>();
     private MuzScheduler.TaskHandle task;
-    private boolean stopped;
+    private volatile boolean stopped;
 
     public TableGadgetBarHudService(
         DoudizhuPlugin plugin,
@@ -73,26 +75,35 @@ public final class TableGadgetBarHudService implements Listener {
     }
 
     public void refresh(UUID playerId) {
-        if (stopped || playerId == null || loading.putIfAbsent(playerId, true) != null) {
+        if (stopped || playerId == null) {
+            return;
+        }
+        RefreshState state = refreshStates.computeIfAbsent(playerId, ignored -> new RefreshState());
+        long generation = state.currentGeneration();
+        if (loading.putIfAbsent(playerId, generation) != null) {
             return;
         }
         CompletableFuture
             .supplyAsync(() -> store.loadRaw(playerId), ForkJoinPool.commonPool())
-            .whenComplete((raw, failure) -> plugin.scheduler().runLater(0L, () -> {
-                loading.remove(playerId);
-                if (stopped || failure != null) {
-                    if (failure != null) {
-                        plugin.getLogger().warning("读取玩家桌内道具栏失败 " + playerId + ": " + failure.getMessage());
-                    }
+            .whenComplete((raw, failure) -> {
+                loading.remove(playerId, generation);
+                if (failure != null) {
+                    plugin.getLogger().warning("读取玩家桌内道具栏失败 " + playerId + ": " + failure.getMessage());
                     return;
                 }
-                try {
-                    bars.put(playerId, store.decodeRaw(raw));
-                    normalizeSelection(playerId);
-                } catch (RuntimeException exception) {
-                    plugin.getLogger().warning("解码玩家桌内道具栏失败 " + playerId + ": " + exception.getMessage());
-                }
-            }));
+                PlayerOutputDispatcher output = actionBarOverlay.outputDispatcher();
+                output.runPlayer(playerId, ignored -> {
+                    if (!refreshResultAllowed(stopped, state, generation)) {
+                        return;
+                    }
+                    try {
+                        bars.put(playerId, store.decodeRaw(raw));
+                        normalizeSelection(playerId);
+                    } catch (RuntimeException exception) {
+                        plugin.getLogger().warning("解码玩家桌内道具栏失败 " + playerId + ": " + exception.getMessage());
+                    }
+                });
+            });
     }
 
     public int selectedIndex(UUID playerId) {
@@ -125,16 +136,13 @@ public final class TableGadgetBarHudService implements Listener {
         if (stopped) {
             return;
         }
+        PlayerOutputDispatcher output = actionBarOverlay.outputDispatcher();
         for (GameTable table : plugin.getTableManager().getTables()) {
             if (table.getPhase() != GamePhase.PLAYING || !gadgets.settings().enabled()) {
                 continue;
             }
             for (UUID playerId : table.getSeats()) {
-                if (table.isBot(playerId)) {
-                    continue;
-                }
-                Player player = Bukkit.getPlayer(playerId);
-                if (player == null || !player.isOnline()) {
+                if (table.isBot(playerId) || output.currentPlayer(playerId) == null) {
                     continue;
                 }
                 if (!bars.containsKey(playerId)) {
@@ -142,14 +150,75 @@ public final class TableGadgetBarHudService implements Listener {
                 }
                 Component bar = render(playerId);
                 Component overlay = actionBarOverlay.currentOverlay(playerId);
-                player.sendActionBar(overlay == null
-                    ? bar
-                    : overlay.append(Component.text("  ")).append(bar));
+                output.sendActionBar(playerId, compose(bar, overlay, playerId));
             }
         }
     }
 
     private static final MiniMessage MINI = MiniMessage.miniMessage();
+
+    /* 字体不可测时正文改走聊天，每人每 10 秒最多一次，避免刷屏。 */
+    private static final long CHAT_FALLBACK_INTERVAL_MILLIS = 10_000L;
+    private final Map<UUID, Long> lastChatFallback = new ConcurrentHashMap<>();
+    private final Map<UUID, Component> lastChatFallbackMessage = new ConcurrentHashMap<>();
+
+    /**
+     * 组合九格栏与普通提示，保证九格栏在屏幕上的位置固定不动。
+     *
+     * <p>客户端按 ActionBar 的【总前进量】居中。若直接把提示拼在栏前，提示长度一变，总宽随之变化，
+     * 栏就会左右漂移。这里沿用 {@link HotbarActionBarLayout} 的固定宽度算式：栏先画，再用负空格回退，
+     * 正文以栏的中线居中叠加，最后补偿到净前进量恒等于栏宽 —— 客户端居中的始终是栏本身。
+     *
+     * <p>栏与正文是 {@link Component#empty()} 下的兄弟节点，栏不会继承正文颜色被染色。
+     * 正文宽度必须用已验证的客户端字体快照精确测量；测不准时不猜，栏保持固定、正文改发聊天（限频）。
+     */
+    private Component compose(Component bar, Component overlay, UUID playerId) {
+        if (overlay == null) {
+            return bar;
+        }
+        int barWidth = SLOT_COUNT * PackAssets.GADGET_BAR_CELL_ADVANCE;
+        java.util.OptionalInt measured = measureOverlay(overlay);
+        if (!offsetService.isAvailable() || measured.isEmpty()) {
+            chatFallback(playerId, overlay);
+            return bar;
+        }
+        HotbarActionBarLayout.Layout layout = HotbarActionBarLayout.calculate(barWidth, measured.getAsInt());
+        return Component.empty()
+            .append(bar)
+            .append(offsetComponent(layout.afterGlyphOffset()))
+            .append(overlay)
+            .append(offsetComponent(layout.afterTextOffset()));
+    }
+
+    private java.util.OptionalInt measureOverlay(Component overlay) {
+        HudOverlayRuntimeState state = plugin.getHudOverlayRuntimeState();
+        linmumua.doudizhu.assets.HotbarFontMetrics metrics = state == null ? null : state.verifiedHotbarFontMetrics();
+        return metrics == null ? java.util.OptionalInt.empty() : metrics.measure(overlay);
+    }
+
+    private Component offsetComponent(int pixels) {
+        if (pixels == 0) {
+            return Component.empty();
+        }
+        String mini = offsetService.offset(pixels);
+        return mini.isEmpty() ? Component.empty() : MINI.deserialize(mini).decoration(TextDecoration.ITALIC, false);
+    }
+
+    private void chatFallback(UUID playerId, Component overlay) {
+        // 同一条提示只发一次：tick 每 2 tick 执行、提示在对局中持续存在，只按时间限频会让
+        // 字体不可测的服务器整局每 10 秒重复刷同一句。内容变化才重发，且仍受 10 秒限频。
+        if (overlay.equals(lastChatFallbackMessage.get(playerId))) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Long last = lastChatFallback.get(playerId);
+        if (last != null && now - last < CHAT_FALLBACK_INTERVAL_MILLIS) {
+            return;
+        }
+        lastChatFallback.put(playerId, now);
+        lastChatFallbackMessage.put(playerId, overlay);
+        actionBarOverlay.outputDispatcher().sendMessage(playerId, overlay);
+    }
 
     private Component render(UUID playerId) {
         VirtualGadgetBar bar = bar(playerId);
@@ -172,7 +241,10 @@ public final class TableGadgetBarHudService implements Listener {
                 text.append(PackAssets.gadgetBarSelectGlyphText());
             }
         }
-        return MINI.deserialize(text.toString()).decoration(TextDecoration.ITALIC, false);
+        // 位图字形会乘以文字颜色；显式白色保证贴图原色显示，不被上下文颜色染色。
+        return MINI.deserialize(text.toString())
+            .color(net.kyori.adventure.text.format.NamedTextColor.WHITE)
+            .decoration(TextDecoration.ITALIC, false);
     }
 
     private VirtualGadgetBar bar(UUID playerId) {
@@ -203,15 +275,19 @@ public final class TableGadgetBarHudService implements Listener {
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
-        refresh(event.getPlayer().getUniqueId());
+        UUID playerId = event.getPlayer().getUniqueId();
+        invalidateRefresh(playerId);
+        refresh(playerId);
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
+        invalidateRefresh(playerId);
         bars.remove(playerId);
         selectedSlots.remove(playerId);
-        loading.remove(playerId);
+        lastChatFallback.remove(playerId);
+        lastChatFallbackMessage.remove(playerId);
     }
 
     @EventHandler
@@ -226,6 +302,10 @@ public final class TableGadgetBarHudService implements Listener {
     }
 
     public void onSaved(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        invalidateRefresh(playerId);
         bars.remove(playerId);
         selectedSlots.remove(playerId);
         refresh(playerId);
@@ -235,21 +315,41 @@ public final class TableGadgetBarHudService implements Listener {
         if (table == null) {
             return;
         }
-        for (UUID playerId : table.getSeats()) {
-            Player player = Bukkit.getPlayer(playerId);
-            if (player != null && player.isOnline()) {
-                player.sendActionBar(Component.empty());
-            }
+        actionBarOverlay.outputDispatcher().sendActionBar(table.getSeats(), Component.empty());
+    }
+
+    private void invalidateRefresh(UUID playerId) {
+        refreshStates.computeIfAbsent(playerId, ignored -> new RefreshState()).invalidate();
+        loading.remove(playerId);
+    }
+
+    static boolean refreshResultAllowed(boolean serviceStopped, RefreshState state, long generation) {
+        return !serviceStopped && state != null && state.matches(generation);
+    }
+
+    static final class RefreshState {
+        private final AtomicLong generation = new AtomicLong();
+
+        long currentGeneration() {
+            return generation.get();
+        }
+
+        void invalidate() {
+            generation.incrementAndGet();
+        }
+
+        boolean matches(long expectedGeneration) {
+            return generation.get() == expectedGeneration;
         }
     }
 
     public void shutdown() {
-        if (!stopped && plugin.getTableManager() != null) {
+        stopped = true;
+        if (plugin.getTableManager() != null) {
             for (GameTable table : plugin.getTableManager().getTables()) {
                 clearTable(table);
             }
         }
-        stopped = true;
         if (task != null) {
             task.cancel();
             task = null;
@@ -257,5 +357,8 @@ public final class TableGadgetBarHudService implements Listener {
         bars.clear();
         selectedSlots.clear();
         loading.clear();
+        refreshStates.clear();
+        lastChatFallback.clear();
+        lastChatFallbackMessage.clear();
     }
 }

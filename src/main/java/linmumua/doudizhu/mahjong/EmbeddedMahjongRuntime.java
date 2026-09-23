@@ -3,12 +3,14 @@ package linmumua.doudizhu.mahjong;
 import linmumua.doudizhu.DoudizhuPlugin;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.kyori.adventure.text.Component;
 import org.bukkit.entity.Player;
 
 public final class EmbeddedMahjongRuntime {
     private final DoudizhuPlugin plugin;
     private final MahjongTableManager tableManager;
+    private final AtomicBoolean shutdown = new AtomicBoolean();
 
     public EmbeddedMahjongRuntime(DoudizhuPlugin plugin) {
         this.plugin = plugin;
@@ -16,11 +18,18 @@ public final class EmbeddedMahjongRuntime {
     }
 
     public void reloadConfig() {
+        if (shutdown.get()) {
+            return;
+        }
         this.tableManager.reloadLayout(MahjongLayoutConfig.from(plugin));
     }
 
     public boolean isEnabled() {
-        return plugin.isMahjongIntegrationEnabled();
+        return !shutdown.get() && plugin.isMahjongIntegrationEnabled();
+    }
+
+    public boolean isShutdown() {
+        return shutdown.get();
     }
 
     public MahjongTableManager tableManager() {
@@ -43,6 +52,9 @@ public final class EmbeddedMahjongRuntime {
     }
 
     public void shutdown() {
+        if (!shutdown.compareAndSet(false, true)) {
+            return;
+        }
         tableManager.shutdown();
     }
 
@@ -50,6 +62,6 @@ public final class EmbeddedMahjongRuntime {
         if (player == null) {
             return;
         }
-        lines.forEach(player::sendMessage);
+        tableManager.sendToPlayer(player, lines);
     }
 }

@@ -2,6 +2,7 @@ package linmumua.doudizhu.ui;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.storage.MatchParticipantRecord;
 import linmumua.doudizhu.storage.PlayerHistoryEntry;
 import java.util.List;
@@ -32,6 +33,8 @@ public final class HandGuiService {
     private static final String[] HITBOX_ADJUSTMENT_STEP_LABELS = {"0.01", "0.1", "1"};
 
     private final DoudizhuPlugin plugin;
+    /** 玩家输出必须在当前玩家所属 lane 内执行；异步或迟到回调会重新解析在线玩家。 */
+    private final PlayerOutputDispatcher playerOutput;
     private final Map<UUID, InputSession> pendingInputs = new ConcurrentHashMap<>();
     private final Map<UUID, SignInputSession> pendingSignInputs = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> hitboxAdjustmentStepIndexes = new ConcurrentHashMap<>();
@@ -48,7 +51,38 @@ public final class HandGuiService {
     private volatile UUID adminMenuViewer;
 
     public HandGuiService(DoudizhuPlugin plugin) {
+        this(plugin, null);
+    }
+
+    HandGuiService(DoudizhuPlugin plugin, PlayerOutputDispatcher playerOutput) {
         this.plugin = plugin;
+        this.playerOutput = playerOutput;
+    }
+
+    private PlayerOutputDispatcher output() {
+        if (playerOutput != null) {
+            return playerOutput;
+        }
+        if (plugin == null) {
+            return null;
+        }
+        if (plugin.getActionBarOverlayService() != null) {
+            return plugin.getActionBarOverlayService().outputDispatcher();
+        }
+        return new PlayerOutputDispatcher(plugin);
+    }
+
+    private void dispatchPlayer(UUID playerId, java.util.function.Consumer<Player> action) {
+        PlayerOutputDispatcher output = output();
+        if (output != null && playerId != null) {
+            output.runPlayer(playerId, action);
+        }
+    }
+
+    private void dispatchOpenInventory(Player player, Inventory inventory) {
+        if (player != null && inventory != null) {
+            dispatchPlayer(player.getUniqueId(), current -> current.openInventory(inventory));
+        }
     }
 
     public double hitboxAdjustmentStep(UUID playerId) {
@@ -92,7 +126,7 @@ public final class HandGuiService {
             MuzTheme.muted("无法撤销。")
         )));
         inventory.setItem(25, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openSelectionSoundPicker(Player player) {
@@ -115,7 +149,7 @@ public final class HandGuiService {
         placePlayerActionKindItems(inventory, player.getUniqueId());
         inventory.setItem(22, backItem("个人设置"));
         inventory.setItem(24, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openPlayActionPicker(Player player, DoudizhuPlugin.PlayActionKind kind) {
@@ -146,7 +180,7 @@ public final class HandGuiService {
         }
         inventory.setItem(22, backItem("动作设置"));
         inventory.setItem(24, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     private void openPlayerProfilePicker(Player player, HandInventoryHolder.EditorTarget target, String title) {
@@ -177,7 +211,7 @@ public final class HandGuiService {
         }
         inventory.setItem(22, backItem("个人设置"));
         inventory.setItem(24, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openAdminModels(Player player) {
@@ -209,7 +243,7 @@ public final class HandGuiService {
         inventory.setItem(45, noteItem(Material.ARROW, "上一页", List.of("查看更早的记录。")));
         inventory.setItem(49, noteItem(Material.CLOCK, "第 " + normalizedPage + " 页", List.of("点击中间按钮可刷新当前页。")));
         inventory.setItem(53, noteItem(Material.SPECTRAL_ARROW, "下一页", List.of("继续查看后续记录。")));
-        viewer.openInventory(inventory);
+        dispatchOpenInventory(viewer, inventory);
     }
 
     public void openHistoryDetail(Player viewer, UUID targetPlayerId, String targetName, int page, long matchId) {
@@ -241,7 +275,7 @@ public final class HandGuiService {
             participantSlot++;
         }
         inventory.setItem(45, noteItem(Material.ARROW, "返回列表", List.of("回到历史战绩列表。")));
-        viewer.openInventory(inventory);
+        dispatchOpenInventory(viewer, inventory);
     }
 
     public void openAdminModels(Player player, HandInventoryHolder.AdminPage page) {
@@ -482,7 +516,7 @@ public final class HandGuiService {
         }
         inventory.setItem(4, adminAdjustmentStepItem(player));
         fillAdminChrome(inventory);
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openAdminSelectionSoundEditor(Player player) {
@@ -512,7 +546,7 @@ public final class HandGuiService {
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("玩家选项"));
         inventory.setItem(34, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openAdminPlayActionKindPicker(Player player, DoudizhuPlugin.PlayActionKind kind) {
@@ -538,7 +572,7 @@ public final class HandGuiService {
         }
         inventory.setItem(22, backItem("玩家选项"));
         inventory.setItem(24, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openAdminPlayActionEditor(Player player, DoudizhuPlugin.PlayActionKind kind, int profileIndex) {
@@ -564,7 +598,7 @@ public final class HandGuiService {
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入动作内容。")));
         inventory.setItem(32, backItem(kind.label() + " 动作槽"));
         inventory.setItem(34, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openCountdownSoundPicker(Player player) {
@@ -585,7 +619,7 @@ public final class HandGuiService {
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("音频设置"));
         inventory.setItem(34, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openUnreadyWarningSoundPicker(Player player) {
@@ -606,7 +640,7 @@ public final class HandGuiService {
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("音频设置"));
         inventory.setItem(34, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void openPlacementBlockedSoundPicker(Player player) {
@@ -627,7 +661,7 @@ public final class HandGuiService {
         inventory.setItem(30, noteItem(Material.OAK_SIGN, "自定义输入", List.of("手动输入音效名。")));
         inventory.setItem(32, backItem("桌椅设置"));
         inventory.setItem(34, closeItem());
-        player.openInventory(inventory);
+        dispatchOpenInventory(player, inventory);
     }
 
     public void refreshSettingsIfOpen(Player player) {
@@ -672,23 +706,27 @@ public final class HandGuiService {
 
     public void beginCustomInput(Player player, HandInventoryHolder.EditorTarget target, DoudizhuPlugin.PlayActionKind actionKind, int profileIndex) {
         pendingInputs.put(player.getUniqueId(), new InputSession(target, profileIndex, null, actionKind));
-        player.closeInventory();
-        switch (target) {
-            case ADMIN_SELECTION_SOUND -> player.sendMessage(component("把音效写给我就行，例如 `音效名 [音量] [选中音高] [取消音高]`。", NamedTextColor.AQUA));
-            case ADMIN_PLAY_ACTION -> player.sendMessage(component("把动作内容贴进来就行，格式是 `显示名 || 动作指令`。", NamedTextColor.AQUA));
-            case ADMIN_COUNTDOWN -> player.sendMessage(component("直接输入倒计时音效，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
-            case ADMIN_UNREADY_WARNING -> player.sendMessage(component("直接输入未准备提醒音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
-            case ADMIN_PLACEMENT_BLOCKED_WARNING -> player.sendMessage(component("直接输入放置阻挡警告音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA));
-            case ADMIN_AI_URL -> player.sendMessage(component("直接输入 DeepSeek API 链接，例如 `https://api.deepseek.com`。", NamedTextColor.AQUA));
-            case ADMIN_AI_KEY -> player.sendMessage(component("直接输入 DeepSeek API Key。", NamedTextColor.AQUA));
-            case ADMIN_AI_MODEL -> player.sendMessage(component("直接输入 DeepSeek 模型，例如 `deepseek-chat`。", NamedTextColor.AQUA));
-            case ADMIN_AI_SYSTEM_PROMPT -> player.sendMessage(component("直接输入新的全局人设词；建议强调稳健牌风、炸弹保留和严格输出格式。", NamedTextColor.AQUA));
-            default -> {
-                pendingInputs.remove(player.getUniqueId());
-                return;
-            }
+        Component instruction = switch (target) {
+            case ADMIN_SELECTION_SOUND -> component("把音效写给我就行，例如 `音效名 [音量] [选中音高] [取消音高]`。", NamedTextColor.AQUA);
+            case ADMIN_PLAY_ACTION -> component("把动作内容贴进来就行，格式是 `显示名 || 动作指令`。", NamedTextColor.AQUA);
+            case ADMIN_COUNTDOWN -> component("直接输入倒计时音效，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA);
+            case ADMIN_UNREADY_WARNING -> component("直接输入未准备提醒音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA);
+            case ADMIN_PLACEMENT_BLOCKED_WARNING -> component("直接输入放置阻挡警告音，格式是 `音效名 [音量] [音高]`。", NamedTextColor.AQUA);
+            case ADMIN_AI_URL -> component("直接输入 DeepSeek API 链接，例如 `https://api.deepseek.com`。", NamedTextColor.AQUA);
+            case ADMIN_AI_KEY -> component("直接输入 DeepSeek API Key。", NamedTextColor.AQUA);
+            case ADMIN_AI_MODEL -> component("直接输入 DeepSeek 模型，例如 `deepseek-chat`。", NamedTextColor.AQUA);
+            case ADMIN_AI_SYSTEM_PROMPT -> component("直接输入新的全局人设词；建议强调稳健牌风、炸弹保留和严格输出格式。", NamedTextColor.AQUA);
+            default -> null;
+        };
+        if (instruction == null) {
+            pendingInputs.remove(player.getUniqueId());
+            return;
         }
-        player.sendMessage(component("如果想先不改，输入 `cancel` 或 `取消` 就能退出。", NamedTextColor.YELLOW));
+        dispatchPlayer(player.getUniqueId(), current -> {
+            current.closeInventory();
+            current.sendMessage(instruction);
+            current.sendMessage(component("如果想先不改，输入 `cancel` 或 `取消` 就能退出。", NamedTextColor.YELLOW));
+        });
     }
 
     public void beginChipBalanceInput(Player viewer, Player target) {
@@ -696,22 +734,29 @@ public final class HandGuiService {
             return;
         }
         pendingInputs.put(viewer.getUniqueId(), new InputSession(HandInventoryHolder.EditorTarget.ADMIN_CHIP_BALANCE, -1, target.getUniqueId(), null));
-        viewer.closeInventory();
-        viewer.sendMessage(component("准备修改 " + target.getName() + " 的筹码，直接输入非负整数。", NamedTextColor.AQUA));
-        viewer.sendMessage(component("当前筹码是 " + plugin.getChipBalance(target.getUniqueId()) + "。", NamedTextColor.YELLOW));
-        viewer.sendMessage(component("如果只是看看，输入 `cancel` 或 `取消` 就能返回。", NamedTextColor.YELLOW));
+        Component targetName = component("准备修改 " + target.getName() + " 的筹码，直接输入非负整数。", NamedTextColor.AQUA);
+        Component balance = component("当前筹码是 " + plugin.getChipBalance(target.getUniqueId()) + "。", NamedTextColor.YELLOW);
+        dispatchPlayer(viewer.getUniqueId(), current -> {
+            current.closeInventory();
+            current.sendMessage(targetName);
+            current.sendMessage(balance);
+            current.sendMessage(component("如果只是看看，输入 `cancel` 或 `取消` 就能返回。", NamedTextColor.YELLOW));
+        });
     }
 
     public void beginRgbSignInput(Player player, HandInventoryHolder.EditorTarget target) {
         pendingSignInputs.put(player.getUniqueId(), new SignInputSession(target, System.currentTimeMillis(), null));
-        player.closeInventory();
-        // HARD-CODED:
-        // All color editors now use silent chat input instead of sign GUI.
-        // Do not switch these back to real or virtual signs unless the user explicitly asks.
-        // While a color input session is pending, MUZ intercepts the player's chat message and keeps it out of public chat.
-        player.sendMessage(component("当前颜色: " + rgbInitialValue(player, target), NamedTextColor.GRAY));
-        player.sendMessage(component("直接在聊天栏输入颜色，例如 `255,226,92` 或 `F9B5B5`。", NamedTextColor.AQUA));
-        player.sendMessage(component("如果不想改，输入 `cancel` 或 `取消`。", NamedTextColor.YELLOW));
+        Component currentColor = component("当前颜色: " + rgbInitialValue(player, target), NamedTextColor.GRAY);
+        dispatchPlayer(player.getUniqueId(), current -> {
+            current.closeInventory();
+            // HARD-CODED:
+            // All color editors now use silent chat input instead of sign GUI.
+            // Do not switch these back to real or virtual signs unless the user explicitly asks.
+            // While a color input session is pending, MUZ intercepts the player's chat message and keeps it out of public chat.
+            current.sendMessage(currentColor);
+            current.sendMessage(component("直接在聊天栏输入颜色，例如 `255,226,92` 或 `F9B5B5`。", NamedTextColor.AQUA));
+            current.sendMessage(component("如果不想改，输入 `cancel` 或 `取消`。", NamedTextColor.YELLOW));
+        });
     }
 
     public void handlePendingSoundInput(Player player, String rawInput) {
@@ -798,8 +843,10 @@ public final class HandGuiService {
             reopenAfterInput(player, session.target());
         } catch (IllegalArgumentException | IllegalStateException exception) {
             String detail = exception.getMessage();
-            player.sendMessage(component(detail == null || detail.isBlank() ? "这次没有记上。" : detail, NamedTextColor.RED));
-            player.sendMessage(component("这次没有记上，再输一次，或者输入 `cancel` 先退出。", NamedTextColor.YELLOW));
+            dispatchPlayer(player.getUniqueId(), current -> {
+                current.sendMessage(component(detail == null || detail.isBlank() ? "这次没有记上。" : detail, NamedTextColor.RED));
+                current.sendMessage(component("这次没有记上，再输一次，或者输入 `cancel` 先退出。", NamedTextColor.YELLOW));
+            });
         }
     }
 
@@ -834,8 +881,10 @@ public final class HandGuiService {
             });
             reopenAfterSignInput(player, session.target());
         } catch (IllegalArgumentException exception) {
-            player.sendMessage(component(exception.getMessage(), NamedTextColor.RED));
-            player.sendMessage(component("再输一次，或者输入 `cancel` 先退出。", NamedTextColor.YELLOW));
+            dispatchPlayer(player.getUniqueId(), current -> {
+                current.sendMessage(component(exception.getMessage(), NamedTextColor.RED));
+                current.sendMessage(component("再输一次，或者输入 `cancel` 先退出。", NamedTextColor.YELLOW));
+            });
         }
     }
 
@@ -851,12 +900,17 @@ public final class HandGuiService {
     }
 
     public void closeHands(GameTable table) {
+        if (table == null) {
+            return;
+        }
+        String tableName = table.getName();
         for (UUID seat : table.getSeats()) {
-            Player player = Bukkit.getPlayer(seat);
-            if (player != null && player.getOpenInventory().getTopInventory().getHolder() instanceof HandInventoryHolder holder
-                && holder.tableName().equalsIgnoreCase(table.getName())) {
-                player.closeInventory();
-            }
+            dispatchPlayer(seat, current -> {
+                if (current.getOpenInventory().getTopInventory().getHolder() instanceof HandInventoryHolder holder
+                    && holder.tableName().equalsIgnoreCase(tableName)) {
+                    current.closeInventory();
+                }
+            });
         }
     }
 
@@ -1435,21 +1489,25 @@ public final class HandGuiService {
     }
 
     private void notifySettingSaved(Player player, String text, boolean playSound) {
-        player.sendActionBar(component("已经记下了 · " + text, NamedTextColor.GREEN));
-        if (playSound) {
-            player.playSound(player.getLocation(), "minecraft:block.note_block.pling", 0.55f, 1.35f);
-        }
+        dispatchPlayer(player.getUniqueId(), current -> {
+            current.sendActionBar(component("已经记下了 · " + text, NamedTextColor.GREEN));
+            if (playSound) {
+                current.playSound(current.getLocation(), "minecraft:block.note_block.pling", 0.55f, 1.35f);
+            }
+        });
     }
 
     public void previewPlayerOption(Player player, HandInventoryHolder.EditorTarget target, DoudizhuPlugin.PlayActionKind kind, int index) {
         if (target == HandInventoryHolder.EditorTarget.PLAYER_SELECTION) {
             DoudizhuPlugin.SelectionSound sound = plugin.selectionSoundForProfile(index);
-            if (sound.volume() <= 0.0f) {
-                player.sendActionBar(component("这套方案是静音，不会播放提示音。", NamedTextColor.YELLOW));
-                return;
-            }
-            player.playSound(player.getLocation(), sound.key(), sound.volume(), sound.selectedPitch());
-            player.sendActionBar(component("正在试听 · " + selectionSoundDisplayLabel(plugin.getSelectionSoundProfile(index)), NamedTextColor.AQUA));
+            dispatchPlayer(player.getUniqueId(), current -> {
+                if (sound.volume() <= 0.0f) {
+                    current.sendActionBar(component("这套方案是静音，不会播放提示音。", NamedTextColor.YELLOW));
+                    return;
+                }
+                current.playSound(current.getLocation(), sound.key(), sound.volume(), sound.selectedPitch());
+                current.sendActionBar(component("正在试听 · " + selectionSoundDisplayLabel(plugin.getSelectionSoundProfile(index)), NamedTextColor.AQUA));
+            });
             return;
         }
         if (target == HandInventoryHolder.EditorTarget.PLAYER_PLAY_ACTION) {

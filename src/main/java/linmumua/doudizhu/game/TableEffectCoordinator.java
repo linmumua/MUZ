@@ -10,18 +10,21 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.UUID;
-import org.bukkit.Bukkit;
 import java.util.function.Function;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
+import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
 final class TableEffectCoordinator {
     private final DoudizhuPlugin plugin;
     private final Random random;
     private final Supplier<List<UUID>> seatsSupplier;
-    private final Function<UUID, Player> playerResolver;
+    private final PlayerOutputDispatcher outputDispatcher;
+    private final IntSupplier currentTick;
     private static final int EFFECT_DEDUPLICATION_TICKS = 2;
     private static final int COUNTDOWN_DEDUPLICATION_TICKS = 16;
     private final Map<String, Integer> lastPlayedTicks = new HashMap<>();
@@ -30,14 +33,43 @@ final class TableEffectCoordinator {
 
     TableEffectCoordinator(
         DoudizhuPlugin plugin,
+        PlayerOutputDispatcher outputDispatcher,
+        Random random,
+        Supplier<List<UUID>> seatsSupplier
+    ) {
+        this(plugin, outputDispatcher, random, seatsSupplier, Bukkit::getCurrentTick);
+    }
+
+    /** 兼容旧测试夹具；实际声音操作仍由显式 PlayerOutputDispatcher 投递。 */
+    TableEffectCoordinator(
+        DoudizhuPlugin plugin,
         Random random,
         Supplier<List<UUID>> seatsSupplier,
         Function<UUID, Player> playerResolver
     ) {
+        this(
+            plugin,
+            new PlayerOutputDispatcher(new PlayerTaskRegistry(
+                playerResolver::apply,
+                (player, delay, task) -> plugin.scheduler().runPlayer(player, delay, task)
+            )),
+            random,
+            seatsSupplier
+        );
+    }
+
+    TableEffectCoordinator(
+        DoudizhuPlugin plugin,
+        PlayerOutputDispatcher outputDispatcher,
+        Random random,
+        Supplier<List<UUID>> seatsSupplier,
+        IntSupplier currentTick
+    ) {
         this.plugin = plugin;
+        this.outputDispatcher = Objects.requireNonNull(outputDispatcher, "outputDispatcher");
         this.random = random;
         this.seatsSupplier = seatsSupplier;
-        this.playerResolver = playerResolver;
+        this.currentTick = currentTick;
     }
 
     void playSoundAll(String soundKey, float volume, float pitch) {
@@ -134,6 +166,23 @@ final class TableEffectCoordinator {
         if (plugin == null || table == null || gadget == null) {
             return;
         }
+        ActionBarOverlayService actionBar = plugin.getActionBarOverlayService();
+        if (actionBar == null) {
+            return;
+        }
+        playGadgetSound(plugin, table, gadget, impact, actionBar.outputDispatcher());
+    }
+
+    static void playGadgetSound(
+        DoudizhuPlugin plugin,
+        GameTable table,
+        TableGadget gadget,
+        boolean impact,
+        PlayerOutputDispatcher outputDispatcher
+    ) {
+        if (plugin == null || table == null || gadget == null || outputDispatcher == null) {
+            return;
+        }
         String sound = switch (gadget) {
             case EGG -> impact ? "minecraft:block.glass.break" : "minecraft:entity.chicken.egg";
             case WATER -> impact ? "minecraft:item.bucket.fill" : "minecraft:item.bucket.empty";
@@ -152,10 +201,7 @@ final class TableEffectCoordinator {
             if (table.isBot(seat)) {
                 continue;
             }
-            Player player = Bukkit.getPlayer(seat);
-            if (player != null && player.isOnline()) {
-                player.playSound(player.getLocation(), sound, volume, pitch);
-            }
+            outputDispatcher.playSound(seat, sound, volume, pitch);
         }
     }
 
@@ -163,11 +209,10 @@ final class TableEffectCoordinator {
         if (playerId == null || soundKey == null || soundKey.isBlank()) {
             return;
         }
-        Player player = playerResolver.apply(playerId);
-        if (player == null || !player.isOnline()) {
+        if (outputDispatcher.currentPlayer(playerId) == null) {
             return;
         }
-        int currentTick = Bukkit.getCurrentTick();
+        int currentTick = this.currentTick.getAsInt();
         String deduplicationKey = playerId + "\u0000" + soundKey;
         Integer lastTick = lastPlayedTicks.get(deduplicationKey);
         if (lastTick != null && currentTick - lastTick < cooldownTicks) {
@@ -182,6 +227,6 @@ final class TableEffectCoordinator {
                 }
             }
         }
-        player.playSound(player.getLocation(), soundKey, volume, pitch);
+        outputDispatcher.playSound(playerId, soundKey, volume, pitch);
     }
 }
