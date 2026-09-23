@@ -174,5 +174,7 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 - **测试**：JUnit 5，约 170 个测试类（`src/test/java` 下 `.java` 文件数，以仓库实际目录为准）
 
 ## 致谢
-
+我自己356013496
+QQ 356013496
+赞助 356013496
 判型与流程参考了 [tml104/-Minecraft-Dou-Dizhu](https://github.com/tml104/-Minecraft-Dou-Dizhu) 的状态机思路，借鉴了 [Arbousier1/MahjongEngine](https://github.com/Arbousier1/MahjongEngine) 的 Paper 1.21.11+ 与 CraftEngine bundle 构建路线。
