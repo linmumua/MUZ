@@ -2136,6 +2136,23 @@ public final class GameTable {
     }
 
     /**
+     * 让某个坐在本桌的玩家的出牌 HUD 立刻重画一次。
+     *
+     * <p>【为什么必须由 GameTable 转发】：HUD 服务（{@link TrickHudService}）是每张桌各持一个的
+     * final 字段，只有本桌拿得到；而九格栏的选中槽是 {@link TableGadgetBarHudService} 维护的，
+     * 它在滚轮选槽后需要让第四行立刻重画，却拿不到本桌的 HUD 服务。走这个方法转发。
+     *
+     * <p>【为什么不像 ActionBar 那时自己发一条】：并入 BossBar 后九格栏的内容与服务端每秒
+     * 的周期刷新是同一条文本；选槽后若能顺便重画就即时生效，重画不了也不过晚一拍（下一帧带上）。
+     * 调用方负责在正确的 owner lane 上调用（见 {@code sendTrickHud} 的既有约束）。
+     */
+    public void refreshTrickHudFor(Player viewer) {
+        if (viewer != null) {
+            sendTrickHud(viewer);
+        }
+    }
+
+    /**
      * 头像行那三个槽位取谁：{@code [上一位, 当前该出牌的人, 下一位]}，恒定三个元素。
      *
      * <p>【中间那个取 {@code currentTurn} 而不是 {@code leadPlayer}】：这条 HUD 回答的是

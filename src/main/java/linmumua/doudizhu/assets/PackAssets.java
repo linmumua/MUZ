@@ -301,6 +301,14 @@ public final class PackAssets {
     public static final int GADGET_BAR_ICON_WIDTH = PackTiers.GADGET_BAR_ICON_WIDTH;
     public static final int GADGET_BAR_ICON_HEIGHT = PackTiers.GADGET_BAR_ICON_HEIGHT;
     /**
+     * 九格栏并入出牌 HUD（BossBar 第四行）后的固定下移像素。
+     *
+     * <p>与 build.gradle.kts 的 {@code gadgetBarRowDownOffset} 严格同源：构建期把九格栏 provider 的
+     * ascent 设为 {@code 格高 - 本值}，运行期拿同一常量算「第四行底边落在哪」，两侧不一致会让第四行
+     * 压进记牌器行或飘出画面。这是固定档，不是任意整数偏移——要重新排四条行必须同时改这两处并重建资源。
+     */
+    public static final int GADGET_BAR_ROW_DOWN_OFFSET = PackTiers.GADGET_BAR_ROW_DOWN_OFFSET;
+    /**
      * 已失效：图标原始像素宽 + 1。九格栏字形现在统一锁定为 {@link #GADGET_BAR_CELL_ADVANCE}，
      * 客户端实际 advance 不是这个值；保留仅为旧源码兼容，新代码不要用它计算位置。
      */
@@ -1000,6 +1008,16 @@ public final class PackAssets {
     /** 返回桌内九格栏底图字形片段。 */
     public static String gadgetBarBaseGlyphText() {
         return gadgetBarGlyphText(GADGET_BAR_BASE_CODEPOINT);
+    }
+
+    /**
+     * 整条九格栏的净前进量：九格各按 {@link #GADGET_BAR_CELL_ADVANCE} 排列，无额外间距。
+     *
+     * <p>与 {@code TableGadgetBarHudService} 的栏宽算式 {@code SLOT_COUNT * GADGET_BAR_CELL_ADVANCE} 同值，
+     * 供 TrickHudView 把这个宽度计进容器宽 {@code W}；两侧不一致会让九格栏在 BossBar 里不居中。
+     */
+    public static int gadgetBarRowAdvance() {
+        return GADGET_BAR_SLOT_COUNT * GADGET_BAR_CELL_ADVANCE;
     }
 
     /** 返回桌内九格栏选框字形片段。 */

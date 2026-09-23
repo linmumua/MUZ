@@ -101,6 +101,44 @@ final class TrickHudView {
     }
 
     /**
+     * 第四行：桌内九格道具栏（底图 + 图标 + 选框三层叠加）。
+     *
+     * <p>并入本 HUD 前它走 ActionBar，与对局状态提示抢同一个槽位来回覆盖闪烁；并入 BossBar 后
+     * 与其余三行共用同一条标题，靠字形自带的固定下移档 {@link PackAssets#GADGET_BAR_ROW_DOWN_OFFSET}
+     * 落在记牌器行下方。它【不是】可连续调的自由整数，而是随资源一次性生成的固定档，
+     * 所以这里没有独立 Y 配置，只按整条 HUD 的水平居中算式排布。
+     *
+     * <p>{@code glyphText} 已自带 {@code muz_gadget_bar} 字体标签；View 只按整条的净前进量
+     * {@link PackAssets#gadgetBarRowAdvance()} 占位，实际宽度由字体几何保证与之一致。
+     */
+    static final class GadgetBarRow {
+        static final GadgetBarRow EMPTY = new GadgetBarRow("", 0);
+
+        private final String glyphText;
+        private final int advancePixels;
+
+        GadgetBarRow(String glyphText, int advancePixels) {
+            if (advancePixels < 0) {
+                throw new IllegalArgumentException("九格栏净前进量不能为负：" + advancePixels);
+            }
+            this.glyphText = glyphText == null ? "" : glyphText;
+            this.advancePixels = advancePixels;
+        }
+
+        String glyphText() {
+            return glyphText;
+        }
+
+        int advancePixels() {
+            return advancePixels;
+        }
+
+        boolean isEmpty() {
+            return glyphText.isEmpty() || advancePixels <= 0;
+        }
+    }
+
+    /**
      * 拼出 HUD 的三行。
      *
      * <p>【常显】：桌上没牌时只有上排空着，下排三连头像照旧输出 —— 整条 HUD 在 PLAYING
@@ -165,6 +203,38 @@ final class TrickHudView {
         int counterGapPixels,
         boolean continuousFont
     ) {
+        return buildMiniMessage(
+            previous, current, next, slotPixels, avatarGapPixels, cards, cardStepPixels,
+            offsetProvider, heightTier, cardDownTier, xOffsetPixels, rowXOffsets,
+            counterCells, counterGapPixels, continuousFont, null, 0);
+    }
+
+    /**
+     * 带第四行（桌内九格道具栏）的连续覆盖层入口。
+     *
+     * <p>九格栏与其余三行共用容器宽 {@code W} 的居中算式：行首垫 {@code (W - 栏宽)/2}、行尾补到 {@code W}，
+     * 末行负责收口，所以「净前进量恒等于 W」与三行版本完全同构。栏不可用时传 null 或空宽，
+     * 该行整条不产出，其余三行照旧。
+     */
+    static String buildMiniMessage(
+        Avatar previous,
+        Avatar current,
+        Avatar next,
+        int slotPixels,
+        int avatarGapPixels,
+        List<DoudizhuCard> cards,
+        int cardStepPixels,
+        IntFunction<String> offsetProvider,
+        int heightTier,
+        int cardDownTier,
+        int xOffsetPixels,
+        RowXOffsets rowXOffsets,
+        List<CounterCell> counterCells,
+        int counterGapPixels,
+        boolean continuousFont,
+        GadgetBarRow gadgetBar,
+        int gadgetBarXOffset
+    ) {
         RowXOffsets rowX = rowXOffsets == null ? RowXOffsets.NONE : rowXOffsets;
         List<Avatar> slots = List.of(
             previous == null ? Avatar.EMPTY : previous,
@@ -176,8 +246,9 @@ final class TrickHudView {
         boolean hasCardRow = !ordered.isEmpty();
         List<CounterCell> counters = counterCells == null ? List.of() : List.copyOf(counterCells);
         boolean hasCounterRow = !counters.isEmpty();
-        if (!hasAvatarRow && !hasCardRow && !hasCounterRow) {
-            // 三行都没有：不在 PLAYING、或者三个座位都取不到人。留一条空 BossBar 没有意义。
+        boolean hasGadgetBarRow = gadgetBar != null && !gadgetBar.isEmpty();
+        if (!hasAvatarRow && !hasCardRow && !hasCounterRow && !hasGadgetBarRow) {
+            // 四行都没有：不在 PLAYING、或者三个座位都取不到人。留一条空 BossBar 没有意义。
             return "";
         }
 
@@ -187,7 +258,10 @@ final class TrickHudView {
             : 0;
         int avatarRowAdvance = hasAvatarRow ? 3 * slotPixels + 2 * avatarGapPixels : 0;
         int counterRowAdvance = counterRowAdvance(counters, counterGapPixels);
-        int containerAdvance = Math.max(Math.max(cardRowAdvance, avatarRowAdvance), counterRowAdvance);
+        int gadgetBarAdvance = hasGadgetBarRow ? gadgetBar.advancePixels() : 0;
+        int containerAdvance = Math.max(
+            Math.max(cardRowAdvance, avatarRowAdvance),
+            Math.max(counterRowAdvance, gadgetBarAdvance));
 
         StringBuilder builder = new StringBuilder();
         // 水平偏移【必须首尾配对】：行首 +x、行尾 -x，两者相加为 0，客户端算出的总宽不变，
@@ -203,7 +277,7 @@ final class TrickHudView {
             appendOffset(builder, offsetProvider, pad);
             appendCardRow(builder, ordered, cardStepPixels, offsetProvider, heightTier, cardDownTier, continuousFont);
             // 后面还有行要画就退回行首（每行都从同一个原点开始）；否则直接把光标补到容器宽。
-            appendOffset(builder, offsetProvider, hasAvatarRow || hasCounterRow
+            appendOffset(builder, offsetProvider, hasAvatarRow || hasCounterRow || hasGadgetBarRow
                 ? -(pad + cardRowAdvance)
                 : containerAdvance - pad - cardRowAdvance);
         }
@@ -211,7 +285,7 @@ final class TrickHudView {
             int pad = (containerAdvance - avatarRowAdvance) / 2 + rowX.avatar();
             appendOffset(builder, offsetProvider, pad);
             appendAvatarRow(builder, slots, slotPixels, avatarGapPixels, offsetProvider);
-            appendOffset(builder, offsetProvider, hasCounterRow
+            appendOffset(builder, offsetProvider, hasCounterRow || hasGadgetBarRow
                 ? -(pad + avatarRowAdvance)
                 : containerAdvance - pad - avatarRowAdvance);
         }
@@ -219,8 +293,17 @@ final class TrickHudView {
             int pad = (containerAdvance - counterRowAdvance) / 2 + rowX.counter();
             appendOffset(builder, offsetProvider, pad);
             appendCounterRow(builder, counters, counterGapPixels, offsetProvider);
-            // 最后一行负责把光标补到容器宽：净前进量恒等于 W，客户端才会把各行一起居中。
-            appendOffset(builder, offsetProvider, containerAdvance - pad - counterRowAdvance);
+            appendOffset(builder, offsetProvider, hasGadgetBarRow
+                ? -(pad + counterRowAdvance)
+                : containerAdvance - pad - counterRowAdvance);
+        }
+        if (hasGadgetBarRow) {
+            // 九格栏自己没有独立 Y 配置：竖直位置由字形自带的固定下移档决定，这里只管水平居中，
+            // 与前几行共用同一原点，并由本行（末行）把光标补到容器宽。
+            int pad = (containerAdvance - gadgetBarAdvance) / 2 + gadgetBarXOffset;
+            appendOffset(builder, offsetProvider, pad);
+            builder.append(gadgetBar.glyphText());
+            appendOffset(builder, offsetProvider, containerAdvance - pad - gadgetBarAdvance);
         }
 
         appendOffset(builder, offsetProvider, -xOffsetPixels);
@@ -412,11 +495,33 @@ final class TrickHudView {
         List<CounterCell> counterCells,
         int counterGapPixels
     ) {
+        return containerAdvance(
+            slotPixels, avatarGapPixels, cardCount, cardStepPixels, heightTier,
+            counterCells, counterGapPixels, 0);
+    }
+
+    /**
+     * 带第四行（桌内九格道具栏）的版本：容器宽取四行里最宽的一行，九格栏自身宽度也要计进来。
+     *
+     * @param gadgetBarAdvance 九格栏整条的净前进量；0 表示这一行不渲染，不参与取最大
+     */
+    static int containerAdvance(
+        int slotPixels,
+        int avatarGapPixels,
+        int cardCount,
+        int cardStepPixels,
+        int heightTier,
+        List<CounterCell> counterCells,
+        int counterGapPixels,
+        int gadgetBarAdvance
+    ) {
         int cardRow = cardCount <= 0
             ? 0
             : (cardCount - 1) * cardStepPixels + PackAssets.cardGlyphAdvance(heightTier);
         int counterRow = counterRowAdvance(
             counterCells == null ? List.of() : counterCells, counterGapPixels);
-        return Math.max(Math.max(cardRow, 3 * slotPixels + 2 * avatarGapPixels), counterRow);
+        return Math.max(
+            Math.max(Math.max(cardRow, 3 * slotPixels + 2 * avatarGapPixels), counterRow),
+            Math.max(0, gadgetBarAdvance));
     }
 }

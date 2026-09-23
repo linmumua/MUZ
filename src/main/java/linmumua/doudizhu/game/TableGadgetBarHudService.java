@@ -13,9 +13,6 @@ import linmumua.doudizhu.compat.CraftEngineOffsetService;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.ui.VirtualGadgetBar;
 import linmumua.doudizhu.ui.VirtualGadgetBarStore;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.TextDecoration;
-import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -26,11 +23,13 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 
 /**
- * 牌桌对局中的屏幕额外道具栏。
+ * 牌桌对局中的九格道具栏数据源。
  *
- * <p>不打开 Bukkit Inventory GUI。八个虚拟道具槽和第九个语音入口通过 ActionBar
- * 显示，玩家使用滚轮或数字键选择槽位，右键沿既有桌内道具路由执行；选择第九槽时
- * 右键打开仅自己可见的实体语音面板。
+ * <p>不打开 Bukkit Inventory GUI。八个虚拟道具槽和第九个语音入口由本服务维护数据与选择状态，
+ * 九格栏【本身】已经并入出牌 HUD（BossBar 第四行），由 {@link TrickHudService} 经
+ * {@link #hudBarGlyphText(UUID)} 读取只读字形快照后渲染；本服务不再拼 ActionBar、也不碰 ActionBar
+ * 槽位（那是普通状态提示的），所以道具栏与状态提示不再互相覆盖闪烁。
+ * 玩家仍用滚轮/数字键选择槽位，右键沿既有桌内道具路由执行；选择第九槽时右键打开仅自己可见的实体语音面板。
  */
 public final class TableGadgetBarHudService implements Listener {
     public static final int SLOT_COUNT = VirtualGadgetBar.SLOT_COUNT + 1;
@@ -64,6 +63,13 @@ public final class TableGadgetBarHudService implements Listener {
         this.voiceOpener = java.util.Objects.requireNonNull(voiceOpener, "voiceOpener");
     }
 
+    /**
+     * 开局/入座时预取一次的玩家列表。
+     *
+     * <p>并入 HUD 后本服务不再有每秒派发 ActionBar 的 tick，也就没有「顺手把没加载过的玩家补上」的时机。
+     * 所以这里保留一个【低频】预取定时器：只为「当前在打、且本服务还没加载过其道具数据」的玩家触发异步读取。
+     * 真正的显示重绘由 {@link TrickHudService} 的周期刷新自然带上。
+     */
     public void start() {
         if (stopped) {
             return;
@@ -71,7 +77,32 @@ public final class TableGadgetBarHudService implements Listener {
         for (Player player : Bukkit.getOnlinePlayers()) {
             refresh(player.getUniqueId());
         }
-        task = plugin.scheduler().runTimer(1L, 2L, this::tick);
+        task = plugin.scheduler().runTimer(1L, 40L, this::prefetchActivePlayers);
+    }
+
+    /**
+     * 为「在打且数据未加载」的玩家补一次异步读取。
+     *
+     * <p>【这是数据预取，不是渲染】：每秒只处理尚未加载的玩家，已加载的直接跳过，因此稳态下几乎空转。
+     * 不再合成任何 ActionBar，也不再读取普通提示叠加。
+     */
+    private void prefetchActivePlayers() {
+        if (stopped) {
+            return;
+        }
+        for (GameTable table : plugin.getTableManager().getTables()) {
+            if (table.getPhase() != GamePhase.PLAYING || !gadgets.settings().enabled()) {
+                continue;
+            }
+            for (UUID playerId : table.getSeats()) {
+                if (table.isBot(playerId)) {
+                    continue;
+                }
+                if (!bars.containsKey(playerId)) {
+                    refresh(playerId);
+                }
+            }
+        }
     }
 
     public void refresh(UUID playerId) {
@@ -131,120 +162,53 @@ public final class TableGadgetBarHudService implements Listener {
         }
     }
 
-    /** 仅服务牌桌 PLAYING 真人；其它阶段主动清掉上一帧额外栏。 */
-    private void tick() {
-        if (stopped) {
-            return;
-        }
-        PlayerOutputDispatcher output = actionBarOverlay.outputDispatcher();
-        for (GameTable table : plugin.getTableManager().getTables()) {
-            if (table.getPhase() != GamePhase.PLAYING || !gadgets.settings().enabled()) {
-                continue;
-            }
-            for (UUID playerId : table.getSeats()) {
-                if (table.isBot(playerId) || output.currentPlayer(playerId) == null) {
-                    continue;
-                }
-                if (!bars.containsKey(playerId)) {
-                    refresh(playerId);
-                }
-                Component bar = render(playerId);
-                Component overlay = actionBarOverlay.currentOverlay(playerId);
-                output.sendActionBar(playerId, compose(bar, overlay, playerId));
-            }
-        }
-    }
-
-    private static final MiniMessage MINI = MiniMessage.miniMessage();
-
-    /* 字体不可测时正文改走聊天，每人每 10 秒最多一次，避免刷屏。 */
-    private static final long CHAT_FALLBACK_INTERVAL_MILLIS = 10_000L;
-    private final Map<UUID, Long> lastChatFallback = new ConcurrentHashMap<>();
-    private final Map<UUID, Component> lastChatFallbackMessage = new ConcurrentHashMap<>();
-
     /**
-     * 组合九格栏与普通提示，保证九格栏在屏幕上的位置固定不动。
+     * 九格栏的只读字形快照，供 {@link TrickHudService} 拼出出牌 HUD 的第四行。
      *
-     * <p>客户端按 ActionBar 的【总前进量】居中。若直接把提示拼在栏前，提示长度一变，总宽随之变化，
-     * 栏就会左右漂移。这里沿用 {@link HotbarActionBarLayout} 的固定宽度算式：栏先画，再用负空格回退，
-     * 正文以栏的中线居中叠加，最后补偿到净前进量恒等于栏宽 —— 客户端居中的始终是栏本身。
+     * <p>返回的字符串已经套好 {@code muz_gadget_bar} 字体标签与白色，调用方直接把它接进第四行；
+     * 该玩家不该显示这道栏（不在 PLAYING、机器人、道具功能关闭、字体偏移层不可用）时返回 {@code null}，
+     * 第四行整条不产出，其余三行照旧。
      *
-     * <p>栏与正文是 {@link Component#empty()} 下的兄弟节点，栏不会继承正文颜色被染色。
-     * 正文宽度必须用已验证的客户端字体快照精确测量；测不准时不猜，栏保持固定、正文改发聊天（限频）。
+     * <p>【为什么在 Service 侧取字体偏移而不是回退】：并入 BossBar 后栏不再是客户端居中的主体，
+     * 但底图/图标/选框三层仍靠 CraftEngine 的负空格叠回同一槽位；偏移不可用时回退会让三层错位，
+     * 不如整行不显示。宽度恒等于 {@link PackAssets#gadgetBarRowAdvance()}，与 TrickHudView 同源。
      */
-    private Component compose(Component bar, Component overlay, UUID playerId) {
-        if (overlay == null) {
-            return bar;
+    public String hudBarGlyphText(UUID playerId) {
+        if (stopped || playerId == null || !gadgets.settings().enabled()) {
+            return null;
         }
-        int barWidth = SLOT_COUNT * PackAssets.GADGET_BAR_CELL_ADVANCE;
-        java.util.OptionalInt measured = measureOverlay(overlay);
-        if (!offsetService.isAvailable() || measured.isEmpty()) {
-            chatFallback(playerId, overlay);
-            return bar;
+        if (!offsetService.isAvailable()) {
+            return null;
         }
-        HotbarActionBarLayout.Layout layout = HotbarActionBarLayout.calculate(barWidth, measured.getAsInt());
-        return Component.empty()
-            .append(bar)
-            .append(offsetComponent(layout.afterGlyphOffset()))
-            .append(overlay)
-            .append(offsetComponent(layout.afterTextOffset()));
+        GameTable table = plugin.getTableManager().getTableOf(playerId);
+        if (table == null || table.getPhase() != GamePhase.PLAYING || table.isBot(playerId)) {
+            return null;
+        }
+        return renderGlyphs(playerId);
     }
 
-    private java.util.OptionalInt measureOverlay(Component overlay) {
-        HudOverlayRuntimeState state = plugin.getHudOverlayRuntimeState();
-        linmumua.doudizhu.assets.HotbarFontMetrics metrics = state == null ? null : state.verifiedHotbarFontMetrics();
-        return metrics == null ? java.util.OptionalInt.empty() : metrics.measure(overlay);
-    }
-
-    private Component offsetComponent(int pixels) {
-        if (pixels == 0) {
-            return Component.empty();
-        }
-        String mini = offsetService.offset(pixels);
-        return mini.isEmpty() ? Component.empty() : MINI.deserialize(mini).decoration(TextDecoration.ITALIC, false);
-    }
-
-    private void chatFallback(UUID playerId, Component overlay) {
-        // 同一条提示只发一次：tick 每 2 tick 执行、提示在对局中持续存在，只按时间限频会让
-        // 字体不可测的服务器整局每 10 秒重复刷同一句。内容变化才重发，且仍受 10 秒限频。
-        if (overlay.equals(lastChatFallbackMessage.get(playerId))) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        Long last = lastChatFallback.get(playerId);
-        if (last != null && now - last < CHAT_FALLBACK_INTERVAL_MILLIS) {
-            return;
-        }
-        lastChatFallback.put(playerId, now);
-        lastChatFallbackMessage.put(playerId, overlay);
-        actionBarOverlay.outputDispatcher().sendMessage(playerId, overlay);
-    }
-
-    private Component render(UUID playerId) {
+    /** 拼九格栏三层字形；底层是纯字符串，调用方负责套字体颜色上下文。 */
+    private String renderGlyphs(UUID playerId) {
         VirtualGadgetBar bar = bar(playerId);
         int selected = selectedIndex(playerId);
-        boolean canOverlayLayers = offsetService.isAvailable();
         StringBuilder text = new StringBuilder();
         for (int slot = 0; slot < SLOT_COUNT; slot++) {
             int kind = slot == VirtualGadgetBar.BUBBLE_SLOT
                 ? PackAssets.GADGET_BAR_SPEECH
                 : PackAssets.gadgetBarKind(bar.slot(slot));
             text.append(PackAssets.gadgetBarBaseGlyphText());
-            if (canOverlayLayers && kind != PackAssets.GADGET_BAR_EMPTY) {
+            if (kind != PackAssets.GADGET_BAR_EMPTY) {
                 // 图标与底图共用一个 22px 槽位：先回退到底图起点，再让图标自身承担本槽 advance。
                 text.append(offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE));
                 text.append(PackAssets.gadgetBarIconGlyphText(kind));
             }
-            if (canOverlayLayers && slot == selected) {
+            if (slot == selected) {
                 // 选框独立叠加，保持底图/图标的净前进量不变。
                 text.append(offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE));
                 text.append(PackAssets.gadgetBarSelectGlyphText());
             }
         }
-        // 位图字形会乘以文字颜色；显式白色保证贴图原色显示，不被上下文颜色染色。
-        return MINI.deserialize(text.toString())
-            .color(net.kyori.adventure.text.format.NamedTextColor.WHITE)
-            .decoration(TextDecoration.ITALIC, false);
+        return text.toString();
     }
 
     private VirtualGadgetBar bar(UUID playerId) {
@@ -286,8 +250,6 @@ public final class TableGadgetBarHudService implements Listener {
         invalidateRefresh(playerId);
         bars.remove(playerId);
         selectedSlots.remove(playerId);
-        lastChatFallback.remove(playerId);
-        lastChatFallbackMessage.remove(playerId);
     }
 
     @EventHandler
@@ -299,6 +261,9 @@ public final class TableGadgetBarHudService implements Listener {
         }
         event.setCancelled(true);
         select(player.getUniqueId(), Math.max(0, Math.min(SLOT_COUNT - 1, event.getNewSlot())));
+        // 并入 BossBar 后选槽不会自己触发重绘（本服务已经不派发 ActionBar），
+        // 所以这里主动让该玩家的出牌 HUD 立刻重画一次，选框才会跟着移动到新槽位。
+        redrawHud(table, player);
     }
 
     public void onSaved(UUID playerId) {
@@ -311,11 +276,50 @@ public final class TableGadgetBarHudService implements Listener {
         refresh(playerId);
     }
 
+    /**
+     * 拆桌、回 LOBBY、停服时收尾。
+     *
+     * <p>【不再清 ActionBar】：并入 BossBar 后九格栏不在 ActionBar 上，而 ActionBar 现在只承载普通
+     * 状态提示；往这里发空 ActionBar 会把别人正在显示的状态提示一并擦掉。栏本身随第四行自然隐藏即可。
+     * 这里丢掉该桌座位的道具数据缓存，避免换桌后沿用上一桌的选中槽。
+     */
     public void clearTable(GameTable table) {
         if (table == null) {
             return;
         }
-        actionBarOverlay.outputDispatcher().sendActionBar(table.getSeats(), Component.empty());
+        for (UUID playerId : table.getSeats()) {
+            bars.remove(playerId);
+            selectedSlots.remove(playerId);
+        }
+        // 主动让仍在线的同桌玩家重画一次 HUD。注意回 LOBBY 路径上本方法在切阶段之前调用，
+        // 此时重画的是默认九格栏，要等阶段切到 LOBBY 后的下一次刷新才整条隐藏；关桌路径则立即消失。
+        // redrawHud 内部已自行投递到 player lane 与桌 owner lane，这里不再额外包一层 runTableNow。
+        for (UUID playerId : table.getSeats()) {
+            redrawHud(table, playerId);
+        }
+    }
+
+    /**
+     * 让某玩家的出牌 HUD 立刻重画一次（选槽、拆桌收尾时用）。
+     *
+     * <p>复用 {@link GameTable} 的既有 HUD 刷新入口，与每秒的周期刷新同一条路径，避免另开一套渲染。
+     */
+    private void redrawHud(GameTable table, Player player) {
+        if (table != null && player != null) {
+            redrawHud(table, player.getUniqueId());
+        }
+    }
+
+    private void redrawHud(GameTable table, UUID playerId) {
+        if (table == null || playerId == null) {
+            return;
+        }
+        PlayerOutputDispatcher output = actionBarOverlay.outputDispatcher();
+        output.runPlayer(playerId, player -> plugin.getTableManager().runTableNow(table, () -> {
+            if (plugin.getTableManager().getTableOf(player) == table) {
+                table.refreshTrickHudFor(player);
+            }
+        }));
     }
 
     private void invalidateRefresh(UUID playerId) {
@@ -358,7 +362,5 @@ public final class TableGadgetBarHudService implements Listener {
         selectedSlots.clear();
         loading.clear();
         refreshStates.clear();
-        lastChatFallback.clear();
-        lastChatFallbackMessage.clear();
     }
 }

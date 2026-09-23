@@ -129,6 +129,14 @@ val gadgetBarIconWidth = 16
 val gadgetBarIconHeight = 16
 val gadgetBarSlotCount = 9
 
+// 九格道具栏并入出牌 HUD 后的固定下移像素：九格栏底图原 ascent=cellHeight，作为独立一行时会贴在 HUD 最顶；
+// 并入 BossBar 第四行必须把它整体下沉到记牌器行下方，所以 provider 的 ascent 改为 cellHeight - 本值。
+// 这是固定常量档（同一 JVM 里运行期不能改），要在四条行里重排必须改这里并重建资源。
+// 插件侧 PackAssets.GADGET_BAR_ROW_DOWN_OFFSET / PackTiers.GADGET_BAR_ROW_DOWN_OFFSET 与此处一一对应。
+// 取值依据：默认记牌器 offset-down=122 时，记牌器 frame 底边在基线下 122+3+12=137 像素；
+// 九格栏顶边在基线下 本值-22。取 160 让栏顶落在 138，与记牌器留 1 像素间隙（152 会重叠 7 像素）。
+val gadgetBarRowDownOffset = 160
+
 // ============================================================================
 // 字体切分
 //
@@ -1378,6 +1386,11 @@ val generatePackTiers = tasks.register("generatePackTiers") {
                 public static final int GADGET_BAR_CELL_ADVANCE = ${gadgetBarCellAdvance};
                 public static final int GADGET_BAR_ICON_WIDTH = ${gadgetBarIconWidth};
                 public static final int GADGET_BAR_ICON_HEIGHT = ${gadgetBarIconHeight};
+                /**
+                 * 九格栏并入出牌 HUD 后的固定下移像素；provider 的 ascent = 格高 - 本值。
+                 * 与 build.gradle.kts 的 gadgetBarRowDownOffset 一一对应。
+                 */
+                public static final int GADGET_BAR_ROW_DOWN_OFFSET = ${gadgetBarRowDownOffset};
                 public static final int GADGET_BAR_ICON_ADVANCE = ${gadgetBarIconWidth + 1};
                 public static final int GADGET_BAR_ICON_KIND_COUNT = ${gadgetBarIconKinds.size};
 
@@ -1969,7 +1982,9 @@ val generateCraftEngineBundle = tasks.register("generateCraftEngineBundle") {
                 checkGlyphCodepoint(codepoint, "gadget-bar", codepoint)
                 appendLine("  $resourceNamespace:gadget_bar_$name:")
                 appendLine("    height: $gadgetBarCellHeight")
-                appendLine("    ascent: $gadgetBarCellHeight")
+                // 并入 BossBar 第四行后必须整体下移到记牌器行下方：ascent 从 cellHeight 减固定下移档。
+                // 与 PackAssets.GADGET_BAR_ROW_DOWN_OFFSET / PackTiers.GADGET_BAR_ROW_DOWN_OFFSET 同源。
+                appendLine("    ascent: ${gadgetBarCellHeight - gadgetBarRowDownOffset}")
                 appendLine("    font: $gadgetBarFont")
                 appendLine("    file: $resourceNamespace:font/gadget_bar/$name.png")
                 appendLine("    char: \\u${codepoint.toString(16).padStart(4, '0')}")

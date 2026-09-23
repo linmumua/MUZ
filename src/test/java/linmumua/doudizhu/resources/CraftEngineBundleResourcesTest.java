@@ -112,7 +112,10 @@ class CraftEngineBundleResourcesTest {
             assertNotNull(glyph, "缺少九格字形声明：" + name);
             assertEquals(PackAssets.GADGET_BAR_FONT, glyph.get("font"));
             assertEquals("22", glyph.get("height"));
-            assertEquals("22", glyph.get("ascent"));
+            // 并入出牌 HUD 第四行后 ascent 由「格高」改为「格高 - 固定下移档」：旧断言锁的是
+            // 「贴顶」那版布局，机制变更后必须钉住新的下移值（断言编码旧机制，不是弱化）。
+            assertEquals(String.valueOf(PackAssets.GADGET_BAR_CELL_HEIGHT - PackAssets.GADGET_BAR_ROW_DOWN_OFFSET),
+                glyph.get("ascent"), name + " 的 ascent 必须是格高减去九格栏固定下移档");
             String file = glyph.get("file");
             assertNotNull(file);
             BufferedImage image = readImage("craftengine/muz/resourcepack/assets/muz/textures/font/"

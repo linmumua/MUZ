@@ -734,6 +734,10 @@ final class TrickHudService {
             && (visibleRows & 4) != 0;
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
+        // 第四行：桌内九格道具栏。只在【正式牌桌路由】且【道具功能开着】时渲染；
+        // 调试棒预览（forceCounterWithoutItem）与「只显示指定行」共用本入口，但九格栏只跟正式对局，
+        // 所以这里读的是插入的只读栏快照，快照为 null 表示该行不渲染，其余三行照旧。
+        TrickHudView.GadgetBarRow gadgetBarRow = gadgetBarRowOf(viewerId);
         String line = TrickHudView.buildMiniMessage(
             showAvatars ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
             showAvatars ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
@@ -750,9 +754,29 @@ final class TrickHudService {
             showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(),
                 settings.counterScale(), settings.counterDownOffsetTier(), continuousFont) : List.of(),
             settings.counterGap(),
-            continuousFont
+            continuousFont,
+            gadgetBarRow,
+            0
         );
         apply(viewer, line);
+    }
+
+    /**
+     * 取该玩家当前桌内九格栏的只读快照，包成第四行片段；没有就返回空行。
+     *
+     * <p>宽度用与 {@code TableGadgetBarHudService} 完全同源的 {@link PackAssets#gadgetBarRowAdvance()}，
+     * 否则容器宽 {@code W} 算错，整条 HUD 的水平居中会跟着漂。字体标签由字形片段自带。
+     */
+    private TrickHudView.GadgetBarRow gadgetBarRowOf(UUID viewerId) {
+        TableGadgetBarHudService gadgetBar = plugin.getTableGadgetBarHudService();
+        if (gadgetBar == null) {
+            return TrickHudView.GadgetBarRow.EMPTY;
+        }
+        String glyphs = gadgetBar.hudBarGlyphText(viewerId);
+        if (glyphs == null || glyphs.isEmpty()) {
+            return TrickHudView.GadgetBarRow.EMPTY;
+        }
+        return new TrickHudView.GadgetBarRow(glyphs, PackAssets.gadgetBarRowAdvance());
     }
 
     /**

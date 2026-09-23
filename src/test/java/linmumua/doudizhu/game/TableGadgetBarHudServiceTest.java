@@ -1,5 +1,6 @@
 package linmumua.doudizhu.game;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -32,9 +33,7 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("store.decodeRaw(raw)"));
         assertTrue(source.contains("VirtualGadgetBar.BUBBLE_SLOT"));
         assertTrue(source.contains("Consumer<Player> voiceOpener"));
-        assertTrue(source.contains("actionBarOverlay.currentOverlay(playerId)"));
         assertTrue(source.contains("actionBarOverlay.outputDispatcher()"));
-        assertTrue(source.contains("output.sendActionBar(playerId"));
         assertTrue(source.contains("output.runPlayer(playerId"));
         assertTrue(source.contains("refreshResultAllowed(stopped, state, generation)"));
         assertFalse(source.contains("player.sendActionBar"), "生产额外栏不得绕过共享玩家输出门面");
@@ -46,32 +45,57 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("PackAssets.gadgetBarKind"), "道具槽必须按 ItemStack 选择客户端真实图标");
         assertTrue(source.contains("PackAssets.GADGET_BAR_SPEECH"), "第九槽必须使用固定语音图标");
         assertTrue(source.contains("offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE)"),
-            "图标和选框必须回退到同一槽位，而不能改变 ActionBar 净宽度");
+            "图标和选框必须回退到同一槽位，而不能改变整条栏的净宽度");
         assertFalse(source.contains("Component.text(\"道具 \")"), "额外栏不得继续输出文字标题");
         assertFalse(source.contains("itemLabel("), "额外栏不得继续使用文字道具标签");
         assertFalse(source.contains("openInventory"), "额外栏不得打开 Inventory GUI");
     }
 
     /**
-     * 用户要求：开局后九格栏位置固定。客户端按 ActionBar 总前进量居中，提示文字若直接拼在栏前，
-     * 文字长短一变栏就左右漂移。组合必须走净前进量恒等于栏宽的固定布局，且栏不能成为正文的子节点。
+     * 九格栏已并入出牌 HUD（BossBar 第四行），不再走 ActionBar。
+     *
+     * <p>用户要求：九格栏与对局状态提示抢同一个 ActionBar 槽位来回覆盖闪烁，必须独立出来并入出牌 HUD。
+     * 所以本服务只保留数据源职责，暴露 {@code hudBarGlyphText} 给 TrickHudService，并【彻底】不再合成/发送
+     * ActionBar（旧机制下的 {@code compose}/{@code HotbarActionBarLayout} 固定宽度算式与聊天兜底都已删除）。
      */
     @Test
-    void 提示文字出现时九格栏位置保持固定() throws IOException {
+    void 九格栏并入出牌HUD后不再占用ActionBar() throws IOException {
         String source = Files.readString(HUD);
-        assertTrue(source.contains("HotbarActionBarLayout.calculate(barWidth, measured.getAsInt())"),
-            "九格栏与提示必须用固定宽度布局组合");
-        assertTrue(source.contains("SLOT_COUNT * PackAssets.GADGET_BAR_CELL_ADVANCE"),
-            "布局宽度必须取九格栏的真实净前进量");
-        assertFalse(source.contains("overlay.append(Component.text(\"  \")).append(bar)"),
-            "不得再把栏拼在提示后面（会漂移并继承提示颜色）");
-        assertTrue(source.contains("chatFallback(playerId, overlay)"),
-            "字体不可测时不得猜测宽度，正文应改走聊天");
-        HotbarActionBarLayout.Layout shortText = HotbarActionBarLayout.calculate(9 * 22, 30);
-        HotbarActionBarLayout.Layout longText = HotbarActionBarLayout.calculate(9 * 22, 170);
-        assertTrue(shortText.totalWidth() == 9 * 22 && longText.totalWidth() == 9 * 22,
-            "无论提示多长，净前进量都必须等于栏宽，客户端居中位置才不会变");
-        assertTrue(shortText.iconLeft(640) == longText.iconLeft(640), "栏的屏幕左坐标不得随提示长度变化");
+        assertTrue(source.contains("public String hudBarGlyphText(UUID playerId)"),
+            "九格栏必须暴露只读字形快照供出牌 HUD 拼第四行");
+        assertTrue(source.contains("PackAssets.gadgetBarRowAdvance()") || source.contains("gadgetBarRowAdvance"),
+            "九格栏宽度必须与 PackAssets/TrickHudView 同源");
+        // 旧机制断言改为【不得再出现】：这些只为 ActionBar 合成服务。
+        assertFalse(source.contains("output.sendActionBar(playerId"),
+            "九格栏不得再通过 ActionBar 发送（会与状态提示互相覆盖闪烁）");
+        assertFalse(source.contains("HotbarActionBarLayout"), "固定宽度 ActionBar 布局已随并入 BossBar 退役");
+        assertFalse(source.contains("chatFallback"), "聊天兜底只为 ActionBar 正文服务，已随机制删除");
+        assertFalse(source.contains("MINI.deserialize"), "本服务不再自行拼 MiniMessage，改由 View 消费字形片段");
+    }
+
+    /**
+     * 用户要求：开局后九格栏位置固定。并入 BossBar 后栏不再自己居中，位置由字形自带的固定下移档
+     * {@link PackAssets#GADGET_BAR_ROW_DOWN_OFFSET} 决定；本测试钉住两侧常量同源，防止改一处漏一处。
+     */
+    @Test
+    void 九格栏竖直位置由固定下移档决定且两侧同源() throws IOException {
+        String build = Files.readString(Path.of("build.gradle.kts"));
+        assertTrue(build.contains("val gadgetBarRowDownOffset ="),
+            "构建期必须显式声明九格栏下移档，不能让它散落在 ascent 算式里");
+        assertTrue(build.contains("ascent: ${gadgetBarCellHeight - gadgetBarRowDownOffset}"),
+            "九格栏 provider 的 ascent 必须是格高减去固定下移档");
+        // 断言由「下移档大于记牌器偏移」升级为按字形盒边比较：旧断言只比偏移量，
+        // 漏掉了 152 时九格栏顶（基线下 130）压进记牌器 frame 底（基线下 137）7 像素的重叠。
+        // 盒模型：字形占 [ascent-height, ascent]；记牌器 frame ascent = COUNTER_FRAME_ASCENT - offset。
+        int defaultCounterOffsetDown = 122;
+        int counterBottomBelowBaseline = defaultCounterOffsetDown - PackAssets.COUNTER_FRAME_ASCENT
+            + PackAssets.COUNTER_FRAME_HEIGHT;
+        int gadgetTopBelowBaseline = PackAssets.GADGET_BAR_ROW_DOWN_OFFSET - PackAssets.GADGET_BAR_CELL_HEIGHT;
+        assertTrue(gadgetTopBelowBaseline >= counterBottomBelowBaseline,
+            "九格栏顶(" + gadgetTopBelowBaseline + ")必须不高于默认记牌器底(" + counterBottomBelowBaseline
+                + ")，否则第四行会压在记牌器上");
+        // 九格栏宽度必须与 TrickHudView 的容器宽算式一致。
+        assertEquals(9 * PackAssets.GADGET_BAR_CELL_ADVANCE, PackAssets.gadgetBarRowAdvance());
     }
 
     @Test

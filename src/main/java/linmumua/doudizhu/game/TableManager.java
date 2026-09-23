@@ -104,6 +104,20 @@ public final class TableManager {
         return key == null ? null : tables.get(key);
     }
 
+    /**
+     * 按 UUID 查玩家所在牌桌；不需要 Player 实体的路径用这个，避免在 owner lane 上取玩家对象。
+     *
+     * <p>与 {@link #getTableOf(Player)} 同源（同一份 {@code playerToTable} 映射），只是省略了
+     * 从 Player 取 UUID 那一步。离线玩家不会被登记，所以查不到时返回 null，与在线查询语义一致。
+     */
+    public GameTable getTableOf(UUID playerId) {
+        if (playerId == null) {
+            return null;
+        }
+        String key = playerToTable.get(playerId);
+        return key == null ? null : tables.get(key);
+    }
+
     public Collection<GameTable> getTables() {
         return new ArrayList<>(tables.values());
     }

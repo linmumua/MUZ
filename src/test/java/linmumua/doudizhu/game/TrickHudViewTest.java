@@ -621,6 +621,66 @@ class TrickHudViewTest {
             List.of("<counter:" + advance + ">"), advance);
     }
 
+    /** 一段宽度确定的假九格栏，内容写成 {@code <gadget:宽>}，供解释器累加。 */
+    private static TrickHudView.GadgetBarRow gadgetBar(int width) {
+        return new TrickHudView.GadgetBarRow("<gadget:" + width + ">", width);
+    }
+
+    private static String fourRowLine(
+        List<DoudizhuCard> cards, int slot, TrickHudView.GadgetBarRow gadgetBar) {
+        return TrickHudView.buildMiniMessage(
+            SMALL, BIG, SMALL, slot, GAP, cards, STEP, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(), 0, false, gadgetBar, 0);
+    }
+
+    /**
+     * 【第四行并入 BossBar】九格栏后，净前进量仍必须恒等于容器宽。
+     *
+     * <p>九格栏宽度固定（9×22=198），可能比牌行/头像行都宽，于是它会成为新的容器宽基准；
+     * 若忘了把它的宽度计入 {@code containerAdvance}，末行的收口偏移就会少补一段，
+     * 客户端按错误的总宽居中，整条四行 HUD 横向漂移。
+     */
+    @Test
+    void 第四行九格栏计入容器宽且净前进量守恒() {
+        int slot = 40;
+        int avatarGap = 4;
+        int step = 12;
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        TrickHudView.GadgetBarRow bar = gadgetBar(198);
+
+        String line = fourRowLine(hand, slot, bar);
+        int expected = TrickHudView.containerAdvance(
+            slot, avatarGap, hand.size(), step, 0, List.of(), 0, 198);
+        assertEquals(198, expected, "九格栏应当成为最宽的一行");
+        assertEquals(expected, netAdvance(line),
+            "加入第四行后净前进量必须仍恒等于容器宽，否则客户端居中会漂移");
+    }
+
+    /** 没有九格栏快照时第四行整条不产出，净前进量仍等于三行版的容器宽。 */
+    @Test
+    void 无九格栏快照时第四行不产出且容器宽不变() {
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        int slot = 40;
+        String withEmpty = fourRowLine(hand, slot, TrickHudView.GadgetBarRow.EMPTY);
+        String threeRow = TrickHudView.buildMiniMessage(
+            SMALL, BIG, SMALL, slot, GAP, hand, STEP, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(), 0, false);
+        assertEquals(threeRow, withEmpty,
+            "九格栏为空时第四行不得产出任何文本，输出应与三行版完全一致");
+        assertEquals(netAdvance(threeRow), netAdvance(withEmpty));
+    }
+
+    /** 只有九格栏、其余三行都没有时也要画出来（否则并入后某些阶段栏会整条消失）。 */
+    @Test
+    void 只有九格栏时仍然渲染并居中() {
+        TrickHudView.GadgetBarRow bar = gadgetBar(198);
+        String line = TrickHudView.buildMiniMessage(
+            null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(), 0, false, bar, 0);
+        assertFalse(line.isEmpty(), "只有九格栏时也要画出来");
+        assertEquals(198, netAdvance(line), "只有一条 198 宽的九格栏时容器宽就是它");
+    }
+
     /** 三层 glyph 叠加后仍只净前进一个当前资源档的格宽。 */
     @Test
     void 分层片段用当前advance偏移叠加且净前进不变() {
@@ -850,6 +910,9 @@ class TrickHudViewTest {
                     // 否则测「这一格画在哪」时分不出是格子还是留白。
                     counterLefts.add(cursor);
                     cursor += Integer.parseInt(tag.substring(8));
+                } else if (tag.startsWith("gadget:")) {
+                    // 九格栏：整条自报宽度，本身不参与「第几格」的逐格断言。
+                    cursor += Integer.parseInt(tag.substring(7));
                 }
                 index = close;
                 continue;
