@@ -258,6 +258,15 @@ public final class PhysicalTableManager {
     private final Map<String, Long> worldBodySkipCounters = new ConcurrentHashMap<>();
     /** 世界体跳过日志的限频间隔：每 N 次跳过最多记一条。 */
     private static final long WORLD_BODY_SKIP_LOG_INTERVAL = 200L;
+    /**
+     * 交互处理异常日志的限频时间戳，键是「交互动作 + 异常摘要」。
+     *
+     * <p>键集合受交互动作与异常文本限制，都是有限集合（按钮动作枚举 + 领域规则文本 + 平台异常文本），
+     * 不会随 tick 或玩家数增长，因此不需要清理。
+     */
+    private final Map<String, Long> interactionFailureLogMillis = new ConcurrentHashMap<>();
+    /** 交互失败日志的限频窗口：同一「动作 + 异常摘要」在 N 毫秒内最多记一条。 */
+    private static final long INTERACTION_FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
 
     private final DoudizhuPlugin plugin;
     /** 连接生命周期维护的不可变 UUID 快照；region owner 不直接枚举 Player。 */
@@ -3048,6 +3057,9 @@ public final class PhysicalTableManager {
                 }
                 refresh(table);
             } catch (RuntimeException exception) {
+                // 先留痕再提示：异常文本可能为 null（例如纯 NPE），提示本身会失败，
+                // 但服务端日志必须记下来，否则又变成"玩家只看到提示、控制台什么都没有"。
+                reportInteractionFailure("按钮 " + binding.action(), player, exception);
                 hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             }
             return true;
@@ -3273,6 +3285,8 @@ public final class PhysicalTableManager {
             updateBacksideSelection(table, placed, player.getUniqueId());
             playSelectionSound(player.getUniqueId(), !wasSelected);
         } catch (RuntimeException exception) {
+            // 选牌链路的静默失败同样最难查：只提示不记日志会让「点了没反应」在服务端不可见。
+            reportInteractionFailure("手牌选牌", player, exception);
             hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             refresh(table);
         }
@@ -3295,6 +3309,8 @@ public final class PhysicalTableManager {
             table.playSelected(player);
             refresh(table);
         } catch (RuntimeException exception) {
+            // 出牌链路的静默失败同样最难查：只提示不记日志会让「点了没反应」在服务端不可见。
+            reportInteractionFailure("手牌出牌", player, exception);
             hint(player.getUniqueId(), exception.getMessage(), NamedTextColor.RED);
             refresh(table);
         }
@@ -3973,6 +3989,35 @@ public final class PhysicalTableManager {
 
     private void hint(UUID playerId, String text, NamedTextColor color) {
         playerOutput.sendActionBar(playerId, message(text, color));
+    }
+
+    /**
+     * 交互处理异常的服务端留痕（限频）。
+     *
+     * <p>【为什么必须留痕】{@link #handleInteraction} 及同源的点击 catch（手牌选牌/出牌）把任意
+     * {@code RuntimeException} 转成一条玩家 ActionBar 提示。只提示、不记服务端日志时，真正的失败
+     * ——例如开局 {@code runAtFixedRate(0, 1, …)} 被调度器拒绝抛出的 {@code IllegalArgumentException}——
+     * 在服务端完全不可见：玩家只看到一句提示，控制台没有任何堆栈，事后无从定位（这正是
+     * 「卡在正在发牌却查不到原因」那类问题的成因）。这里补一条带完整异常的服务端 WARNING。
+     *
+     * <p>交互由点击驱动、同一异常可能高频复现，所以按「动作 + 异常摘要」限频：既不刷屏，也不静默吞掉。
+     * 玩家提示与对局流程完全不受影响——调用方仍照旧 {@code hint(..., exception.getMessage(), RED)}。
+     */
+    private void reportInteractionFailure(String action, Player player, RuntimeException exception) {
+        String detail = exception == null ? null : exception.getMessage();
+        String key = action + '|' + (detail == null ? "" : detail);
+        long now = System.currentTimeMillis();
+        Long last = interactionFailureLogMillis.get(key);
+        if (last != null && now - last < INTERACTION_FAILURE_LOG_INTERVAL_MILLIS) {
+            return;
+        }
+        interactionFailureLogMillis.put(key, now);
+        plugin.getLogger().log(java.util.logging.Level.WARNING,
+            "牌桌交互处理失败（" + action + "），玩家 "
+                + (player == null ? "未知" : player.getName())
+                + "，已向玩家提示异常文本："
+                + (exception == null ? "null" : exception.getClass().getSimpleName() + ": " + detail),
+            exception);
     }
 
     private void applyJoinVisibility(GameTable table, Entity entity) {

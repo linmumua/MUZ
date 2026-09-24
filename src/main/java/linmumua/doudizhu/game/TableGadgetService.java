@@ -254,64 +254,78 @@ public final class TableGadgetService {
      * 因此道具效果推进与目标高亮在真实 Folia 上一直是静默失效状态。现在本方法只做两件事：
      * 读取桌/座位快照并按 owner lane 派发——效果推进走桌子 owner lane（{@code runTableNow}），
      * 目标高亮走 player lane。这里不得取时钟、不得触碰玩家或实体。
+     *
+     * <p>IMPORTANT FOLIA: 整个扫描体还必须再包一层兜底。{@code MuzScheduler.schedule} 在周期回调抛异常
+     * 时会 {@code managed.fail(repeating=true)} 并取消后端任务，扫描一旦被打死，所有桌的效果推进与
+     * 目标高亮都会永久失效且无法自愈。而 {@code TableManager} 的 {@code tables} / {@code playerToTable}
+     * 仍是非并发 {@code LinkedHashMap}（全局 Map 迁移属既有技术债，不在本轮范围）：其它 lane 的结构性
+     * 修改与本 lane 并发时，{@code getTables()} 内部的 {@code new ArrayList<>(tables.values())} 本身
+     * 就可能在逐桌 try 之外抛 {@code ConcurrentModificationException} / 越界。因此快照获取、逐桌派发、
+     * 收尾清理任何一步失败都只跳过本轮并限频记录，绝不外抛。
      */
     private void tick() {
         if (stopped) {
             return;
         }
-        boolean enabled = settings != null && settings.enabled();
-        tickCounter++;
-        TableManager manager = plugin.getTableManager();
-        if (manager == null) {
-            return;
-        }
-        // 保持原有节奏：目标高亮每 2 tick 扫描一次；配置关闭时不做扫描而是清空。
-        boolean sweep = enabled && (tickCounter & 1) == 0;
-        Set<UUID> eligible = new HashSet<>();
-        for (GameTable table : tables()) {
-            // IMPORTANT FOLIA: 每张桌的处理整段包在 try 里。本扫描是 global 周期任务，回调抛异常会被
-            // 调度器取消整条任务（MuzScheduler.schedule → managed.fail(repeating=true) 会 cancel 后端任务）；
-            // 一旦被取消，所有桌的效果推进与目标高亮都永久失效且无法自愈——这是「投掷卡住」最严重的
-            // 形态。所以「派发」「读阶段」「读座位」「投递高亮」任何一步失败都只能限频记录并继续扫描
-            // 下一张桌，不得逃出本方法。
-            try {
-                manager.runTableNow(table, () -> effects.tickTable(table));
-                if (!sweep || table.getPhase() != GamePhase.PLAYING) {
-                    continue;
-                }
-                for (UUID seat : table.getSeats()) {
-                    Player actor = Bukkit.getPlayer(seat);
-                    if (actor == null || !actor.isOnline() || table.isBot(seat)) {
+        try {
+            boolean enabled = settings != null && settings.enabled();
+            tickCounter++;
+            TableManager manager = plugin.getTableManager();
+            if (manager == null) {
+                return;
+            }
+            // 保持原有节奏：目标高亮每 2 tick 扫描一次；配置关闭时不做扫描而是清空。
+            boolean sweep = enabled && (tickCounter & 1) == 0;
+            Set<UUID> eligible = new HashSet<>();
+            for (GameTable table : tables()) {
+                // IMPORTANT FOLIA: 每张桌的处理整段包在 try 里。本扫描是 global 周期任务，回调抛异常会被
+                // 调度器取消整条任务（MuzScheduler.schedule → managed.fail(repeating=true) 会 cancel 后端任务）；
+                // 一旦被取消，所有桌的效果推进与目标高亮都永久失效且无法自愈——这是「投掷卡住」最严重的
+                // 形态。所以「派发」「读阶段」「读座位」「投递高亮」任何一步失败都只能限频记录并继续扫描
+                // 下一张桌，不得逃出本方法。
+                try {
+                    manager.runTableNow(table, () -> effects.tickTable(table));
+                    if (!sweep || table.getPhase() != GamePhase.PLAYING) {
                         continue;
                     }
-                    eligible.add(seat);
-                    output.runPlayer(seat, online -> updateActorTarget(online, table));
+                    for (UUID seat : table.getSeats()) {
+                        Player actor = Bukkit.getPlayer(seat);
+                        if (actor == null || !actor.isOnline() || table.isBot(seat)) {
+                            continue;
+                        }
+                        eligible.add(seat);
+                        output.runPlayer(seat, online -> updateActorTarget(online, table));
+                    }
+                } catch (IllegalArgumentException ignored) {
+                    // 本轮扫描期间该桌已被注销；跳过即可，不能让异常把 global 周期任务打挂。
+                } catch (RuntimeException failure) {
+                    // 单桌派发失败仍限频记录，不静默吞掉（项目硬约束）。
+                    reportFailure("牌桌道具扫描派发失败", failure);
                 }
-            } catch (IllegalArgumentException ignored) {
-                // 本轮扫描期间该桌已被注销；跳过即可，不能让异常把 global 周期任务打挂。
-            } catch (RuntimeException failure) {
-                // 单桌派发失败仍限频记录，不静默吞掉（项目硬约束）。
-                reportFailure("牌桌道具扫描派发失败", failure);
             }
-        }
-        if (!enabled) {
-            // 配置关闭：清掉全部目标状态。清理会改玩家发光，必须回到各自的 player lane。
+            if (!enabled) {
+                // 配置关闭：清掉全部目标状态。清理会改玩家发光，必须回到各自的 player lane。
+                for (UUID actorId : new ArrayList<>(targets.keySet())) {
+                    output.runPlayer(actorId, ignored -> clearPlayerTarget(actorId));
+                }
+                for (UUID targetId : new ArrayList<>(targetReferences.keySet())) {
+                    output.runPlayer(targetId, ignored -> releaseTargetCompletely(targetId));
+                }
+                originalGlowing.clear();
+                return;
+            }
+            if (!sweep) {
+                return;
+            }
             for (UUID actorId : new ArrayList<>(targets.keySet())) {
-                output.runPlayer(actorId, ignored -> clearPlayerTarget(actorId));
+                if (!eligible.contains(actorId)) {
+                    output.runPlayer(actorId, ignored -> clearPlayerTarget(actorId));
+                }
             }
-            for (UUID targetId : new ArrayList<>(targetReferences.keySet())) {
-                output.runPlayer(targetId, ignored -> releaseTargetCompletely(targetId));
-            }
-            originalGlowing.clear();
-            return;
-        }
-        if (!sweep) {
-            return;
-        }
-        for (UUID actorId : new ArrayList<>(targets.keySet())) {
-            if (!eligible.contains(actorId)) {
-                output.runPlayer(actorId, ignored -> clearPlayerTarget(actorId));
-            }
+        } catch (RuntimeException failure) {
+            // 兜底：快照获取（getTables）或收尾清理等逐桌 try 之外的一步失败时，只跳过本轮。
+            // 不记录会退化成静默失效（排查无痕）；不吞掉会打死整条 global 扫描周期任务。
+            reportFailure("牌桌道具扫描异常，跳过本轮", failure);
         }
     }
 

@@ -154,12 +154,44 @@ public final class PhysicalChipService {
         if (player == null || !player.online()) {
             throw new IllegalStateException("玩家必须在线: " + playerId);
         }
+        requireOwnerLane(playerId, player);
         return player;
     }
 
+    /** 异步线程一律拒绝；这是 Paper/Leaf 上唯一真正生效的异步闸门（见 {@link #requireOwnerLane}）。 */
     private void requirePrimaryThread() {
         if (!runtime.isPrimaryThread()) {
-            throw new IllegalStateException("PhysicalChipService 只能在主线程调用");
+            throw new IllegalStateException("PhysicalChipService 只能在主线程或区域化核心的 tick 线程上调用");
+        }
+    }
+
+    /**
+     * 【为什么「主线程」判定还不够，必须再查一次 region 归属】
+     *
+     * <p>区域化核心（Folia/Lophine）把 {@code Bukkit.isPrimaryThread()} 实现为
+     * {@code TickThread.isTickThread()}，语义是「当前线程是某个 tick 线程」——**每一个 region 线程和
+     * global 线程都返回 true**（测试端内核 {@code folia-26.1.2.jar} 的
+     * {@code CraftServer.isPrimaryThread()} 与 {@code TickRegionScheduler$TickThreadRunner extends TickThread}
+     * 已用字节码核实）。于是「是 tick 线程」并不等于「持有这个玩家实体的 region」：在别的 region 的线程上
+     * 调用本服务会通过主线程判定，随后直接读写这个玩家的背包。
+     *
+     * <p>而这种跨 region 写入在本插件里是**静默**的：{@code CraftInventory}/{@code PlayerInventory}
+     * 的写入路径没有任何归属门禁（已核实 {@code ensureTickThread} 调用数为 0），不像
+     * {@code entity.remove()} / {@code showEntity} 那样会抛
+     * {@code Accessing entity state off owning region's thread}。所以这里必须补上
+     * {@code Bukkit.isOwnedByCurrentRegion(entity)} —— 即本项目既有门禁
+     * （{@code PhysicalTableManager.WorldBodyLane}、{@code TableGadgetEffectService.EffectRuntime}、
+     * {@code CraftEngineFurnitureService.RegionGate}、{@code PlayerOutputDispatcher}）统一采用的
+     * 「当前线程持有该实体所属 region」语义。
+     *
+     * <p>两个判定都要保留，缺一不可：非区域化核心（Paper/Leaf）上归属判定恒真——Leaf 的主线程本身
+     * 就是 {@code TickThread} 实例，其实体归属回退分支直接返回 true——那里只有主线程判定拦得住异步调用，
+     * 去掉它等于放开异步线程改玩家背包。
+     */
+    private void requireOwnerLane(UUID playerId, PlayerHandle player) {
+        if (!runtime.isOwnedByCurrentRegion(player)) {
+            throw new IllegalStateException(
+                "PhysicalChipService 只能在持有该玩家 region 的 owner lane 调用: " + playerId);
         }
     }
 
@@ -213,7 +245,17 @@ public final class PhysicalChipService {
 
     /** 生产环境适配器；所有 Bukkit 访问集中在此处，测试可替换整个接口。 */
     public interface RuntimeAccess {
+        /** 当前线程是主线程（非区域化核心）或 tick 线程（区域化核心的 region/global 线程）；异步线程为 false。 */
         boolean isPrimaryThread();
+
+        /**
+         * 当前线程是否持有该玩家实体所属的 region。
+         *
+         * <p>区域化核心上只有持有该玩家 region 的线程才能安全读写这个玩家的库存；其它 tick lane
+         * （别的 region、global）既会读到跨 region 的实体状态，也有可能产生没有服务端门禁的静默背包写入。
+         * 非区域化核心（Paper/Leaf）没有 region 概念，该判定恒真，因此不会误杀单线程核心的正常调用。
+         */
+        boolean isOwnedByCurrentRegion(PlayerHandle player);
 
         PlayerHandle player(UUID playerId);
 
@@ -222,6 +264,14 @@ public final class PhysicalChipService {
                 @Override
                 public boolean isPrimaryThread() {
                     return Bukkit.isPrimaryThread();
+                }
+
+                @Override
+                public boolean isOwnedByCurrentRegion(PlayerHandle player) {
+                    // 归属判定要拿 Bukkit 实体：本适配器只认自己产出的 handle；认不出来一律按「不拥有」处理，
+                    // 安全侧与 PhysicalTableManager.WorldBodyLane 一致（拿不到归属就拒绝触碰库存）。
+                    Player bukkitPlayer = player instanceof BukkitPlayerHandle handle ? handle.player : null;
+                    return bukkitPlayer != null && Bukkit.isOwnedByCurrentRegion(bukkitPlayer);
                 }
 
                 @Override

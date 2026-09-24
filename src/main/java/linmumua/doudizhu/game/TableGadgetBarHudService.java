@@ -35,6 +35,9 @@ import org.bukkit.inventory.ItemStack;
 public final class TableGadgetBarHudService implements Listener {
     public static final int SLOT_COUNT = VirtualGadgetBar.SLOT_COUNT + 1;
 
+    /* 预取失败限频窗口：本预取每 40 tick 跑一次，失败可能持续复现，限频既避免刷屏也不静默吞掉。 */
+    private static final long FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
+
     private final DoudizhuPlugin plugin;
     private final VirtualGadgetBarStore store;
     private final TableGadgetService gadgets;
@@ -47,6 +50,14 @@ public final class TableGadgetBarHudService implements Listener {
     private final Map<UUID, RefreshState> refreshStates = new ConcurrentHashMap<>();
     /** 已记录过「重画被跳过」告警的「桌名/玩家」键；同一组合只记一次，避免 clearTable 遍历座位时刷屏。 */
     private final Set<String> redrawSkipLogs = ConcurrentHashMap.newKeySet();
+    /**
+     * 预取失败限频时间戳（毫秒）。
+     *
+     * <p>预取只在 global 周期任务上写本字段，故用普通 {@code volatile} 字段即可，无需原子类型；
+     * 用原始 {@code long} 而非 {@code AtomicLong} 也让空心测试实例（{@code allocateInstance} 不跑构造器）
+     * 天然取到默认值 0，首次失败必然放行。
+     */
+    private volatile long lastPrefetchFailureMillis;
     private MuzScheduler.TaskHandle task;
     private volatile boolean stopped;
 
@@ -88,24 +99,55 @@ public final class TableGadgetBarHudService implements Listener {
      *
      * <p>【这是数据预取，不是渲染】：每秒只处理尚未加载的玩家，已加载的直接跳过，因此稳态下几乎空转。
      * 不再合成任何 ActionBar，也不再读取普通提示叠加。
+     *
+     * <p>IMPORTANT FOLIA: 本方法是 global 周期任务入口，{@code MuzScheduler.schedule} 在周期回调抛异常
+     * 时会 {@code managed.fail(repeating=true)} 并取消后端任务；预取一旦被打死，未加载道具数据的同桌玩家
+     * 就再也补不回来。而 {@code TableManager} 的 {@code tables} / {@code playerToTable} 仍是非并发
+     * {@code LinkedHashMap}（全局 Map 迁移属既有技术债，不在本轮范围）：其它 lane 的结构性修改与本 lane
+     * 并发时，{@code getTables()} 内部的 {@code new ArrayList<>(tables.values())} 就可能抛
+     * {@code ConcurrentModificationException} / 越界。所以整个预取体（含快照获取）都要兜底，失败只跳过
+     * 本轮并限频记录；同时按 {@code TableGadgetService.tick} 的同口径补上 manager 空值早退。
      */
     private void prefetchActivePlayers() {
         if (stopped) {
             return;
         }
-        for (GameTable table : plugin.getTableManager().getTables()) {
-            if (table.getPhase() != GamePhase.PLAYING || !gadgets.settings().enabled()) {
-                continue;
+        try {
+            TableManager manager = plugin.getTableManager();
+            if (manager == null) {
+                return;
             }
-            for (UUID playerId : table.getSeats()) {
-                if (table.isBot(playerId)) {
+            for (GameTable table : manager.getTables()) {
+                if (table.getPhase() != GamePhase.PLAYING || !gadgets.settings().enabled()) {
                     continue;
                 }
-                if (!bars.containsKey(playerId)) {
-                    refresh(playerId);
+                for (UUID playerId : table.getSeats()) {
+                    if (table.isBot(playerId)) {
+                        continue;
+                    }
+                    if (!bars.containsKey(playerId)) {
+                        refresh(playerId);
+                    }
                 }
             }
+        } catch (RuntimeException failure) {
+            reportPrefetchFailure(failure);
         }
+    }
+
+    /**
+     * 预取失败限频记录：同一原因 10 秒最多一条。
+     *
+     * <p>与 {@code TableGadgetEffectService.reportFailure} 同口径：既不刷屏，也不静默吞掉异常
+     * （项目硬约束）。这条路径被打断时服务端不会有任何其它痕迹，无日志等于「预取链路整体失效」不可查。
+     */
+    private void reportPrefetchFailure(RuntimeException failure) {
+        long now = System.currentTimeMillis();
+        if (now - lastPrefetchFailureMillis < FAILURE_LOG_INTERVAL_MILLIS) {
+            return;
+        }
+        lastPrefetchFailureMillis = now;
+        plugin.getLogger().warning("读取牌桌列表失败，跳过本轮桌内道具栏预取: " + describeFailure(failure));
     }
 
     public void refresh(UUID playerId) {

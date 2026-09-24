@@ -9,6 +9,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
+import java.util.logging.Level;
 import linmumua.doudizhu.compat.VersionCompat;
 import linmumua.doudizhu.world.DisplayPanelPickGeometry;
 import net.kyori.adventure.text.Component;
@@ -16,6 +17,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.entity.Display;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
 import org.bukkit.plugin.Plugin;
@@ -46,6 +48,9 @@ public final class TableSpeechPanelService {
     private final PlayerOutputDispatcher output;
     private final OcclusionTester occlusionTester;
     private final LongSupplier tickSource;
+    // 面板实体 lane 归属与删除的可注入接缝。生产路径用 BukkitPanelEntityLane（直接调 Bukkit）；测试可注入
+    // 替身，指定「当前线程不拥有该实体」并让删除投递失败。见 PanelEntityLane。
+    private final PanelEntityLane lane;
     // FOLIA: 这三个表会被 global 扫描线程与多个 player lane 并发访问（open 在 player lane，
     // tick 的派发在 global lane），因此必须是并发容器，不能再用 HashMap。
     private final Map<UUID, OwnerSession> owners = new ConcurrentHashMap<>();
@@ -82,6 +87,26 @@ public final class TableSpeechPanelService {
         OcclusionTester occlusionTester,
         LongSupplier tickSource
     ) {
+        this(plugin, config, entryProvider, tableProvider, actionHandler, output, occlusionTester, tickSource, null);
+    }
+
+    /**
+     * 包内可见：额外注入面板实体 lane 判定，供行为测试指定「当前线程不拥有该实体」等场景。
+     *
+     * <p>{@code lane} 为 null 时使用默认的 {@link BukkitPanelEntityLane}（生产路径行为不变）。写法与
+     * {@code TableGadgetEffectService(DoudizhuPlugin, EffectRuntime)} 一致。
+     */
+    TableSpeechPanelService(
+        Plugin plugin,
+        Config config,
+        EntryProvider entryProvider,
+        TableProvider tableProvider,
+        ActionHandler actionHandler,
+        PlayerOutputDispatcher output,
+        OcclusionTester occlusionTester,
+        LongSupplier tickSource,
+        PanelEntityLane lane
+    ) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.config = Objects.requireNonNull(config, "config");
         this.entryProvider = Objects.requireNonNull(entryProvider, "entryProvider");
@@ -93,6 +118,8 @@ public final class TableSpeechPanelService {
         // 线程上合法。global lane 调用会抛 IllegalStateException("No currently ticking region")
         // ——实服验收已复现。因此 tick() 只做派发，真正读取时钟的动作发生在 player lane 内。
         this.tickSource = Objects.requireNonNull(tickSource, "tickSource");
+        // 默认使用生产 lane：面板实体的删除会先判归属，跨 region 时投回实体自己的 region。
+        this.lane = lane != null ? lane : new BukkitPanelEntityLane(this.plugin);
     }
 
     /** 兼容批量入口：为当前桌每位在线真人分别创建私有面板。 */
@@ -270,8 +297,11 @@ public final class TableSpeechPanelService {
         if (stopped) {
             return;
         }
-        clearAll();
+        // 先封新入口：无论清理是否成功，关闭语义都必须落地。旧实现把 stopped = true 放在 clearAll() 之后，
+        // 一旦清理抛异常，stopped 永远为 false——服务仍在接收 open/tick，且异常会沿 onDisable 链路外溢。
+        // 清理本身现在已逐张面板自兜底（见 removePanels），这里再补上顺序保证。
         stopped = true;
+        clearAll();
     }
 
     public Config config() {
@@ -377,13 +407,65 @@ public final class TableSpeechPanelService {
         }
     }
 
+    /**
+     * 删除一个 owner 的全部面板实体。
+     *
+     * <p>逐张面板自兜底：单张面板的删除异常不得中断整轮清理，也不得逃出 {@code onDisable} 链路
+     * （关闭期 MuzScheduler 后端与 Paper 调度器都会拒绝注册，跨 region 删除也会抛异常，都属预期失败）。
+     * 状态已在 {@link #clearPlayer(UUID)} 里先行摘除，因此这里失败只会留痕、不会让条目残留。
+     */
     private void removePanels(OwnerSession session) {
         for (PanelView view : session.panels) {
-            if (view.display != null && view.display.isValid()) {
-                view.display.remove();
+            try {
+                removePanelEntity(view);
+            } catch (RuntimeException failure) {
+                // 留痕而不是静默吞掉：删不掉又没有日志正是实服最难排查的一类问题。
+                reportFailure("语音面板实体删除失败", failure);
             }
         }
         session.panels.clear();
+    }
+
+    /**
+     * 删除单个面板实体。
+     *
+     * <p>IMPORTANT FOLIA: 面板实体只能在它所属 region 的线程上删除。清理入口可能跑在玩家 lane（玩家可能
+     * 已走远、离开面板所在 region）、桌 owner lane，或 {@code onDisable} 的主线程（global，没有 region）
+     * 上；在错误 lane 上直接 {@code remove} 会抛
+     * {@code Accessing entity state off owning region's thread}。因此这里先判归属：本 region 直接删，
+     * 否则把删除投回实体自己的 region。投不出去（世界已卸载、调度拒绝等）时留痕日志，绝不静默。
+     */
+    private void removePanelEntity(PanelView view) {
+        TextDisplay display = view.display;
+        if (display == null) {
+            return;
+        }
+        // 关服分支：区域线程可能已不可用，实体随世界保存销毁，只清追踪、绝不在非法 owner 上操作实体
+        //（与 PhysicalTableManager / MahjongTableManager 的 shutdown 分支同口径）。
+        if (plugin.getServer().isStopping()) {
+            return;
+        }
+        if (lane.isOwnedByCurrentRegion(display)) {
+            if (display.isValid()) {
+                lane.removeNow(display);
+            }
+            return;
+        }
+        Location anchor = view.entry.panel().center();
+        boolean dispatched = lane.removeOnOwnerRegion(anchor, () -> {
+            // 这段在实体所属 region 内执行：此时 isValid/remove 都合法。
+            if (display.isValid()) {
+                lane.removeNow(display);
+            }
+        });
+        if (!dispatched) {
+            reportFailure("语音面板实体不在当前 region 且删除任务无法提交，已跳过删除", null);
+        }
+    }
+
+    /** 记录一次面板清理失败。失败可能发生在 onDisable 链路上，必须留痕且不得外抛（见调用点）。 */
+    private void reportFailure(String message, Throwable failure) {
+        plugin.getLogger().log(Level.WARNING, message + "。", failure);
     }
 
     private void clearAll() {
@@ -536,5 +618,73 @@ public final class TableSpeechPanelService {
     @FunctionalInterface
     public interface OcclusionTester {
         double firstBlockDistance(Player player, double maxDistance);
+    }
+
+    /**
+     * 面板实体 lane 归属与删除的可注入接缝。
+     *
+     * <p>【为什么需要这一层】面板实体在哪个 region 生成、由谁删除，只有持有该 region 的线程才能安全操作；
+     * 而清理入口（{@code clearPlayer}/{@code clearTable}/{@code clearAll}/{@code shutdown}）可能跑在玩家
+     * lane、桌 owner lane，或 {@code onDisable} 的主线程上。{@code Bukkit.isOwnedByCurrentRegion} 与实体
+     * {@code remove} 都是静态/实体调用，单测里没有运行中的服务端可控制，因此把判定与删除收口到接口后面，
+     * 让行为测试能指定「当前线程不拥有该实体」并让删除投递失败。写法与
+     * {@code PhysicalTableManager.WorldBodyLane} / {@code TableGadgetEffectService.EffectRuntime} 一致。
+     */
+    interface PanelEntityLane {
+        /** 当前线程是否拥有该实体所在 region；实体为 null 或读取失败一律按「不拥有」处理（安全侧）。 */
+        boolean isOwnedByCurrentRegion(Entity entity);
+
+        /** 在 owner lane 内直接删除实体；调用方必须先确认归属。 */
+        void removeNow(Entity entity);
+
+        /**
+         * 把一次性删除投到该实体所属 region（按面板中心 {@link Location} 定位）。
+         *
+         * @return true 表示删除任务已成功提交；false 表示无法提交（世界未加载、调度拒绝等），调用方必须留痕。
+         */
+        boolean removeOnOwnerRegion(Location anchor, Runnable removal);
+    }
+
+    /** 生产边界：以 {@code RegionScheduler} 把删除投到锚点所在 region。 */
+    private static final class BukkitPanelEntityLane implements PanelEntityLane {
+        private final Plugin plugin;
+
+        private BukkitPanelEntityLane(Plugin plugin) {
+            this.plugin = plugin;
+        }
+
+        // 门禁自身绝不抛异常：Location.getWorld() 在世界已卸载时会抛，读取失败一律按「不拥有」处理
+        //（安全侧：宁可把删除投回去，也不在非法 lane 上直接删）。
+        @Override
+        public boolean isOwnedByCurrentRegion(Entity entity) {
+            if (entity == null) {
+                return false;
+            }
+            try {
+                return Bukkit.isOwnedByCurrentRegion(entity);
+            } catch (RuntimeException failure) {
+                return false;
+            }
+        }
+
+        @Override
+        public void removeNow(Entity entity) {
+            entity.remove();
+        }
+
+        @Override
+        public boolean removeOnOwnerRegion(Location anchor, Runnable removal) {
+            try {
+                if (anchor == null || anchor.getWorld() == null || plugin.getServer() == null) {
+                    return false;
+                }
+                // 与 MuzScheduler 的 region lane 后端同一 API（Folia 语义：任务由该坐标的 region 拥有）。
+                plugin.getServer().getRegionScheduler().run(plugin, anchor, task -> removal.run());
+                return true;
+            } catch (RuntimeException failure) {
+                // 关闭期插件已禁用、Paper 调度器拒绝注册；投递失败按 false 交回调用方留痕，绝不外抛。
+                return false;
+            }
+        }
     }
 }

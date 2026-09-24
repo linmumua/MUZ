@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -123,6 +126,118 @@ class PhysicalChipServiceTest {
         runtime.testPlayer(playerId).online = true;
         runtime.primary = false;
         assertThrows(IllegalStateException.class, () -> service.balance(playerId));
+    }
+
+    /**
+     * 区域化核心上「是 tick 线程」不等于「持有这个玩家的 region」。
+     *
+     * <p>测试端内核（Folia/Leaf 26.1.2）把 {@code Bukkit.isPrimaryThread()} 实现为
+     * {@code TickThread.isTickThread()}，即 region 线程与 global 线程都为 true，因此
+     * {@code runtime.primary = true} 正是「区域线程」的真实取值，不是虚构场景。此时若只查主线程判定，
+     * 别的 region 的线程会通过校验并直接改写这个玩家的背包，而背包写入没有任何服务端归属门禁——
+     * 也就是说旧行为是**静默**跨 region 写入。本用例锁住「必须按玩家 region 归属拒绝」。
+     */
+    @Test
+    void regionizedTickThreadThatDoesNotOwnThePlayerIsRefusedWithoutMutation() {
+        TestRuntime runtime = new TestRuntime();
+        UUID playerId = runtime.addPlayer();
+        TestPlayer player = runtime.testPlayer(playerId);
+        player.storage[0] = chip(5, "red");
+        player.ownedByCurrentRegion = false;
+        ItemStack[] before = player.copyStorage();
+        PhysicalChipService service = service(runtime, () -> chip(1, "red"));
+
+        assertThrows(IllegalStateException.class, () -> service.balance(playerId));
+        assertThrows(IllegalStateException.class, () -> service.setBalance(playerId, 9));
+        assertThrows(IllegalStateException.class, () -> service.adjustBalance(playerId, -2));
+        assertStorageEquals(before, player.storage);
+    }
+
+    /**
+     * 归属必须逐人校验：一次批量转移会写多个玩家的背包，只要有一个人不在本 lane 的 region 内，
+     * 整批都必须在**任何写入之前**被拒绝——否则会出现「先扣了付款方、收款方写不进去」的半应用状态，
+     * 而零和批量转移的全部意义正是不会出现这种状态。
+     */
+    @Test
+    void batchTransferRefusesWhenAnyParticipantIsNotOwnedBeforeTouchingAnyInventory() {
+        TestRuntime runtime = new TestRuntime();
+        UUID payerId = runtime.addPlayer();
+        UUID receiverId = runtime.addPlayer();
+        TestPlayer payer = runtime.testPlayer(payerId);
+        TestPlayer receiver = runtime.testPlayer(receiverId);
+        payer.storage[0] = chip(10, "red");
+        receiver.ownedByCurrentRegion = false;
+        ItemStack[] payerBefore = payer.copyStorage();
+        ItemStack[] receiverBefore = receiver.copyStorage();
+        PhysicalChipService service = service(runtime, () -> chip(1, "red"));
+
+        Map<UUID, Integer> deltas = new LinkedHashMap<>();
+        deltas.put(payerId, -4);
+        deltas.put(receiverId, 4);
+
+        assertThrows(IllegalStateException.class, () -> service.transfer(deltas));
+        assertStorageEquals(payerBefore, payer.storage);
+        assertStorageEquals(receiverBefore, receiver.storage);
+        assertTrue(runtime.writeOrder.isEmpty(), "归属预检失败时不得写入任何玩家的背包");
+    }
+
+    /**
+     * 生产装配必须真的做 region 归属判定。
+     *
+     * <p>{@code RuntimeAccess.bukkit()} 里把归属判定写成恒定 true（或只留主线程判定）会让上面的行为测试
+     * 全绿、却在实服上失去保护，所以这里把生产适配器必须调用的 Bukkit API 钉死。
+     *
+     * <p><b>必须先剥注释再断言</b>：本服务的类注释里就写着 {@code Bukkit.isOwnedByCurrentRegion(entity)}
+     * 作为依据说明，直接 {@code contains} 会被自己的注释喂饱，从而在实现退化成恒定 true 时仍然变绿。
+     */
+    @Test
+    void productionRuntimeChecksBukkitEntityRegionOwnership() throws IOException {
+        String source = stripComments(Files.readString(
+            Path.of("src/main/java/linmumua/doudizhu/game/PhysicalChipService.java")));
+
+        assertTrue(source.contains("Bukkit.isOwnedByCurrentRegion("),
+            "生产适配器必须用 Bukkit.isOwnedByCurrentRegion 判定玩家实体的 region 归属");
+        assertTrue(source.contains("Bukkit.isPrimaryThread()"),
+            "非区域化核心上仍必须保留主线程判定，否则异步线程可以改玩家背包");
+        assertTrue(source.contains("runtime.isOwnedByCurrentRegion(player)"),
+            "库存读写入口必须真的调用归属判定");
+    }
+
+    /** 去掉行注释与块注释，避免注释里的字样把源码契约断言带偏（与 FoliaRuntimeLaneContractTest 同法）。 */
+    private static String stripComments(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        boolean inLine = false;
+        boolean inBlock = false;
+        for (int i = 0; i < source.length(); i++) {
+            char current = source.charAt(i);
+            char next = i + 1 < source.length() ? source.charAt(i + 1) : '\0';
+            if (inLine) {
+                if (current == '\n') {
+                    inLine = false;
+                    out.append(current);
+                }
+                continue;
+            }
+            if (inBlock) {
+                if (current == '*' && next == '/') {
+                    inBlock = false;
+                    i++;
+                }
+                continue;
+            }
+            if (current == '/' && next == '/') {
+                inLine = true;
+                i++;
+                continue;
+            }
+            if (current == '/' && next == '*') {
+                inBlock = true;
+                i++;
+                continue;
+            }
+            out.append(current);
+        }
+        return out.toString();
     }
 
     @Test
@@ -303,6 +418,11 @@ class PhysicalChipServiceTest {
         }
 
         @Override
+        public boolean isOwnedByCurrentRegion(PhysicalChipService.PlayerHandle player) {
+            return ((TestPlayer) player).ownedByCurrentRegion;
+        }
+
+        @Override
         public PhysicalChipService.PlayerHandle player(UUID playerId) {
             return players.get(playerId);
         }
@@ -316,6 +436,8 @@ class PhysicalChipServiceTest {
         private ItemStack armor;
         private ItemStack cursor;
         private boolean online = true;
+        /** 当前线程是否持有该玩家 region；默认 true，只在区域化 lane 用例里改成 false。 */
+        private boolean ownedByCurrentRegion = true;
         private int writes;
         private int failOnWrite = -1;
         private boolean failBeforeWrite;

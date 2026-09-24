@@ -36,6 +36,8 @@ class FoliaRuntimeLaneContractTest {
         Path.of("src/main/java/linmumua/doudizhu/game/TableGadgetService.java");
     private static final Path GADGET_EFFECT_SERVICE =
         Path.of("src/main/java/linmumua/doudizhu/game/TableGadgetEffectService.java");
+    private static final Path GADGET_BAR_HUD_SERVICE =
+        Path.of("src/main/java/linmumua/doudizhu/game/TableGadgetBarHudService.java");
     private static final Path PHYSICAL_TABLE_MANAGER =
         Path.of("src/main/java/linmumua/doudizhu/world/PhysicalTableManager.java");
 
@@ -210,6 +212,61 @@ class FoliaRuntimeLaneContractTest {
             "面板状态必须使用并发容器");
     }
 
+    /**
+     * 面板实体的删除必须按 lane 归属收口：先判归属，不是本 region 就把删除投回实体自己的 region。
+     *
+     * <p>这是 shutdown-review 指出的关闭期问题：{@code clearPlayer}/{@code clearTable}/{@code clearAll}/
+     * {@code shutdown} 可能跑在玩家 lane（玩家已走远）、桌 owner lane 或 {@code onDisable} 的主线程上，
+     * 在错误 lane 上直接 {@code remove} 会抛
+     * {@code Accessing entity state off owning region's thread}，并把异常沿 {@code onDisable} 链路外溢。
+     * 因此 {@code removePanels} 必须逐张走 {@code removePanelEntity}，而后者必须带归属判定与投递分支，
+     * 不得再出现「直接 {@code view.display.remove()}」这种无门禁删除。
+     */
+    @Test
+    void speechPanelRemovalIsLaneGated() throws IOException {
+        String source = stripComments(Files.readString(SPEECH_PANEL));
+
+        String removePanels = methodBody(source, "private void removePanels(");
+        assertFalse(removePanels.isEmpty(), "未找到 removePanels 方法体");
+        assertTrue(removePanels.contains("removePanelEntity("),
+            "removePanels 必须逐张走 removePanelEntity，把 lane 判定收口到一处");
+        assertFalse(removePanels.contains("display.remove()"),
+            "removePanels 不得再直接删面板实体：错误 lane 上会抛 Accessing entity state off owning region's thread");
+
+        String removeOne = methodBody(source, "private void removePanelEntity(");
+        assertFalse(removeOne.isEmpty(), "未找到 removePanelEntity 方法体");
+        assertTrue(removeOne.contains("isOwnedByCurrentRegion("),
+            "removePanelEntity 必须先判 lane 归属");
+        assertTrue(removeOne.contains("removeOnOwnerRegion("),
+            "非本 region 时必须把删除投回实体自己的 region");
+        assertFalse(removeOne.contains("display.remove()"),
+            "removePanelEntity 不得直接 display.remove()：必须经 PanelEntityLane 收口");
+
+        // 归属判定必须早于任何删除动作，否则判定等于没写。
+        int guard = removeOne.indexOf("isOwnedByCurrentRegion(");
+        int removal = removeOne.indexOf("removeNow(");
+        assertTrue(guard >= 0 && removal > guard,
+            "lane 归属判定必须排在删除动作之前");
+    }
+
+    /**
+     * {@code shutdown()} 必须先封入口再清理。
+     *
+     * <p>旧实现把 {@code stopped = true} 放在 {@code clearAll()} 之后：清理一旦抛异常，{@code stopped}
+     * 永远为 false——服务既不关闭也不清空，异常还会沿 {@code onDisable} 链路外溢。先置位后清理可保证
+     * 关闭语义一定落地。
+     */
+    @Test
+    void speechPanelShutdownClosesEntryBeforeCleanup() throws IOException {
+        String source = stripComments(Files.readString(SPEECH_PANEL));
+        String shutdown = methodBody(source, "public void shutdown(");
+        assertFalse(shutdown.isEmpty(), "未找到 shutdown 方法体");
+        int closeEntry = shutdown.indexOf("stopped = true;");
+        int cleanup = shutdown.indexOf("clearAll();");
+        assertTrue(closeEntry >= 0 && cleanup > closeEntry,
+            "shutdown 必须先封入口（stopped = true）再清理，否则清理异常会让服务既不关闭也不清空");
+    }
+
     /** 关桌与回大厅都必须清掉语音面板，否则面板实体成为孤儿。 */
     @Test
     void tableCloseAndLobbyResetClearSpeechPanels() throws IOException {
@@ -259,6 +316,55 @@ class FoliaRuntimeLaneContractTest {
         String productionRuntime = methodBody(effects, "public int currentTick()");
         assertTrue(productionRuntime.contains("Bukkit.getCurrentTick()"),
             "EffectRuntime 的生产实现必须取真实 Bukkit 时钟（global lane 上它正是会抛 No currently ticking region 的调用）");
+    }
+
+    /**
+     * 两个 global 扫描周期任务必须**整段兜底**，不允许任何一步异常逃到调度器。
+     *
+     * <p>硬约束来自 {@code MuzScheduler.schedule}：周期回调抛异常会走
+     * {@code managed.fail(repeating=true)} 并取消后端句柄，于是「一次扫描失败」升级成「整条周期任务被
+     * 永久取消」，功能静默失效且无法自愈。这两条 global 扫描都会用 {@code TableManager.getTables()}
+     * 读取仍属非并发 {@code LinkedHashMap} 的 {@code tables}（全局 Map 迁移是被明确推迟的技术债），
+     * 而 {@code getTables()} 内部就是 {@code new ArrayList<>(tables.values())}——并发结构修改下它本身
+     * 就可能抛 {@code ConcurrentModificationException} / 越界。旧写法把这个快照调用放在逐桌 try
+     * **之外**（{@code for (GameTable table : tables())}），兜不住；九格道具栏预取更是整段无 try。
+     *
+     * <p>因此本契约钉住三条形状，任何回退都会命中：
+     * <ul>
+     *   <li>快照获取（{@code tables()} / {@code getTables()}）必须位于方法的兜底 {@code try} 之内
+     *       （其下标必须晚于方法体里第一个 {@code try { }），且其后存在 {@code catch (RuntimeException}；</li>
+     *   <li>逐桌「注销桌静默跳过」的 {@code catch (IllegalArgumentException ignored)} 不得被外层兜底取代；</li>
+     *   <li>九格道具栏预取必须保留 {@code this::prefetchActivePlayers} 的 global 周期注册，并且按
+     *       {@code TableGadgetService.tick} 同口径做 manager 空值早退。</li>
+     * </ul>
+     */
+    @Test
+    void globalSweepPeriodicTasksAreExceptionGuarded() throws IOException {
+        String gadget = stripComments(Files.readString(GADGET_SERVICE));
+        String sweep = methodBody(gadget, "private void tick()");
+        int gadgetTry = sweep.indexOf("try {");
+        int gadgetSnapshot = sweep.indexOf("tables()");
+        assertTrue(gadgetTry >= 0, "道具扫描 tick() 必须整段兜底：周期回调抛异常会被调度器取消整条任务");
+        assertTrue(gadgetSnapshot > gadgetTry,
+            "getTables 快照（tables()）必须在兜底 try 之内，否则并发结构修改的 CME 会避开逐桌 catch 打死周期任务");
+        assertTrue(sweep.indexOf("catch (RuntimeException", gadgetSnapshot) >= 0,
+            "快照之后必须存在能接住 ConcurrentModificationException 的兜底 catch");
+        assertTrue(sweep.contains("catch (IllegalArgumentException ignored)"),
+            "逐桌「注销桌静默跳过」的 catch 不得被外层兜底取代（注销桌必须安静跳过，不是记日志）");
+
+        String barHud = stripComments(Files.readString(GADGET_BAR_HUD_SERVICE));
+        String prefetch = methodBody(barHud, "private void prefetchActivePlayers()");
+        int prefetchTry = prefetch.indexOf("try {");
+        int prefetchSnapshot = prefetch.indexOf("getTables()");
+        assertTrue(prefetchTry >= 0, "九格道具栏预取是 global 周期任务，必须整段兜底");
+        assertTrue(prefetchSnapshot > prefetchTry,
+            "九格道具栏预取的 getTables 快照必须在兜底 try 之内（旧写法整段无 try，CME 会打死预取任务）");
+        assertTrue(prefetch.indexOf("catch (RuntimeException", prefetchSnapshot) >= 0,
+            "预取的快照之后必须存在兜底 catch");
+        assertTrue(prefetch.contains("getTableManager()") && prefetch.contains("== null"),
+            "预取必须按 TableGadgetService.tick 同口径做 manager 空值早退，而不是直接解引用");
+        assertTrue(barHud.contains("this::prefetchActivePlayers"),
+            "global 周期任务仍必须指向被兜底保护的 prefetchActivePlayers");
     }
 
     /** 取一段方法体（从签名到配对的收尾大括号）；找不到返回空串。 */
