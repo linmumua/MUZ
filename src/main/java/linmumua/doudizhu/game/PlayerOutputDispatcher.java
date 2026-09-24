@@ -1,12 +1,16 @@
 package linmumua.doudizhu.game;
 
 import java.util.Collection;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import net.kyori.adventure.bossbar.BossBar;
@@ -28,7 +32,42 @@ import org.bukkit.plugin.Plugin;
  * 只允许在 player lane 内调用，迟到回调会再次按 UUID 解析当前在线玩家。
  */
 public final class PlayerOutputDispatcher {
+    /**
+     * 跨 region 跳过实体可见性操作时的限频窗口。
+     *
+     * <p>为什么不加限频会刷屏：{@code PhysicalTableManager} 的按人可见性重算（桌边动态、座位名/信息、
+     * 手牌）会对**每个在线玩家 × 每个实体**显式调用一次 show/hide，并且每张桌的 owner tick 与
+     * refresh 都会重跑；一旦某张桌的实体不归 viewer 所在 region，同一实体 UUID 会按「玩家数 × 每 2 秒」
+     * 的节奏反复命中跳过分支。
+     */
+    private static final long SKIP_LOG_INTERVAL_MILLIS = 30_000L;
+
     private final PlayerTaskRegistry tasks;
+
+    /**
+     * 限频判定用的毫秒时钟。默认即 {@link System#currentTimeMillis()}，生产行为不变。
+     *
+     * <p>抽成接缝只为可测：30 秒窗口若只能靠真实等待来跨越，「被限频窗口丢掉的次数随下一次日志报出」这条
+     * 语义就无法在单测里验证（睡眠 30 秒不可接受）。写法沿用仓库既有做法（见 {@code TableSpeechPanelService}
+     * 的 tickSource）。
+     */
+    private final LongSupplier millisClock;
+
+    /**
+     * 每个实体上一次真正打日志的时间戳（毫秒）。限频的唯一键是实体 UUID，不是玩家。
+     *
+     * <p>【为什么必须有时间戳】：限频口径写的是「同实体 30 秒最多一条」，但只用 {@code Set} 记账会把
+     * 它退化成「每个实体一辈子只打一条」——{@code PhysicalTableManager} 每 2 秒重算一次且永不停止，于是
+     * 某个实体第一次被跳过之后，整轮服务端运行都不会再报它。窗口必须按真实时间判定，光有常量是不够的。
+     */
+    private final Map<UUID, Long> lastCrossRegionSkipLogMillis = new ConcurrentHashMap<>();
+
+    /**
+     * 每个实体在本窗口内被限频静默丢弃的跳过次数；真正打日志时随附并清零，避免限频变成「丢信息」。
+     *
+     * <p>按实体记账而不是全局：全局计数会让 A 实体的丢弃次数出现在 B 实体的日志里，反而误导排查。
+     */
+    private final Map<UUID, AtomicLong> suppressedCrossRegionSkips = new ConcurrentHashMap<>();
 
     /**
      * 生产构造：先在 global lane 按 UUID 查找调度器，再把实际输出排入 player lane。
@@ -36,6 +75,7 @@ public final class PlayerOutputDispatcher {
      */
     public PlayerOutputDispatcher(DoudizhuPlugin plugin) {
         Objects.requireNonNull(plugin, "plugin");
+        this.millisClock = System::currentTimeMillis;
         this.tasks = PlayerTaskRegistry.uuidFirst(
             // PlayerTaskRegistry 约定「解析器只返回在线玩家」，而 Bukkit.getPlayer 会返回离线实例。
             // canRevealHand / isPlayerPresent 等资格判断依赖 currentPlayer 的在线语义，所以在此补回
@@ -73,7 +113,13 @@ public final class PlayerOutputDispatcher {
 
     /** 测试构造：注入玩家任务注册表，避免测试依赖 Bukkit 线程实现。 */
     public PlayerOutputDispatcher(PlayerTaskRegistry tasks) {
+        this(tasks, System::currentTimeMillis);
+    }
+
+    /** 测试构造：额外注入毫秒时钟，让限频窗口可被测试推进而不是真实等待 30 秒。 */
+    public PlayerOutputDispatcher(PlayerTaskRegistry tasks, LongSupplier millisClock) {
         this.tasks = Objects.requireNonNull(tasks, "tasks");
+        this.millisClock = Objects.requireNonNull(millisClock, "millisClock");
     }
 
     /** 返回 UUID 当前解析到的玩家；生产解析器只返回在线玩家。 */
@@ -195,7 +241,9 @@ public final class PlayerOutputDispatcher {
             // "Accessing entity state off owning region's thread"。跨 region 的实体本就不在该玩家追踪范围内，跳过即可。
             if (entity != null && entity.isValid() && Bukkit.isOwnedByCurrentRegion(entity)) {
                 player.showEntity(plugin, entity);
+                return;
             }
+            reportCrossRegionSkip(plugin, "showEntity", viewerId, entityId, entity);
         });
     }
 
@@ -217,7 +265,9 @@ public final class PlayerOutputDispatcher {
             // 同 showEntity：跨 region 的实体不能在玩家 lane 访问；私有实体出生即 visibleByDefault=false，跳过不会泄漏。
             if (entity != null && entity.isValid() && Bukkit.isOwnedByCurrentRegion(entity)) {
                 player.hideEntity(plugin, entity);
+                return;
             }
+            reportCrossRegionSkip(plugin, "hideEntity", viewerId, entityId, entity);
         });
     }
 
@@ -227,6 +277,64 @@ public final class PlayerOutputDispatcher {
             return;
         }
         hideEntity(viewerId, plugin, entity.getUniqueId());
+    }
+
+    /**
+     * 记录一次「按设计跳过」的实体可见性调用，按实体 UUID 限频。
+     *
+     * <p>【为什么放弃可以，但不能无声】：这两个跳过分支在实服的表现是「某个玩家的桌边动态/座位名没
+     * 按预期显示或隐藏」，而服务端毫无痕迹（与本项目此前修过的「道具投掷卡住且无日志」是同一类问题）。
+     * 之前只有「该实体不存在」与「跨 region」两种情况被合并成静默 {@code if}，排查时无法区分
+     * 「实体已删」和「实体不归本 region」，也无从知道哪个玩家、哪次操作被丢掉了。
+     *
+     * <p>【为什么不写成异常】跨 region 跳过本身是 Folia 语义下的正常结果：实体本就不在该玩家追踪范围，
+     * 调用方（{@code PhysicalTableManager} 的按人可见性重算）会在下一次 refresh / owner tick 重新计算并
+     * 重试，不需要把整个流程判失败。因此只提示痕迹，不改控制流。
+     *
+     * <p>【限频口径】同实体 30 秒最多一条（见 {@link #SKIP_LOG_INTERVAL_MILLIS}），并把被限频窗口丢掉的
+     * 次数随下一次日志一起报出；换实体只换日志的「首次」，不重置其它实体的窗口。
+     * {@code viewerId} 只记录在日志文本里参与排查，不作为限频键，否则默认的按人重算会按玩家数放大条数。
+     */
+    private void reportCrossRegionSkip(
+        Plugin plugin,
+        String operation,
+        UUID viewerId,
+        UUID entityId,
+        Entity entity
+    ) {
+        String reason;
+        if (entity == null) {
+            // 实体已经不存在（桌被拆、区块重载后重建）。这是正常结果，但同样不能无声。
+            reason = "实体不存在";
+        } else if (!entity.isValid()) {
+            reason = "实体已失效";
+        } else {
+            reason = "实体不归当前 region 所有";
+        }
+        // 计数在限频判定之前累加：本次调用无论最终是否打日志都会被算进「被折叠掉的次数」，
+        // 打日志时再整体取走并清零。所以日志里报出的是「本窗口内除正在打的这一条之外被压掉的次数」，
+        // 必须在取走后减掉本次调用自己，否则第一次日志会把自己算成「被静默丢弃」。
+        AtomicLong suppressedForEntity = suppressedCrossRegionSkips.computeIfAbsent(
+            entityId, ignored -> new AtomicLong()
+        );
+        suppressedForEntity.incrementAndGet();
+        long now = millisClock.getAsLong();
+        Long lastLogged = lastCrossRegionSkipLogMillis.putIfAbsent(entityId, now);
+        if (lastLogged != null) {
+            // 距上次打日志还不到限频窗口：本次静默丢弃，但计数留给下一次真正打日志时随附报出。
+            if (now - lastLogged < SKIP_LOG_INTERVAL_MILLIS) {
+                return;
+            }
+            // 窗口已过：抢占本次打日志的权利，抢不到说明另一个线程刚打过了。
+            if (!lastCrossRegionSkipLogMillis.replace(entityId, lastLogged, now)) {
+                return;
+            }
+        }
+        // 取走并清零本窗口累计次数，再扣掉本次调用（它自己即将被打印，不算「被丢弃」）。
+        long discarded = Math.max(0L, suppressedForEntity.getAndSet(0L) - 1L);
+        plugin.getLogger().warning(
+            "跳过跨 region 的实体可见性操作 " + operation + "（" + reason + "，按实体 " + SKIP_LOG_INTERVAL_MILLIS / 1000
+                + " 秒限频）: 实体 " + entityId + "，玩家 " + viewerId + "，本窗口内已静默丢弃 " + discarded + " 次");
     }
 
     /** 在 player lane 打开指定库存。 */

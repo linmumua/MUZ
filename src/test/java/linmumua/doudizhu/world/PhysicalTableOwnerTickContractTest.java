@@ -109,7 +109,10 @@ class PhysicalTableOwnerTickContractTest {
 
     @Test
     void 玩家实体可见性必须按UUID在player_lane重新解析且旧Entity重载不得捕获实体() throws IOException {
-        String dispatcher = Files.readString(PLAYER_OUTPUT_DISPATCHER);
+        // 统一换行为 LF 再匹配跨行片段：本断言针对的是「旧重载的实现形状」，不是文件的换行符，
+        // 而 Files.readString 不做换行翻译（Windows 工作区源码为 CRLF），不归一化会把
+        // 「实现没退化」误报成「旧重载不得创建捕获旧 Entity 的闭包」。
+        String dispatcher = Files.readString(PLAYER_OUTPUT_DISPATCHER).replace("\r\n", "\n");
         assertTrue(dispatcher.contains(
             "public void showEntity(UUID viewerId, Plugin plugin, UUID entityId)"),
             "PlayerOutputDispatcher 必须提供 UUID-first showEntity 入口");
@@ -137,13 +140,25 @@ class PhysicalTableOwnerTickContractTest {
 
         int hideLegacyStart = dispatcher.indexOf(
             "public void hideEntity(UUID viewerId, Plugin plugin, Entity entity)");
-        int hideLegacyEnd = dispatcher.indexOf(
-            "/** 在 player lane 打开指定库存。 */", hideLegacyStart);
-        assertTrue(hideLegacyStart >= 0 && hideLegacyEnd > hideLegacyStart,
+        // 结束边界必须落在旧重载**自己的方法体结尾**。原先用「下一个无关成员的 javadoc」当边界，一旦在两者
+        // 之间新增任何成员（例如 reportCrossRegionSkip），该区间就会把它整段吞进来，于是那段合法代码里的
+        // lambda 会让「旧重载不得创建闭包」这条断言假失败——断言本身没变，是真边界变了。
+        // 这里改用它自身的末行（UUID 转换调用）定位，把方法体收在自己的边界内，新增成员不再影响该区间。
+        String conversion = "hideEntity(viewerId, plugin, entity.getUniqueId());";
+        int hideLegacyConversion = dispatcher.indexOf(conversion, hideLegacyStart);
+        assertTrue(hideLegacyStart >= 0 && hideLegacyConversion > hideLegacyStart,
             "hideEntity 旧重载必须保留兼容入口");
+        // 边界必须覆盖旧重载**整个方法体**：取转换调用之后第一个方法级闭合行（8 空格缩进的 `}`），
+        // 这样「转换之后又追加闭包 / runPlayer」这类回归仍会被下面的断言抓住。
+        // 注意不能取到下一个成员的 javadoc——那会把 reportCrossRegionSkip 整段吞进来，
+        // 让其中合法的 lambda 造成假失败（这正是修正前的失败原因）；也不能只截到转换那一行，
+        // 那样区间看不见方法体后半段的回归，等于把断言架空。
+        int hideLegacyEnd = dispatcher.indexOf("\n    }", hideLegacyConversion);
+        assertTrue(hideLegacyEnd > hideLegacyConversion,
+            "hideEntity 旧重载必须能在方法体闭合处界定");
         String hideLegacy = dispatcher.substring(hideLegacyStart, hideLegacyEnd);
-        assertTrue(hideLegacy.contains("hideEntity(viewerId, plugin, entity.getUniqueId());"),
-            "hideEntity 旧重载必须立即转换为 UUID");
+        assertTrue(hideLegacy.contains("entity == null"), "hideEntity 旧重载必须保留空值保护");
+        assertTrue(hideLegacy.contains(conversion), "hideEntity 旧重载必须立即转换为 UUID");
         assertFalse(hideLegacy.contains("runPlayer("),
             "hideEntity 旧重载不得把旧 Entity 捕获进 player lane");
         assertFalse(hideLegacy.contains("->"),

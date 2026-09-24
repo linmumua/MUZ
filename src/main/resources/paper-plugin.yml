@@ -6,10 +6,9 @@ api-version: "${apiVersion}"
 # EntityScheduler 与 AsyncScheduler 的 Paper 兼容后端，但牌桌、玩家、实体和麻将领域仍有
 # 未完成的 owner 路由与跨区域线程验证。真实 Folia 服务端验证完成前必须保持 false，
 # 避免管理员按声明安装后在实体操作路径中触发线程违规。
-# 【临时冒烟状态】下一行被临时改成 true，仅用于在真实 Folia 测试端跑一次「插件能否加载 +
-# 区域线程是否违规」的验证；验证结束必须立刻改回 false。处于 true 期间，
-# FoliaDeclarationMatchesSchedulerTest 会按设计变红，那是守护生效而不是失败。
-folia-supported: true
+# 真实 Folia 运行期验收尚未完成，保持 false，避免管理员按声明安装后在未完成的实体 owner 路径中触发线程违规。
+# 临时冒烟期间曾改为 true 并取得部分运行证据；相关测试在 true 期间按设计变红，现已恢复正式安全值。
+folia-supported: false
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.
 # 不声明 libraries：MUZ 自己不需要 Paper 从 Maven 下载任何运行时，

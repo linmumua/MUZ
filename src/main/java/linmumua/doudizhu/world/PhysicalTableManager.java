@@ -249,12 +249,23 @@ public final class PhysicalTableManager {
     );
     /** 每张牌桌独立记录桌边动态的刷新桶；owner tick 不能共享全局节流状态。 */
     private final Map<String, Long> playDetailLastRefreshBucketByTable = new LinkedHashMap<>();
+    /**
+     * 每桌因 lane 不归属而跳过世界体刷新的累计次数，只用于限频日志。
+     *
+     * <p>键是归一化桌名，值只增不减；表大小受牌桌数量限制（不是按 tick 增长），所以不需要清理。
+     * 由多个 owner lane 与 global lane 并发读写，必须是并发容器。
+     */
+    private final Map<String, Long> worldBodySkipCounters = new ConcurrentHashMap<>();
+    /** 世界体跳过日志的限频间隔：每 N 次跳过最多记一条。 */
+    private static final long WORLD_BODY_SKIP_LOG_INTERVAL = 200L;
 
     private final DoudizhuPlugin plugin;
     /** 连接生命周期维护的不可变 UUID 快照；region owner 不直接枚举 Player。 */
     private final PlayerPresenceRegistry playerPresence;
     /** 玩家输出统一经 UUID 快照投递到 player lane，region owner 不直接触碰玩家 API。 */
     private final PlayerOutputDispatcher playerOutput;
+    /** 世界体 lane 归属判定；生产实现直接问 Bukkit，测试替身可指定"当前线程不拥有该锚点"。 */
+    private final WorldBodyLane worldBodyLane;
     /** 实体 owner 的持久化键；仅 MUZ 自有实体写入，CraftEngine 家具不伪造这些字段。 */
     private final NamespacedKey entityOwnerKey;
     private final NamespacedKey entityOwnerNameKey;
@@ -405,6 +416,57 @@ public final class PhysicalTableManager {
         }
     }
 
+    /**
+     * 世界体 lane 归属判定的可注入接缝。
+     *
+     * <p>【为什么需要这一层】{@code Bukkit.isOwnedByCurrentRegion(Location)} 是静态调用，单测里
+     * 没有运行中的服务端可控制，因此把判定收口到接口后面，让行为测试能指定"当前线程**不**拥有该锚点"。
+     * 写法与 {@code TableGadgetEffectService.EffectRuntime} 一致；生产实现只调 Bukkit 公开 API。
+     *
+     * <p>【判定的语义】区域化核心（Folia/Lophine）上，只有持有该锚点 region 的线程才能读写这块区域里的
+     * 实体与世界状态；其余 lane（尤其是 global，实服日志里表现为 {@code region={null}}）读实体状态会直接抛
+     * {@code Accessing entity state off owning region's thread}。Paper/Leaf 这类非区域化核心没有 region
+     * 概念，{@code Bukkit.isOwnedByCurrentRegion} 恒真，因此判定不会误杀单线程核心的正常刷新。
+     */
+    interface WorldBodyLane {
+        /** 当前线程是否拥有该锚点所在 region；锚点为 null 时返回 false（没有可归属的世界体）。 */
+        boolean isOwnedByCurrentRegion(Location anchor);
+
+        /** 当前线程是否拥有该实体所在 region；实体为 null 时返回 false。 */
+        boolean isOwnedByCurrentRegion(Entity entity);
+
+        /** 按 UUID 解析 tracked 实体；不存在时返回 null。 */
+        Entity resolveEntity(UUID entityId);
+    }
+
+    /** 生产边界：直接使用 Bukkit 的 region 归属判定。 */
+    private static final class BukkitWorldBodyLane implements WorldBodyLane {
+        // 门禁自身绝不抛异常：Location.getWorld() 在世界已卸载时会抛 IllegalArgumentException("World unloaded")，
+        // 而这些门禁跑在周期任务回调里，抛出会让调度器取消任务。拿不到归属一律按「不拥有」处理（安全侧：跳过世界体）。
+        @Override
+        public boolean isOwnedByCurrentRegion(Location anchor) {
+            try {
+                return anchor != null && anchor.getWorld() != null && Bukkit.isOwnedByCurrentRegion(anchor);
+            } catch (RuntimeException failure) {
+                return false;
+            }
+        }
+
+        @Override
+        public boolean isOwnedByCurrentRegion(Entity entity) {
+            try {
+                return entity != null && Bukkit.isOwnedByCurrentRegion(entity);
+            } catch (RuntimeException failure) {
+                return false;
+            }
+        }
+
+        @Override
+        public Entity resolveEntity(UUID entityId) {
+            return Bukkit.getEntity(entityId);
+        }
+    }
+
     public PhysicalTableManager(DoudizhuPlugin plugin) {
         this(plugin, new PlayerPresenceRegistry(seedOnlinePlayerIds()));
     }
@@ -430,8 +492,17 @@ public final class PhysicalTableManager {
     }
 
     PhysicalTableManager(DoudizhuPlugin plugin, PlayerPresenceRegistry playerPresence) {
+        this(plugin, playerPresence, new BukkitWorldBodyLane());
+    }
+
+    /**
+     * 测试注入点：允许替身指定"当前线程是否拥有锚点 region"，从而在没有服务端的环境里
+     * 驱动世界体门禁。生产装配只走 {@link #PhysicalTableManager(DoudizhuPlugin)}。
+     */
+    PhysicalTableManager(DoudizhuPlugin plugin, PlayerPresenceRegistry playerPresence, WorldBodyLane worldBodyLane) {
         this.plugin = plugin;
         this.playerPresence = Objects.requireNonNull(playerPresence, "playerPresence");
+        this.worldBodyLane = Objects.requireNonNull(worldBodyLane, "worldBodyLane");
         this.playerOutput = new PlayerOutputDispatcher(plugin);
         this.entityOwnerKey = new NamespacedKey(plugin, "table-owner");
         this.entityOwnerNameKey = new NamespacedKey(plugin, "table-owner-name");
@@ -926,12 +997,50 @@ public final class PhysicalTableManager {
         }
     }
 
+    /**
+     * 【为什么必须在排入修复之前先恢复锚点】{@code onChunkUnload} 的 {@code markTableUnplaced} 会把
+     * 牌桌周期任务（含开局发牌 timer）切到 global，并清掉 {@code tableOwnerAnchors}。之后的修复
+     * 依赖 {@code TableManager.runTableLater}，而它的 lane 选择**只看当时的 owner 锚点**：锚点为空
+     * 就落 global，而 global 既没有 ticking region 也不拥有世界实体，一定会失败。
+     *
+     * <p>实服证据（Lophine 26.2，{@code region={null}}）：修复一失败（{@code captureCleanupPlan} 读实体抛
+     * {@code Accessing entity state off owning region's thread}），{@code notifyTableAnchorBinding} 就永远
+     * 不会被调用，桌子**永久停在 global**——随后开局发牌 timer 在 global 上写牌桌 TextDisplay，刷出 136 次
+     * 同类堆栈（{@code CraftTextDisplay.text ← updateTextEntity ← refreshStatus ← refreshWith ← refresh}）。
+     *
+     * <p>放置快照 {@code placedTables} 在 unload 时**没有**被摘除（见 {@code markTableUnplaced} 的注释），
+     * 锚点信息一直有效；区块重新加载时把它重新提交给 {@code TableManager} 是安全且幂等的
+     * （同锚点 rebind 直接返回 true）。这样修复链路才真正跑在锚点 region 上，能合法读实体。
+     */
+    private void restoreOwnerAnchorForLoadedChunk(String tableName) {
+        GameTable table = plugin.getTableManager().getTable(tableName);
+        PlacedTable placed = placedTable(tableName);
+        if (table == null || placed == null) {
+            return;
+        }
+        Location anchor = placed.anchor();
+        if (anchor == null || anchor.getWorld() == null) {
+            return;
+        }
+        try {
+            plugin.getTableManager().rebindTablePeriodicTask(table, anchor);
+        } catch (RuntimeException | Error failure) {
+            // 重绑失败不能阻断本次修复排入：修复本身仍会在 global 上跑，只是实体读取会被
+            // captureCleanupPlan 的 lane 门禁判成"不可安全定位"走保守分支，不再抛异常。
+            plugin.getLogger().warning("区块加载后恢复牌桌锚点失败: " + tableName
+                + "，原因=" + failure.getMessage());
+        }
+    }
+
     private void queueChunkLoadRepair(String tableName) {
         String key = normalize(tableName);
         GameTable table = plugin.getTableManager().getTable(tableName);
         if (key == null || table == null) {
             return;
         }
+        // 【必须在 runTableLater 之前】runTableLater 的 lane 由当时的 owner 锚点决定；
+        // unload 已把锚点清空，不先恢复就会把整条修复排到 global（实服 region={null} 的根因）。
+        restoreOwnerAnchorForLoadedChunk(tableName);
         synchronized (chunkLoadRepairQueued) {
             if (activeChunkLoadRepairs.contains(key)) {
                 return;
@@ -1086,9 +1195,19 @@ public final class PhysicalTableManager {
                 unresolved.add("entity-null");
                 continue;
             }
-            Entity entity = Bukkit.getEntity(entityId);
+            Entity entity = worldBodyLane.resolveEntity(entityId);
             // tracked UUID 查不到实体表示它已经不存在；不能把正常的缺失恢复场景误判为预检失败。
             if (entity == null) {
+                continue;
+            }
+            // 【Folia 关键门禁】本方法的调用 lane 由 runTableLater 决定：锚点在上一步
+            // markTableUnplaced 之后被清空，因此这里通常会落在 **global**（实服日志 region={null}）。
+            // global 不拥有任何实体 region，读位置会直接抛 "Accessing entity state off owning
+            // region's thread" 并中断整条修复——这正是「区块加载修复未完成: 4」的真实来源。
+            // 不归属当前 lane 的实体按"不可安全定位"处理：记入 unresolved 走既有保守分支，
+            // 保留 placed 与索引等待下一次 ChunkLoad 重试，绝不抛异常。
+            if (!worldBodyLane.isOwnedByCurrentRegion(entity)) {
+                unresolved.add("entity-off-lane:" + entityId);
                 continue;
             }
             Location location = entity.getLocation();
@@ -1116,8 +1235,15 @@ public final class PhysicalTableManager {
             if (location == null) {
                 continue;
             }
-            Entity entity = Bukkit.getEntity(entityId);
-            UUID vehicleId = entity == null || entity.getVehicle() == null
+            Entity entity = worldBodyLane.resolveEntity(entityId);
+            // 【Folia 关键门禁，实服栈就停在这一行】getVehicle() 内部会读实体状态
+            // （CraftEntity.isInsideVehicle → getHandle），在 global lane 上必然抛
+            // "Accessing entity state off owning region's thread"。上面 locations 已经把不归属
+            // 当前 lane 的实体过滤掉了，但父/子家具可能被拆到不同 region（父归属、子不归属），
+            // 所以这里仍要单独判定；读不到乘客关系时按"独立根家具"处理并交给 fabric 清理，
+            // 与 vehicleId 为 null 的既有语义一致，既不抛异常也不丢清理项。
+            UUID vehicleId = entity == null || !worldBodyLane.isOwnedByCurrentRegion(entity)
+                || entity.getVehicle() == null
                 ? null
                 : entity.getVehicle().getUniqueId();
             if (vehicleId == null || !craftEntitySet.contains(vehicleId)) {
@@ -2549,9 +2675,21 @@ public final class PhysicalTableManager {
      *
      * <p>拆出这一层，是为了让重建流水线收尾的那次刷新能拿**刚提交的新桌**直接刷新，
      * 而不必走 {@link #placedTableForWorldBody} 的在飞门禁（重建标记要到整条链结束才撤）。
+     *
+     * <p>【为什么在这里做 lane 门禁】这是所有世界体刷新（{@link #refresh}、
+     * {@link #refreshPrivateHand} 走的手牌分支、重建收尾、ChunkLoad 修复收尾）的共同出口，
+     * 门禁放在这一层才不会被某条路径漏掉。当前线程不拥有锚点 region 时，后面每一个
+     * {@code Bukkit.getEntity(...)} / {@code CraftTextDisplay.text(...)} / {@code show/hide} 都非法：
+     * 实服日志里表现为 {@code Accessing entity state off owning region's thread}（{@code region={null}}，
+     * 即牌桌周期任务被切到 global lane 的情形）。此时直接放弃本次世界体刷新——牌桌状态已经推进，
+     * 下一次在正确 lane 上的刷新会照常重画，绝不能让异常逃到调度器（那会取消周期任务，让桌子永久停摆）。
      */
     private void refreshWith(GameTable table, PlacedTable placed) {
         if (table == null || placed == null) {
+            return;
+        }
+        if (!worldBodyLane.isOwnedByCurrentRegion(placed.anchor())) {
+            reportWorldBodyLaneSkip("刷新", placed);
             return;
         }
         reconcileSeatAssignments(table, placed);
@@ -2564,12 +2702,37 @@ public final class PhysicalTableManager {
         plugin.persistDoudizhuTable(table.getName(), table.getRoomLevel(), placed.anchor(), placed.yaw(), placed.ownerId(), placed.ownerName());
     }
 
+    /**
+     * 世界体刷新因 lane 不归属而跳过时的限频日志。
+     *
+     * <p>【为什么必须留痕】这条分支是"按设计放弃"，但静默放弃会让「桌子停在 global、世界体再也刷不动」
+     * 这类问题在服务端完全不可见（实服里只有一行行堆栈，看不出是哪条路径被跳过）。刷新会被每 tick /
+     * 每 2 秒的 owner tick 命中，所以按桌限频，每 200 次最多记一条，避免把控制台冲掉。
+     */
+    private void reportWorldBodyLaneSkip(String action, PlacedTable placed) {
+        String key = normalize(placed.tableName());
+        if (key == null) {
+            return;
+        }
+        long count = worldBodySkipCounters.merge(key, 1L, Long::sum);
+        if (count % WORLD_BODY_SKIP_LOG_INTERVAL == 1L) {
+            plugin.getLogger().warning("跳过牌桌世界体" + action + "（当前线程不拥有锚点 region）: "
+                + placed.tableName() + "，累计跳过 " + count + " 次");
+        }
+    }
+
     public void refreshPrivateHand(GameTable table, UUID playerId) {
         if (table == null) {
             return;
         }
         PlacedTable placed = placedTableForWorldBody(table.getName());
         if (placed == null) {
+            return;
+        }
+        // 手牌渲染同样读写世界实体（Display/Interaction 与按玩家可见性），必须在锚点 owner lane 上执行；
+        // 与 refreshWith 同一门禁，避免"只刷手牌"这条窄路径绕过世界体 lane 判定。
+        if (!worldBodyLane.isOwnedByCurrentRegion(placed.anchor())) {
+            reportWorldBodyLaneSkip("手牌刷新", placed);
             return;
         }
         renderPrivateHand(table, placed, playerId);
@@ -3287,6 +3450,14 @@ public final class PhysicalTableManager {
         PlacedTable placed = placedTableForWorldBody(table.getName());
         if (placed == null) {
             // 未放置的纯逻辑桌没有世界实体，不执行任何世界 tick。
+            return;
+        }
+        // 【lane 门禁】本方法是世界实体 owner tick 的回调，正常情况下由锚点 region 的周期任务驱动。
+        // 但牌桌未放置（锚点被清空）时 runTableTimer 会回退到 global，而 global 不拥有实体 region：
+        // 下面的 refreshPlayDetail / clearHover 都会读写世界实体并直接抛异常。此时整次世界 tick 无意义
+        // （桌子不在任何玩家附近），直接跳过；区块重新加载后由 ChunkLoad 修复链重新绑定锚点。
+        if (!worldBodyLane.isOwnedByCurrentRegion(placed.anchor())) {
+            reportWorldBodyLaneSkip("tick", placed);
             return;
         }
         for (UUID viewerId : table.getSeats()) {

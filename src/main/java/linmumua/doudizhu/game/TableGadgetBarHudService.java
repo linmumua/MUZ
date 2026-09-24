@@ -1,6 +1,7 @@
 package linmumua.doudizhu.game;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,6 +45,8 @@ public final class TableGadgetBarHudService implements Listener {
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
     private final Map<UUID, Long> loading = new ConcurrentHashMap<>();
     private final Map<UUID, RefreshState> refreshStates = new ConcurrentHashMap<>();
+    /** 已记录过「重画被跳过」告警的「桌名/玩家」键；同一组合只记一次，避免 clearTable 遍历座位时刷屏。 */
+    private final Set<String> redrawSkipLogs = ConcurrentHashMap.newKeySet();
     private MuzScheduler.TaskHandle task;
     private volatile boolean stopped;
 
@@ -314,12 +317,64 @@ public final class TableGadgetBarHudService implements Listener {
         if (table == null || playerId == null) {
             return;
         }
+        // 牌桌已经注销时无需重画，也不能投递：TableManager.runTableNow 对未注册桌会抛
+        // IllegalArgumentException（“牌桌尚未注册”）。这条路径在实服真的发生过——拆桌/回 LOBBY
+        // 与选槽回调交错时，闭包进入 player lane 时桌已被注销，异常从 PlayerTaskRegistry.dispatch
+        // 逃到调度器，在日志里刷成 Entity task 异常。这里先做一次注册检查，把绝大多数情况挡在投递之前。
+        if (!isTableRegistered(table)) {
+            return;
+        }
         PlayerOutputDispatcher output = actionBarOverlay.outputDispatcher();
-        output.runPlayer(playerId, player -> plugin.getTableManager().runTableNow(table, () -> {
-            if (plugin.getTableManager().getTableOf(player) == table) {
-                table.refreshTrickHudFor(player);
+        output.runPlayer(playerId, player -> {
+            try {
+                plugin.getTableManager().runTableNow(table, () -> {
+                    if (plugin.getTableManager().getTableOf(player) == table) {
+                        table.refreshTrickHudFor(player);
+                    }
+                });
+            } catch (RuntimeException exception) {
+                // 注册检查与投递之间仍可能被注销（TOCTOU），runTableNow 此时会抛 IllegalArgumentException；
+                // 同一链上还可能抛 IllegalStateException（后端返回已终止任务）或关闭期的 IllegalPluginAccessException。
+                // 这些都只意味着本次重画无需进行；但【绝不能让异常逃到调度器】，
+                // 否则它会打挂玩家任务/周期任务，后续重画彻底失效。
+                reportRedrawSkipped(table, playerId, exception);
             }
-        }));
+        });
+    }
+
+    /** 牌桌是否仍登记在 TableManager 上（同名且同一实例）；注销或换实例后返回 false。 */
+    private boolean isTableRegistered(GameTable table) {
+        TableManager tables = plugin.getTableManager();
+        return tables != null && table.getName() != null && tables.getTable(table.getName()) == table;
+    }
+
+    /**
+     * 记录一次「按设计放弃」的重画跳过。
+     *
+     * <p>【为什么不能完全无声】：这条路径是「桌在投递与执行之间被拆掉」的正常竞态，本身无需处理；
+     * 但它同时也是「本服务的重画链路已经整体打不通」的唯一信号——例如球员任务后端持续返回已终止句柄、
+     * 或关闭期注册被拒。旧写法整段空 catch，实服表现是「选框不跟着动、九格栏不再更新」而日志毫无痕迹，
+     * 排查时只能靠猜，这与桌内道具投掷那次「静默返回 false 导致无日志」是同一类问题。
+     * 所以这里按【桌 + 玩家】限频记录：既留下可排查的线索，又不会在 clearTable 遍历座位时逐人刷屏。
+     */
+    private void reportRedrawSkipped(GameTable table, UUID playerId, RuntimeException exception) {
+        String key = table.getName() + "/" + playerId;
+        if (!redrawSkipLogs.add(key)) {
+            return;
+        }
+        plugin.getLogger().warning("跳过桌内道具栏重画 " + key + "（牌桌可能已注销或调度器已关闭）: "
+            + describeFailure(exception));
+    }
+
+    /**
+     * 把异常描述成可排查的文本。
+     *
+     * <p>与 {@code CraftEngineFurnitureService.describeFailure} 同口径：包装异常的 {@code getMessage()}
+     * 常为 null，直接拼接只会得到 “: null”。message 为空时退回到异常类名。
+     */
+    private static String describeFailure(Throwable exception) {
+        String message = exception.getMessage();
+        return message == null || message.isBlank() ? exception.getClass().getName() : message;
     }
 
     private void invalidateRefresh(UUID playerId) {

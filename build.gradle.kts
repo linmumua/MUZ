@@ -7,23 +7,44 @@ import java.awt.geom.Ellipse2D
 import java.awt.geom.GeneralPath
 import java.awt.image.BufferedImage
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.util.LinkedHashMap
 import java.util.jar.JarFile
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import javax.imageio.ImageIO
 
 plugins {
     java
     id("org.jetbrains.kotlin.jvm") version "2.3.20"
-    // 用 shadow 而不是 TabooLib 打包：本项目源码已完全不 import taboolib，
-    // 只需要把 SnakeYAML 内嵌并重定位（见下面 shadowJar 的 relocate）。
+    // 【为什么 shadow 与 TabooLib 并存，而不是二选一】
+    // 两者职责不重叠，互相替换都会丢东西：
+    //   * TabooLib 插件（taboolibMainTask）只做两件事——把 JAR 里的类按 relocations 重定位，
+    //     并把 TabooLib 的 loader/引导层与 taboolib/env.properties 注入同一个 JAR。
+    //     它【不做】fat jar 合并：它把嵌入式依赖的收录交给 Gradle 原生的 `jar` 任务
+    //     （见插件里 `tasks.jar { from(taboo.include) ... }`），而本项目的 `jar` 已 enabled=false，
+    //     由 shadowJar 承担合并全部内嵌库（SnakeYAML / gson / sqlite-jdbc）的职责。
+    //     其中只有 SnakeYAML / ASM / commons-lang3 会被 relocate；gson 与 sqlite-jdbc
+    //     内嵌但保持原包名（理由见下面 dependencies 里各自的坐标注释）。
+    //   * shadow 只做 fat jar 合并与 relocate，注入不了 TabooLib 的 env 描述文件。
+    // 因此保留 shadowJar 作为【合并】的生产者，由 taboolibMainTask 对它的产物做重定位；
+    // 但两者不再共用同一个文件（那会让产物不可复现、taboolibMainTask 永不 up-to-date，
+    // 并在 shadowJar 为 UP-TO-DATE 时对已重定位的 JAR 二次重定位）。现在的分工是：
+    //   shadowJar        → build/<targetId>/tmp/shaded/MUZ-<version>.jar       （中间件）
+    //   taboolibMainTask → build/<targetId>/tmp/shaded/MUZ-<version>-<targetId>.jar（重定位件）
+    //   packagePluginJar → build/<targetId>/libs/MUZ-<version>-<targetId>.jar  （最终件）
+    // 最终归档的路径与文件名（build/<targetId>/libs/MUZ-<version>-<targetId>.jar）完全不变，
+    // 也避免让 TabooLib 插件接管 `jar` 任务后与 shadow 抢同一份归档。
+    // 详细理由（含 classifier 的实测行为）见下面「发布归档的中间产物与最终路径」一段的注释。
+    id("io.izzel.taboolib") version "2.0.38"
     id("com.gradleup.shadow") version "9.3.0"
 }
 
 group = "linmumua"
-version = "1.10.50"
+version = "1.10.51"
 
 data class MuzTarget(
     val id: String,
@@ -1213,8 +1234,33 @@ fun writeCardModel(target: File, texturePath: String) {
 
 val embeddedLibraries by configurations.creating
 
+// ============================================================================
+// TabooLib 反射工具的运行期依赖坐标
+//
+// 【为什么必须显式声明】io.izzel.taboolib:common-reflex 的 POM 里【没有】任何
+// <dependencies>，TabooLib 自己靠运行期模块索引解析传递依赖；而本项目是把 common-reflex
+// 当普通 JAR 内嵌，Gradle 解析不到它的传递依赖。实测（jdeps 扫 common-reflex 全部 118 个 class）
+// 它确实引用下列外部包子集，缺任何一个都会在运行期抛 NoClassDefFoundError：
+//   kotlin.*                      → kotlin-stdlib（Reflex 是 Kotlin 伴生对象，大量 Intrinsics/Lazy/集合扩展）
+//   org.objectweb.asm.*           → asm（ClassReader/ClassVisitor/ClassWriter/Type，以及 SignatureReader 等；
+//                                   org.objectweb.asm.signature 这个包就【在 asm 核心包里】，不在 asm-tree）
+//   org.apache.commons.lang3.*    → commons-lang3（ArrayUtils / StringUtils / JavaVersion）
+// 版本选取原则：kotlin-stdlib 用本项目 Kotlin 插件同版本（2.3.20），避免 jar 里出现两份 stdlib；
+// asm 与 commons-lang3 取本机 Gradle 缓存里已有且较新的版本，保证可离线解析、也避免与其它插件冲突。
+// ============================================================================
+val taboolibReflexVersion = "6.3.0-75b18a2"
+val taboolibReflexRuntimeNotation = listOf(
+    "io.izzel.taboolib:common-reflex:$taboolibReflexVersion",
+    "org.jetbrains.kotlin:kotlin-stdlib:2.3.20",
+    "org.ow2.asm:asm:9.10.1",
+    "org.apache.commons:commons-lang3:3.20.0"
+)
+
 repositories {
     mavenCentral()
+    // TabooLib 官方仓库：io.izzel.taboolib:* 的各个模块（common、common-reflex、platform-* 等）
+    // 与 taboolib-gradle-plugin 都从这里取。
+    maven("https://repo.tabooproject.org/repository/releases/")
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.momirealms.net/releases/")
@@ -1230,11 +1276,38 @@ dependencies {
     compileOnly("net.momirealms:craft-engine-bukkit:0.0.67")
     compileOnly("net.momirealms:craft-engine-core:0.0.67")
     implementation("com.google.code.gson:gson:2.11.0")
+    // gson 必须内嵌进插件 JAR 且【不重定位】：
+    //   * 它被主源码直接 import（DebugWebServer / HudResourcePackVerifier / HotbarFontMetrics /
+    //     OpenAiCompatibleAiChatGateway / DebugHudConfigController），运行期必须真实存在；
+    //   * 服务端不保证提供 gson（Paper 自带的是其内部实现，包名相同却不属于本插件 classpath），
+    //     因此不能降级成 compileOnly；
+    //   * 保持原始 com.google.gson 包名是刻意选择：Gson 的 reflective 序列化靠
+    //     类名/字段名解析，重定位会让 Javadoc 与用户配置里出现的类型名与实际不符，
+    //     且本项目不需要靠改名躲避类加载器冲突（见下面 shadowJar 的 relocate 说明）。
+    embeddedLibraries("com.google.code.gson:gson:2.11.0")
     implementation("org.yaml:snakeyaml:2.6")
     embeddedLibraries("org.yaml:snakeyaml:2.6")
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
+    // sqlite-jdbc 同样内嵌且【不重定位】：Storage 走 JDBC，
+    //   * DatabaseManager 用 Class.forName("org.sqlite.JDBC") + DriverManager 走标准
+    //     SPI 发现路径，把 org.sqlite.* 改名会让 JDBC 驱动的自动注册失效；
+    //   * 服务端一般不带 sqlite-jdbc，不内嵌就等于默认 sqlite 存储直接不可用。
+    // 两个库都只进 embeddedLibraries（shadowJar 的唯一合并来源），不进 relocate 列表。
+    embeddedLibraries("org.xerial:sqlite-jdbc:3.46.1.0")
+    // TabooLib 反射工具（taboolib.library.reflex.Reflex / ReflexClass / ClassMethod 等）。
+    // 【为什么用 implementation 而不是 compileOnly】：这些类要在运行期真实存在，
+    // 不能指望服务端提供；implementation 让它进编译 classpath，
+    // 同时下面把同一批坐标显式加进 embeddedLibraries（shadowJar 的唯一合并来源）。
+    implementation("io.izzel.taboolib:common-reflex:$taboolibReflexVersion")
+    // 编译期只需 common-reflex 本身；它的 Kotlin/ASM/commons-lang3 依赖不参与编译本项目源码，
+    // 由 embeddedLibraries 负责内嵌。
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
+    // 内嵌进插件 JAR：TabooLib 反射工具 + 它的全部运行期依赖（见上面坐标块的理由）。
+    taboolibReflexRuntimeNotation.forEach { embeddedLibraries(it) }
     testImplementation("io.papermc.paper:paper-api:${muzTarget.paperApiDependency}")
+    // 独立 JUnit runner（build/junit-runner/run.py）用生产代码驱动反射路径，
+    // 测试 classpath 也必须有同一套 TabooLib 反射工具与它的运行期依赖。
+    taboolibReflexRuntimeNotation.forEach { testImplementation(it) }
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -1247,26 +1320,312 @@ java {
 
 
 
+// ============================================================================
+// 发布归档的中间产物与最终路径
+//
+// 【为什么要拆成「中间件 + 最终件」三段】TabooLibMainTask 只会把 inJar【就地重写】
+// （它读 inJar、写同目录的临时文件、再覆盖回一个由 inJar 名字推出的文件），因此只要
+// inJar 就是最终产物，就会出现三个真实问题：
+//   1. 归档不可复现：TabooLib 重写时把每个条目的时间重置为构建时刻，同源码两次构建
+//      SHA-256 必然不同；
+//   2. taboolibMainTask 永不 up-to-date：它只声明 @InputFile(inJar)、不声明任何输出，
+//      Gradle 无法判定增量，每次都重跑；
+//   3. 二次重定位：shadowJar 是 UP-TO-DATE 时，inJar 已经是「已重定位」的内容，
+//      再跑一遍就是在已重定位的产物上再重定位一次。
+// 所以这里把输入输出彻底分离：
+//   shadowJar        → <build>/tmp/shaded/MUZ-<version>.jar        （未重定位的中间件）
+//   taboolibMainTask → <build>/tmp/shaded/MUZ-<version>-<id>.jar   （classifier 拼出的重定位件）
+//   packagePluginJar → <build>/libs/MUZ-<version>-<id>.jar         （确定性重打包后的最终件）
+// 中间件从不被就地改写（TabooLibMainTask 只读 inJar），因此不存在二次重定位；
+// 最终件由我们自己的固定时间戳 + 排序重打包产出，因而可复现。
+// 【产物路径与文件名保持不变】：最终归档仍是 build/<targetId>/libs/MUZ-<version>-<targetId>.jar。
+//
+// 【为什么 taboolibMainTask 用 classifier 而不是「重定位后再复制」】：实测
+// TabooLibMainTask.relocate 会把 <inJar 去扩展名的名字> + "-" + classifier + ".jar" 写到
+// inJar 的同目录，并且【只读】inJar。于是 inJar 保持中间件原样、输出落在另一个文件上，
+// Gradle 的输入/输出指纹才能各自稳定，第二次运行才会 UP-TO-DATE。
+// ============================================================================
+val shadedStagingDir = layout.buildDirectory.dir("tmp/shaded")
+val shadedJarFileName = "MUZ-${project.version}.jar"
+val finalJarFileName = "MUZ-${project.version}-${muzTarget.id}.jar"
+val shadedJarFile = shadedStagingDir.map { it.file(shadedJarFileName) }
+/** taboolibMainTask 的落点：中间件名 + "-" + muzTarget.id。 */
+val relocatedJarFile = shadedStagingDir.map { it.file(finalJarFileName) }
+/** 最终发布归档；路径与文件名与历史上完全一致。 */
+val finalJarFile = layout.buildDirectory.file("libs/$finalJarFileName")
+
+// ZIP 能表达的最早时间（1980-02-01T00:00:00Z），也正好是 Gradle 关闭 preserveFileTimestamps
+// 时使用的常量。固定它之后，同一输入的重打包逐字节一致。
+val reproducibleZipTime = 318211200000L
+
+/**
+ * 以固定时间戳与按名字排序的条目重打包一个 ZIP/JAR。
+ *
+ * <p>【为什么需要这一步】TabooLibMainTask 重写归档时会把条目时间设为构建时刻，产物因此
+ * 不可复现。这里只做「读条目 → 按名字排序 → 用固定时间写回」，不改动任何字节内容，
+ * 所以既保留 TabooLib 的重定位结果，又让同等输入产出同等字节。
+ */
+fun repackZipDeterministically(source: File, target: File) {
+    val payloads = LinkedHashMap<String, ByteArray>()
+    ZipFile(source).use { zip ->
+        zip.entries().asSequence()
+            .filter { !it.isDirectory }
+            .map { it.name }
+            .sorted()
+            .forEach { name ->
+                payloads[name] = zip.getInputStream(zip.getEntry(name)).use { it.readBytes() }
+            }
+    }
+    target.parentFile.mkdirs()
+    val buffer = ByteArrayOutputStream()
+    ZipOutputStream(buffer).use { zip ->
+        zip.setLevel(Deflater.DEFAULT_COMPRESSION)
+        // MANIFEST.MF 排在最前是 JAR 的约定；其余条目按名字排序。
+        val manifest = payloads.remove("META-INF/MANIFEST.MF")
+        if (manifest != null) {
+            writeZipEntry(zip, "META-INF/MANIFEST.MF", manifest)
+        }
+        payloads.forEach { (name, bytes) -> writeZipEntry(zip, name, bytes) }
+    }
+    target.outputStream().use { it.write(buffer.toByteArray()) }
+}
+
+/** 写一个固定时间戳的 ZIP 条目；目录条目一律不写（JAR 不需要，且能让条目集合更确定）。 */
+fun writeZipEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
+    zip.putNextEntry(ZipEntry(name).apply { time = reproducibleZipTime })
+    zip.write(bytes)
+    zip.closeEntry()
+}
+
 tasks.named<Jar>("jar") {
     enabled = false
+    // 【为什么必须断开这个 finalizer】io.izzel.taboolib 插件会在它自己的 `tasks.named('jar')`
+    // 配置块里执行 `jarTask.finalizedBy(taboolibMainTask)`。本项目的 `jar` 已 enabled=false，
+    // 而 Kotlin 的 compileTestKotlin 会依赖 `jar`（于是 `compileTestJava`/`testClasses` 也会），
+    // 结果只要跑一次测试编译就会顺着 finalizer 触发 taboolibMainTask，【就地改写发布 JAR】。
+    // 发布归档改由下面显式声明的 packagePluginJar / verifyRelocatedSnakeYaml / build 链产出，
+    // 不再依赖 `jar` 的 finalizer，因此这里清空它。
+    setFinalizedBy(emptyList<Any>())
+}
+
+// 【为什么还要在 afterEvaluate 里再清一次】io.izzel.taboolib 插件自己是在 afterEvaluate 阶段
+// 给 `jar` 挂 finalizer 的（实测：只在上面的 configuration action 里清一次并不生效，任务图里
+// compileTestJava 仍会经 jar → taboolibMainTask 触发打包）。本脚本主体注册的 afterEvaluate 晚于
+// 插件的，因此这一次清理必然排在最后，能把 finalizer 真正拿掉。
+afterEvaluate {
+    tasks.named<Jar>("jar") { setFinalizedBy(emptyList<Any>()) }
 }
 
 tasks.named<ShadowJar>("shadowJar") {
-    archiveFileName.set("MUZ-${project.version}-${muzTarget.id}.jar")
+    // 中间件名不含 targetId：taboolibMainTask 会用 classifier 把它补成最终名。
+    archiveFileName.set(shadedJarFileName)
+    destinationDirectory.set(shadedStagingDir)
 
-
+    // 【为什么仍然显式列 embeddedLibraries】：shadowJar 默认只合并 `runtimeClasspath`
+    // 里那些被 shadow 判定为「应该内嵌」的依赖，而本项目把「需要内嵌」的集合单独定义成
+    // embeddedLibraries（SnakeYAML、gson、sqlite-jdbc、TabooLib 反射工具及其运行期依赖）。
+    // 显式 set(...) 让这个集合成为唯一真相，后续新增内嵌库只要进这个 configuration，
+    // 不必再依赖 shadow 的默认推断。
+    // 【勘误】common-reflex 的 POM 是空的、没有声明任何传递依赖，Kotlin / ASM / commons-lang3
+    // 是我们按 jdeps 实测结果【显式写进】embeddedLibraries 的（见上面的坐标块），
+    // 不是靠 Gradle 传递解析带进来的 —— 少写一条就会在运行期抛 NoClassDefFoundError。
     configurations.set(listOf(embeddedLibraries))
+    // 【只重定位会与外界撞名的库】relocate 是「改名躲冲突」手段，不是内嵌的必要条件：
+    // 下面三条都只针对「包名可能被服务端或其它插件提供同款」的库。
+    // 反过来说，embeddedLibraries 里的 gson（com.google.gson）与 sqlite-jdbc（org.sqlite）
+    // 【刻意不重定位】—— 各有硬理由，见坐标块里的说明（Gson 的反射式类型名，以及
+    // sqlite 驱动的 Class.forName("org.sqlite.JDBC") + JDBC SPI 自动注册），
+    // 因此它们会以内嵌但保持原包名的形式出现在最终 JAR 里，这是预期结果，
+    // 不要把它们当成「漏重定位」而补上 relocate。
     relocate("org.yaml.snakeyaml", "linmumua.doudizhu.libs.snakeyaml")
+    // 【为什么连 ASM 与 commons-lang3 一起重定位】它们是 taboolib/library/reflex 的运行期依赖，
+    // 但不重定位就会被服务端上其它插件（或服务端自身）的同名包抢占，出现「同一个类被两个
+    // 类加载器加载」的诡异故障。选在 shadowJar 这一侧重定位，是因为这里才是【合并
+    // common-reflex 与这两个库】的地方：shadow 的 relocator 会连同 reflex 类的常量池一起改写，
+    // 落到同一个 fat jar 里也就不会再被外人抢。
+    relocate("org.objectweb.asm", "linmumua.doudizhu.libs.asm")
+    relocate("org.apache.commons.lang3", "linmumua.doudizhu.libs.commons.lang3")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
+    // Maven 的 pom/pom.properties 对运行毫无用处，只是让归档噪声变大。
+    exclude("META-INF/maven/**")
+    // 【为什么要显式写 manifest 而不是让它合并】合并归档时 `META-INF/MANIFEST.MF` 会按
+    // duplicatesStrategy 取「先遇到的那一份」，内容取决于合并顺序，既不可复现，也可能把
+    // 某个依赖的无关属性带进产物。这里固定成项目真正需要的最小集合。
+    // Multi-Release 必须保留：SnakeYAML 带 META-INF/versions/9 下的类。
+    manifest {
+        attributes(
+            "Manifest-Version" to "1.0",
+            "Multi-Release" to "true"
+        )
+    }
+    // 可复现的两项开关（Gradle 9 起 preserveFileTimestamps 默认已是 false，这里显式写出来
+    // 是为了不依赖 Gradle 版本默认值；fileOrder 必须显式打开，否则条目顺序跟文件系统相关）。
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+// ============================================================================
+// TabooLib 打包引导
+//
+// 【为什么 taboolibMainTask 必须由我们显式设 inJar】
+// TabooLib 的 Gradle 插件只会把 taboolibMainTask 挂到 Gradle 原生的 `jar` 任务上
+// （插件的 apply 逻辑是 `tasks.jar { ... }` + 把 archiveFile 赋给任务的 inJar）。
+// 本项目的 `jar` 已 enabled=false，真正产出插件归档的是 shadowJar，所以我们自己做同一件事：
+// 把 shadowJar 的【中间件】交给 taboolibMainTask。
+//
+// 【taboolibMainTask 到底做了什么 / 没做什么（以实测产物为准，不要按名字想象）】
+// 做：按 taboolib.relocate 的映射把 JAR 内所有 class 及其引用重写；把 Kotlin 运行期
+//     重定位到 kotlin2320/ 前缀（TabooLib 的固定行为，避免与别的插件抢 kotlin.* 包名）；
+//     重新打包并写入 <inJar 去扩展名的名字> + "-" + classifier + ".jar"；写入
+//     META-INF/taboolib/env.properties。
+//     【勘误（本轮实测）】它【不是】无条件「就地覆盖 inJar」：relocate 只读 inJar，落点是
+//     按 classifier 拼出的【另一个】文件（classifier 为 null 时才会落回 inJar 本身）。
+//     本配置显式把 classifier 设成 muzTarget.id，因此 inJar 全程只读、输出独立成文件。
+//     TabooLib 写归档时会把条目时间重置为构建时刻，所以产物【不可复现】——这正是后面
+//     packagePluginJar 要用固定时间戳重打包一次的原因。
+// 没做：它【不会】把 TabooLib 的 loader/引导层或任何功能模块塞进 JAR —— 模块收录原本由
+//      Gradle 原生 `jar` 任务的 `from(taboo.include)` 负责，而我们走 shadowJar，
+//      所以「JAR 里有哪些内嵌库」完全由下面 shadowJar 的 embeddedLibraries 决定。
+// ============================================================================
+taboolib {
+    // 只重定位 SnakeYAML（TabooLib 对 Kotlin 的 kotlin2320/ 重定位是它自己的固定行为，
+    // 不受这一行影响）。
+    relocate("org.yaml.snakeyaml", "linmumua.doudizhu.libs.snakeyaml")
+
+    version {
+        // Toolchain 版本号，写进 env.properties 供 TabooLib 生态识别。
+        taboolib = "6.3.0-75b18a2"
+        coroutines = "1.7.3"
+        // 不重定位 TabooLib 自身：TabooLib 的 JS/脚本等特性靠「包名就是 taboolib.*」定位，
+        // 重定位会破坏这部分约定。本项目的 taboolib.library.reflex.* 引用与内嵌产物一致。
+        skipTabooLibRelocate = true
+
+        // MUZ 自己维护 paper-plugin.yml（含 api-version、folia-supported、dependencies 的
+        // join-classpath 与权限声明），绝不能让 TabooLib 平台文件覆盖它。
+        // paper-plugin.yml 的 ${version} / ${apiVersion} 占位由下面 processResources 展开，
+        // 这条流水线与 TabooLib 无关，开 skipPlatformFile 后也不会被改写。
+        skipPlatformFile = true
+    }
+
+    env {
+        // 【如实说明】：这一行只让 Gradle 插件登记「引导层」这一模块概念并生成
+        // env.properties，它【不会】把 common 模块的 class 打进 JAR（原因见上面
+        // 「没做」那段）。MUZ 也没有任何代码调用 TabooLib.setup()，所以 JAR 里
+        // 生成的 META-INF/taboolib/env.properties 只是一份声明，没有人读它 ——
+        // 唯一会读它的 taboolib.common.PrimitiveSettings 属于 loader，而 loader 不在 JAR 里。
+        //
+        // 【为什么不干脆把 loader 一起内嵌】：loader 会连带拉进 jar-relocator 与
+        // common-platform-api，而后者假定 taboolib.platform.BukkitPlugin 是插件入口；
+        // MUZ 用的是自己的 JavaPlugin（linmumua.doudizhu.DoudizhuPlugin），装上会让
+        // EventBus 与 PlatformFactory 拿不到实例并刷一屏堆栈。TabooLib 在本项目里
+        // 纯作工具库使用，不参与注解生命周期与插件入口装配 —— 真正需要的只是
+        // common-reflex，它已由 embeddedLibraries 完整内嵌（含 Kotlin/ASM/commons-lang3）。
+        // 保留这一行是为了忠实恢复历史配置形状，不代表运行期加载 TabooLib。
+        install("common")
+    }
+}
+
+// 【为什么 inJar 与 classifier 必须在 afterEvaluate 里设置，而不是在下面那个配置块里】
+// io.izzel.taboolib 的插件在自己的 afterEvaluate 钩子里会【按扩展配置重新赋值】这两个属性
+// （实测：在脚本主体里设的 classifier 被它重置回 null，于是落点退回 inJar 本身、就地重写，
+// 我们声明的输出文件永远不会出现）。本脚本注册的 afterEvaluate 晚于插件的，因此这一次赋值
+// 才是最终生效的那一次 —— 与上面 `jar` finalizer 的处理是同一个原因，见那段注释。
+afterEvaluate {
+    tasks.named<io.izzel.taboolib.gradle.TabooLibMainTask>("taboolibMainTask") {
+        // 输入是【中间件】（未重定位的 shadow 归档）；classifier 让落点变成同目录下的另一个文件，
+        // 因此 inJar 全程只读，不存在「在已重定位产物上二次重定位」。
+        inJar = shadedJarFile.get().asFile
+        classifier = muzTarget.id
+    }
+}
+
+tasks.named<io.izzel.taboolib.gradle.TabooLibMainTask>("taboolibMainTask") {
+    dependsOn(tasks.named("shadowJar"))
+    // 【为什么要显式声明 inputs/outputs】插件本身只给 inJar 标了 @InputFile、不给任何输出，
+    // Gradle 便无法判定增量。这里补齐指纹，第二次不 clean 的打包才会 UP-TO-DATE，
+    // 也才能证明「没有二次重定位」。输出路径必须与 classifier 的落点一致（见上面的 afterEvaluate）。
+    inputs.file(shadedJarFile)
+    inputs.files(embeddedLibraries)
+    outputs.file(relocatedJarFile)
+}
+
+// ============================================================================
+// 最终发布归档：把 taboolibMainTask 的重定位结果按固定时间戳与排序重新打包
+//
+// 【为什么要多这一步】TabooLibMainTask 重写归档时把每个条目的时间设成构建时刻，
+// 于是「同一份源码连续两次打包」的 SHA-256 必然不同。它不改动条目内容，只改时间戳，
+// 所以这里做一次「读 → 排序 → 固定时间写回」就能拿回可复现性，且仍保留重定位结果。
+// 输入是重定位件、输出是最终归档，两者都不是彼此的输入，增量判定天然成立。
+// ============================================================================
+val packagePluginJar = tasks.register("packagePluginJar") {
+    dependsOn(tasks.named("taboolibMainTask"))
+    group = "build"
+    description = "把重定位后的 JAR 以固定时间戳与排序重打包成最终发布归档"
+    val source = relocatedJarFile
+    val target = finalJarFile
+    inputs.file(source)
+    outputs.file(target)
+
+    doLast {
+        val sourceFile = source.get().asFile
+        check(sourceFile.isFile) { "缺少重定位后的 JAR：$sourceFile" }
+        val targetFile = target.get().asFile
+        repackZipDeterministically(sourceFile, targetFile)
+        logger.lifecycle(
+            "[muz] 已生成发布归档：${targetFile.absolutePath}（${targetFile.length()} 字节，" +
+                "条目已按名字排序并统一为固定时间戳）"
+        )
+    }
 }
 
 val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
-    val pluginJar = tasks.named<ShadowJar>("shadowJar").flatMap { it.archiveFile }
-    inputs.file(pluginJar)
+    // 【名字只提 SnakeYAML 是历史沿用，实际范围更宽】本任务校验三件事：
+    //   1. 该重定位的（snakeyaml / asm / commons-lang3）确实只剩新包名；
+    //   2. 该内嵌但【不重定位】的（gson / sqlite-jdbc）原包名确实还在；
+    //   3. taboolibMainTask 真的执行过（kotlin2320/、env.properties 等指纹）。
+    // 任务名不改，是因为它已被发布流程与文档引用，重命名会波及调用方。
+    // 必须等 taboolibMainTask 重定位、packagePluginJar 重打包之后再校验：
+    // 顺序颠倒会校验到「重定位前」的中间件，永远看不到真实产物。
+    dependsOn(packagePluginJar)
+    inputs.file(finalJarFile)
 
     doLast {
-        val jarFile = pluginJar.get().asFile
+        val jarFile = finalJarFile.get().asFile
+
+        // 【为什么这里必须能证明 taboolibMainTask 真的跑过】只校验 SnakeYAML 是不够的：
+        // 若 finalizer/依赖链被改动导致 taboolibMainTask 被跳过，中间件照样是个合法 JAR、
+        // SnakeYAML 也照样是重定位过的（shadowJar 自己也会重定位它），校验会误判通过。
+        // 下面每一条都是【只有 TabooLib 重定位过才会成立】的指纹：
+        //   * kotlin2320/：TabooLib 的固定行为是把 kotlin.* 重定位到 kotlin2320/；
+        //   * kotlin/ 下只剩注解白名单：同上，反证它是重定位后的产物而不是原样内嵌；
+        //   * META-INF/taboolib/env.properties：只由 TabooLibMainTask 写入；
+        //   * asm / commons-lang3 的新包名：由 taboolibMainTask 重写 reflex 常量池后才会一致。
+        val taboolibKotlinPrefix = "kotlin2320/"
+        val taboolibKotlinIntrinsics = "${taboolibKotlinPrefix}jvm/internal/Intrinsics.class"
+        val taboolibEnvProperties = "META-INF/taboolib/env.properties"
+        // TabooLib 只保留这些注解类在 kotlin/ 下（其余全部搬到 kotlin2320/）。
+        val kotlinAnnotationWhitelist = setOf(
+            "kotlin/annotation/Repeatable.class",
+            "kotlin/annotation/Retention.class",
+            "kotlin/annotation/Target.class",
+            "kotlin/Deprecated.class",
+            "kotlin/DeprecatedSinceKotlin.class",
+            "kotlin/jvm/JvmField.class",
+            "kotlin/jvm/JvmInline.class",
+            "kotlin/jvm/JvmStatic.class",
+            "kotlin/jvm/PurelyImplements.class",
+            "kotlin/Metadata\$DefaultImpls.class",
+            "kotlin/Metadata.class",
+            "kotlin/ReplaceWith.class"
+        )
+        // 重定位后这些原始包名必须一个都不剩。
+        val forbiddenPrefixes = listOf(
+            "org/yaml/snakeyaml/",
+            "org/objectweb/asm/",
+            "org/apache/commons/lang3/"
+        )
+
         JarFile(jarFile).use { jar ->
             val relocatedLoaderOptions = "linmumua/doudizhu/libs/snakeyaml/LoaderOptions.class"
             val originalLoaderOptions = "org/yaml/snakeyaml/LoaderOptions.class"
@@ -1287,7 +1646,86 @@ val verifyRelocatedSnakeYaml = tasks.register("verifyRelocatedSnakeYaml") {
             check(!configBytecode.contains("org/yaml/snakeyaml/LoaderOptions")) {
                 "MuzYamlConfig still references server-provided SnakeYAML"
             }
+
+            // 下面开始是「taboolibMainTask 确实执行过」的指纹。
+            check(jar.getEntry(taboolibKotlinIntrinsics) != null) {
+                "${jarFile.name} 缺少 $taboolibKotlinIntrinsics —— taboolibMainTask 未真正执行（kotlin.* 的重定位是它的固定行为）"
+            }
+            check(jar.getEntry(taboolibEnvProperties) != null) {
+                "${jarFile.name} 缺少 $taboolibEnvProperties —— taboolibMainTask 未真正执行"
+            }
+            var kotlin2320Count = 0
+            val strayKotlinEntries = mutableListOf<String>()
+            val forbiddenHits = mutableListOf<String>()
+            val entries = jar.entries()
+            while (entries.hasMoreElements()) {
+                val name = entries.nextElement().name
+                if (name.startsWith(taboolibKotlinPrefix)) {
+                    kotlin2320Count++
+                }
+                if (name.startsWith("kotlin/") && !name.endsWith("/") && name !in kotlinAnnotationWhitelist) {
+                    strayKotlinEntries.add(name)
+                }
+                for (prefix in forbiddenPrefixes) {
+                    if (name.startsWith(prefix)) {
+                        forbiddenHits.add(name)
+                    }
+                }
+            }
+            check(kotlin2320Count > 0) {
+                "${jarFile.name} 的 kotlin2320/ 下没有任何类 —— taboolibMainTask 未真正执行"
+            }
+            check(strayKotlinEntries.isEmpty()) {
+                "${jarFile.name} 的 kotlin/ 下出现白名单外的类（说明 kotlin.* 未被重定位到 kotlin2320/）：" +
+                    strayKotlinEntries.take(10).joinToString(", ")
+            }
+            check(forbiddenHits.isEmpty()) {
+                "${jarFile.name} 仍保留未重定位的第三方包：" + forbiddenHits.take(10).joinToString(", ")
+            }
+
+            // 重定位后的 ASM / commons-lang3 必须存在（否则就是「包被删掉」而不是「被重定位」）。
+            for (relocatedPrefix in listOf("linmumua/doudizhu/libs/asm/", "linmumua/doudizhu/libs/commons/lang3/")) {
+                check(jar.entries().asSequence().any { it.name.startsWith(relocatedPrefix) }) {
+                    "${jarFile.name} 缺少重定位后的 $relocatedPrefix"
+                }
+            }
+
+            // reflex 的常量池必须已经指向重定位后的 ASM，否则运行期会 NoClassDefFoundError。
+            val reflexEntry = jar.entries().asSequence()
+                .map { it.name }
+                .firstOrNull { it.startsWith("taboolib/library/reflex/") && it.endsWith("ClassAnalyser.class") }
+                ?: jar.entries().asSequence().map { it.name }
+                    .firstOrNull { it.startsWith("taboolib/library/reflex/") && it.endsWith(".class") }
+            checkNotNull(reflexEntry) { "${jarFile.name} 里没有 taboolib/library/reflex 的类" }
+            val reflexBytecode = jar.getInputStream(jar.getJarEntry(reflexEntry)).use { it.readBytes() }
+                .toString(Charsets.ISO_8859_1)
+            check(reflexBytecode.contains("linmumua/doudizhu/libs/asm/")) {
+                "$reflexEntry 未引用重定位后的 ASM —— taboolibMainTask 没有重写 reflex 常量池"
+            }
+            check(!reflexBytecode.contains("org/objectweb/asm/")) {
+                "$reflexEntry 仍引用原始 org/objectweb/asm/ —— ASM 重定位没有覆盖 reflex"
+            }
+
+            // gson 与 sqlite-jdbc 必须【内嵌且保持原包名】。它们和上面的 forbiddenPrefixes
+            // 是同一件事的两面：snakeyaml/asm/commons-lang3 必须「改名后只剩新包名」，
+            // 而这两个库必须「原包名照样在」——被 relocate 掉才会让运行期崩：
+            //   * gson：主源码直接 import com.google.gson.*（DebugWebServer / HudResourcePackVerifier 等）；
+            //   * sqlite：DatabaseManager 依赖 Class.forName("org.sqlite.JDBC") 与 JDBC SPI 自动注册。
+            // 这条断言的作用是把「刻意不重定位」写成可执行契约，避免日后有人「顺手补上 relocate」
+            // 而把默认 sqlite 存储与 Debug Web / 资源校验一起打断。
+            val embeddedUnrelocated = mapOf(
+                "gson" to "com/google/gson/Gson.class",
+                "sqlite-jdbc" to "org/sqlite/JDBC.class"
+            )
+            for ((label, entryName) in embeddedUnrelocated) {
+                check(jar.getEntry(entryName) != null) {
+                    "${jarFile.name} 缺少内嵌且未重定位的 $label（$entryName）—— " +
+                        "它必须进 embeddedLibraries 且不得进 relocate 列表"
+                }
+            }
         }
+
+        logger.lifecycle("[muz] 已校验重定位与 TabooLib 重写指纹：${jarFile.name}")
     }
 }
 
@@ -2346,4 +2784,53 @@ tasks {
         dependsOn(zipResourcePack)
         dependsOn(zipCraftEngineBundle)
     }
+}
+
+// ============================================================================
+// 独立 JUnit runner（build/junit-runner/run.py）的依赖 classpath 导出
+//
+// 【为什么需要这个任务】run.py 读取 build/test-runtime-cp.txt 构造 classpath（该文件不参与
+// 版本控制，此前是手工生成的）。新增 TabooLib 反射工具后，测试 classpath 必须包含
+// common-reflex 与它的 Kotlin/ASM/commons-lang3 依赖，否则反射驱动的测试会 NoClassDefFoundError。
+// 这个任务把 Gradle 解析出的真实 testRuntimeClasspath 写成 run.py 期望的格式（分号分隔、
+// 单行），保证两边不会再漂移。
+//
+// 【为什么必须挂上任务链】此前这个任务没有任何人依赖它，必须手工调用，于是
+// build/test-runtime-cp.txt 很容易停留在上一次编译的解析结果（陈旧）。现在由 compileTestJava
+// finalizedBy 它：只要重新编译测试，CP 文件就跟着刷新。用 finalizedBy 而不是 dependsOn，
+// 是因为它反过来依赖 testClasses（dependsOn(testClasses)），写成 dependsOn 会成环。
+// ============================================================================
+val writeTestRuntimeClasspath = tasks.register("writeTestRuntimeClasspath") {
+    dependsOn(tasks.named("testClasses"))
+    // run.py 读的是【仓库根的 build/test-runtime-cp.txt】，而 layout.buildDirectory 已被
+    // 重定向到 build/<targetId>，所以这里必须用 rootProject 的绝对路径，不能走 buildDirectory。
+    val outputFile = rootProject.layout.projectDirectory.file("build/test-runtime-cp.txt")
+    val runtimeClasspath = configurations.named("testRuntimeClasspath")
+    outputs.file(outputFile)
+    doLast {
+        val target = outputFile.asFile
+        target.parentFile.mkdirs()
+        // run.py 只接受「单行、分号分隔」的 jar 列表；过滤掉目录与构建输出目录，
+        // 那些由 run.py 自己按目标拼到 classpath 最前面。
+        // 【为什么要剔除 kotlin-stdlib-jdk7/jdk8】paper-api 会传递解析出 1.8.20 的
+        // kotlin-stdlib-jdk7 / jdk8，与本项目显式声明的 kotlin-stdlib:2.3.20（TabooLib 反射工具
+        // 的实际运行期依赖）同时出现在测试 classpath 上，而且旧版排在前面。它们与 2.3.20 的
+        // kotlin-stdlib 是同一套类的历史分包，混用会让测试加载到与内嵌运行期不同的 stdlib，
+        // 于是「测试通过」不再能代表产物行为。内嵌产物里只有 kotlin-stdlib:2.3.20（被 TabooLib
+        // 重定位成 kotlin2320/），所以这里把旧分包整体排除，让测试 classpath 与内嵌运行期同源。
+        val excludedKotlinSplits = listOf("kotlin-stdlib-jdk7", "kotlin-stdlib-jdk8")
+        val jars = runtimeClasspath.get().files
+            .filter { it.isFile && it.name.endsWith(".jar") }
+            .filter { file -> excludedKotlinSplits.none { file.name.startsWith("$it-") } }
+            .map { it.absolutePath }
+            .distinct()
+            .sorted()
+        target.writeText(jars.joinToString(File.pathSeparator), Charsets.UTF_8)
+        logger.lifecycle("[muz] 已写出测试依赖 classpath：${target.absolutePath}（${jars.size} 个 jar）")
+    }
+}
+
+// 测试编译一结束就刷新 CP 文件（见上面的理由：finalizedBy 避免与 testClasses 成环）。
+tasks.named("compileTestJava") {
+    finalizedBy(writeTestRuntimeClasspath)
 }

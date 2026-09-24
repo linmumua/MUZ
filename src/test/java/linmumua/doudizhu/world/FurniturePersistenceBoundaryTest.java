@@ -43,13 +43,24 @@ class FurniturePersistenceBoundaryTest {
 
     @Test
     void fallbackBranchesStillUseProtectedEntityPath() throws IOException {
-        String source = Files.readString(MANAGER, StandardCharsets.UTF_8);
+        String source = readNormalized(MANAGER);
         String tableFallback = between(source, "} else {\n            ItemDisplay fallbackTableDisplay", "        if (tablePlacement.blockRestore() != null)");
         String chairFallback = between(source, "} else {\n                    addEntityTreeIds(chairPlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_CHAIR);", "            }\n            if (chairPlacement.blockRestore() != null)");
 
         assertTrue(tableFallback.contains("staticEntities.add(fallbackTableDisplay.getUniqueId())"));
         assertTrue(chairFallback.contains(
             "addEntityTreeIds(chairPlacement.entityId(), staticEntities, placed.owner(), ENTITY_ROLE_CHAIR)"));
+    }
+
+    /**
+     * 读取源码并统一换行为 LF，供跨行契约片段匹配。
+     *
+     * <p>本测试断言的是「跨行片段存在」这一语义，而不是文件用哪种换行符；源码在 Windows 工作区是 CRLF，
+     * 而 {@link Files#readString} 不会做换行翻译，直接写 {@code \n} 的片段永远匹配不上——那会把
+     * 「实现没退化」误报成「缺少源码片段」。这里只归一化换行，不放松任何片段内容要求。
+     */
+    private static String readNormalized(Path path) throws IOException {
+        return Files.readString(path, StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 
     private static String between(String source, String start, String end) {

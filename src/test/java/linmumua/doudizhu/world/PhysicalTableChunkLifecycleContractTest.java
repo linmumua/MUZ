@@ -24,7 +24,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void shutdown的reload分支把清理投递到锚点region而停服分支只清运行态() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String shutdown = between(source, "public void shutdown()", "private void ensureWorldVisualsReady");
 
         assertTrue(shutdown.contains("plugin.getTableManager().cancelOwnerPeriodicTasks(placed.tableName());"));
@@ -58,7 +58,7 @@ class PhysicalTableChunkLifecycleContractTest {
      */
     @Test
     void 拆桌的实体清理与残留清扫都必须投递到桌锚点region() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String helper = between(source, "private void cleanupPlacedTableOnOwnerRegion",
             "private void cleanupPlacedTable(PlacedTable placed)");
         assertTrue(helper.contains("runRegionStage(placed.anchor(), () -> {"),
@@ -139,7 +139,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 动态手牌重建后立即回填UUID索引() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String privateSelection = between(source, "private void updatePrivateSelection", "private void updateBacksideSelection");
         String backsideSelection = between(source, "private void updateBacksideSelection", "private void clearPrivateEntities");
 
@@ -149,7 +149,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 重建保持旧放置状态直到收口成功提交() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String rebuild = between(source, "public CompletionStage<Void> rebuildAllTables()",
             "public CompletionStage<Void> repairIncompleteTables(");
         String shift = between(source, "public CompletionStage<Void> shiftAllAnchors(double deltaY)",
@@ -195,7 +195,7 @@ class PhysicalTableChunkLifecycleContractTest {
      */
     @Test
     void 重建闸门前置到spawn之前且收口拒绝必须在自己的锚点清理() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String pipeline = between(source, "private CompletionStage<Void> runSingleRebuild(",
             "private String rebuildGateRejection(");
         String gate = between(source, "private String rebuildGateRejection(RebuildRequest request)",
@@ -236,7 +236,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 单桌修复和Y位移也必须先加载锚点footprint再清理旧实体() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String single = between(source, "private CompletionStage<Void> rebuildSingleTable(String tableName)",
             "private RebuildRequest captureSingleRebuild(String tableKey, double deltaY)");
         String shift = between(source, "public CompletionStage<Void> shiftAllAnchors(double deltaY)",
@@ -275,7 +275,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 单桌修复必须先完成CleanupPlan预检再进入破坏性步骤() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String repair = between(source, "private CompletionStage<Void> repairTableAfterChunkLoad", "private CleanupPlan captureCleanupPlan");
         String submit = between(source, "private CompletionStage<Void> submitCleanupPlan", "private RegionTaskBarrier.Result validateCleanupBarrier");
 
@@ -313,16 +313,23 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 缺失实体允许提交清理屏障但现存实体无法定位仍保守退出() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String repair = between(source, "private CompletionStage<Void> repairTableAfterChunkLoad", "private CleanupPlan captureCleanupPlan");
         String capture = between(source, "private CleanupPlan captureCleanupPlan", "private static List<UUID> flattenEntityBuckets");
         String queue = between(source, "private void queueChunkLoadRepair", "private CompletionStage<Void> repairTableAfterChunkLoad");
 
+        // 【机制升级】实体解析从直接调 Bukkit.getEntity 收口到 worldBodyLane.resolveEntity，
+        // 并且在读位置之前必须先过 lane 归属门禁——实服（Lophine 26.2）就是在这里读
+        // entity.getLocation()/getVehicle() 抛 "Accessing entity state off owning region's thread"，
+        // 中断整条修复、使牌桌永久停在 global。断言随之从"钉具体调用表达式"升级为
+        // "钉解析入口 + 门禁必须先于位置读取"，方向更强（旧断言只锁住调用文本，锁不住顺序保证）。
         assertOrdered(
             capture,
-            "Entity entity = Bukkit.getEntity(entityId);",
+            "Entity entity = worldBodyLane.resolveEntity(entityId);",
             "if (entity == null) {",
             "continue;",
+            "if (!worldBodyLane.isOwnedByCurrentRegion(entity)) {",
+            "unresolved.add(\"entity-off-lane:\" + entityId);",
             "Location location = entity.getLocation();",
             "if (location == null || location.getWorld() == null)",
             "unresolved.add(\"entity-location:\" + entityId)"
@@ -330,8 +337,16 @@ class PhysicalTableChunkLifecycleContractTest {
         int missingBranch = capture.indexOf("if (entity == null) {");
         int locationRead = capture.indexOf("Location location = entity.getLocation();", missingBranch);
         assertTrue(missingBranch >= 0 && locationRead > missingBranch, "必须先处理缺失实体，再读取现存实体位置");
-        assertFalse(capture.substring(missingBranch, locationRead).contains("unresolved.add("),
+        // 断言意图不变（"缺失 tracked entity 视为已不存在、不得记 unresolved"），只是把范围从
+        // "null 分支到读位置之间的整段"收窄到 **null 分支体本身**：这段区间现在还合法地包含
+        // 跨 region 实体的 unresolved 记账（那是"现存但不可安全定位"，与缺失是两回事）。
+        // 这是断言编码旧机制后的必要收窄，不是放宽——缺失分支仍被逐字钉住。
+        int missingBranchBodyEnd = capture.indexOf("continue;", missingBranch);
+        assertTrue(missingBranchBodyEnd > missingBranch, "缺失分支必须以 continue 结束");
+        assertFalse(capture.substring(missingBranch, missingBranchBodyEnd).contains("unresolved.add("),
             "缺失 tracked entity 不得加入 unresolved");
+        assertTrue(capture.contains("不归属当前 lane 的实体按\"不可安全定位\"处理"),
+            "跨 region 实体必须走既有保守分支，不得抛异常中断修复");
         assertTrue(capture.contains("tracked UUID 查不到实体表示它已经不存在"), "缺失 tracked entity 必须视为已不存在");
         assertTrue(capture.contains("只有实体对象仍存在但无法安全定位时才阻断"), "现存但无法定位的实体必须阻断清理");
         assertOrdered(
@@ -351,7 +366,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void CE根实体缺失视为已不存在但根存在时按根位置原子清理() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String capture = between(source, "private CleanupPlan captureCleanupPlan", "private static List<UUID> flattenEntityBuckets");
         String execute = between(source, "private void executeCleanupRegion", "private static boolean sameWorldAndChunk");
 
@@ -369,7 +384,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void 清理完成后才允许残留扫描和spawn且失败超时不得重建() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String finish = between(source, "private CompletionStage<Void> finishCleanupPlan", "private boolean canRebuildCleanupPlan");
 
         assertOrdered(
@@ -389,7 +404,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void ChunkLoad修复同时受queued和active去重并在迟到终止时释放状态() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String queue = between(source, "private void queueChunkLoadRepair", "private CompletionStage<Void> repairTableAfterChunkLoad");
         String repair = between(source, "private CompletionStage<Void> repairTableAfterChunkLoad", "private CleanupPlan captureCleanupPlan");
 
@@ -409,7 +424,7 @@ class PhysicalTableChunkLifecycleContractTest {
 
     @Test
     void CleanupPlan重建必须校验epoch身份和完整footprint() throws IOException {
-        String source = Files.readString(PHYSICAL_MANAGER);
+        String source = readSource();
         String capture = between(source, "private CleanupPlan captureCleanupPlan", "private static List<UUID> flattenEntityBuckets");
         String validate = between(source, "private boolean canRebuildCleanupPlan", "private boolean canPurgeResidualForPlan");
 
@@ -434,6 +449,17 @@ class PhysicalTableChunkLifecycleContractTest {
         int end = source.indexOf(endMarker, start + startMarker.length());
         assertTrue(end > start, "缺少源码结束边界: " + endMarker);
         return source.substring(start, end);
+    }
+
+    /**
+     * 读取 {@code PhysicalTableManager} 源码并统一换行为 LF，供跨行契约片段匹配。
+     *
+     * <p>本类断言的是「这些源码片段存在、且顺序正确」这一语义，而不是文件用哪种换行符；Windows 工作区里
+     * 源码是 CRLF，而 {@link Files#readString} 不做换行翻译，直接写 {@code \n} 的跨行片段永远匹配不上——
+     * 那会把「实现没退化」误报成「生命周期顺序缺少或错位」。这里只归一化换行，不放松任何片段内容与顺序要求。
+     */
+    private static String readSource() throws IOException {
+        return Files.readString(PHYSICAL_MANAGER).replace("\r\n", "\n");
     }
 
     private static void assertOrdered(String source, String... snippets) {
