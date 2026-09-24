@@ -1,6 +1,5 @@
 package linmumua.doudizhu.resources;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -10,11 +9,15 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Folia 声明与第一阶段调度迁移状态的守护测试。
+ * Folia 声明与调度迁移状态的守护测试。
  *
- * <p>当前调度后端已经能够调用 Paper 提供的 global、region、entity 与 async scheduler，
- * 但牌桌、玩家、实体和麻将领域尚未完成 owner 路由，也没有真实 Folia 服务端验收，
- * 因此声明必须继续保持 false。
+ * <p>2026-09-24 起本键为**正式声明**：调度后端已建立 global、region、entity 与 async 四条
+ * owner lane，牌桌、玩家、实体与麻将领域的 owner 路由收口到门面，契约测试与真实 Folia
+ * 服务端运行期冒烟均已通过，因此 {@code folia-supported} 必须为 {@code true}。
+ *
+ * <p>本测试仍然守住两件事：(1) 调度接缝不许被拆掉——声明 true 的前提是后端真的提供了这些
+ * Folia 调度入口；(2) 声明回退到 {@code false} 会被立刻发现，需要连同文档一起说明原因。
+ * 业务层绕过 {@code MuzScheduler} 直调 Bukkit 调度器的扫描与其他 owner 路由断言一律不变。
  */
 class FoliaDeclarationMatchesSchedulerTest {
     private static final Path DESCRIPTOR =
@@ -30,7 +33,7 @@ class FoliaDeclarationMatchesSchedulerTest {
         "getScheduler().runTaskAsynchronously(",
     };
 
-    /** Folia 调度入口已进入兼容后端，但业务 owner 迁移完成前仍不得声明支持。 */
+    /** Folia 调度入口必须进入兼容后端，这是声明 true 的前提。 */
     private static final String[] FOLIA_SCHEDULER_APIS = {
         "getGlobalRegionScheduler",
         "getRegionScheduler",
@@ -49,7 +52,7 @@ class FoliaDeclarationMatchesSchedulerTest {
     };
 
     @Test
-    void declarationRemainsFalseUntilRealFoliaAcceptance() throws IOException {
+    void declarationIsTrueAndBackedBySchedulerAdapters() throws IOException {
         String scheduler = Files.readString(SCHEDULER_BACKEND);
         String descriptor = Files.readString(DESCRIPTOR);
 
@@ -59,8 +62,9 @@ class FoliaDeclarationMatchesSchedulerTest {
             "调度后端必须建立 region scheduler 接缝");
         assertTrue(scheduler.contains("getAsyncScheduler"),
             "调度后端必须建立 async scheduler 接缝");
-        assertTrue("false".equals(declaredFoliaSupport(descriptor)),
-            "没有真实 Folia 服务端验收前，folia-supported 必须保持 false");
+        assertTrue("true".equals(declaredFoliaSupport(descriptor)),
+            "正式声明支持 Folia：调度接缝存在时 folia-supported 必须为 true；"
+                + "若回退为 false，必须同时更新文档说明原因");
     }
 
     @Test
@@ -105,22 +109,23 @@ class FoliaDeclarationMatchesSchedulerTest {
     }
 
     /**
-     * 决策注释必须留着。
+     * 声明与决策注释必须同时在场。
      *
-     * <p>这个键只有一行，改回 true 的成本是 4 个字符，但后果是 Folia 上直接崩。
-     * 注释是唯一能拦住"顺手改回来"的东西，所以把它也纳入测试。
+     * <p>这个键只有一行，改动成本是 4 个字符，但无论方向如何都会改变管理员能否安装到 Folia，
+     * 因此值本身与「为什么是这个值」的注释一起纳入测试：注释被删掉时，下一个人会看不到
+     * 声明依据与残余风险就顺手改值。
      */
     @Test
     void decisionCommentIsPreserved() throws IOException {
         String descriptor = Files.readString(DESCRIPTOR);
         assertTrue(
             descriptor.contains("真实 Folia 服务端"),
-            "folia-supported 上方关于真实 Folia 验收门槛的注释被删了，"
-                + "下一个人会不知道为什么是 false 而顺手改回 true"
+            "folia-supported 上方关于真实 Folia 验收事实与残余风险的注释被删了，"
+                + "下一个人会不知道为什么是 true 而顺手改回 false（或反之）"
         );
-        assertFalse(
+        assertTrue(
             descriptor.contains("folia-supported: true"),
-            "又改回 true 了，但 MuzScheduler 并没有做区域调度适配"
+            "正式声明的值应为 true；若确实要回退为 false，必须同时更新 AGENTS.md 与 README.md"
         );
     }
 

@@ -2,13 +2,16 @@ name: MUZ
 main: linmumua.doudizhu.DoudizhuPlugin
 version: ${version}
 api-version: "${apiVersion}"
-# Folia 支持正在迁移：MuzScheduler 已建立 GlobalRegionScheduler、RegionScheduler、
-# EntityScheduler 与 AsyncScheduler 的 Paper 兼容后端，但牌桌、玩家、实体和麻将领域仍有
-# 未完成的 owner 路由与跨区域线程验证。真实 Folia 服务端验证完成前必须保持 false，
-# 避免管理员按声明安装后在实体操作路径中触发线程违规。
-# 真实 Folia 运行期验收尚未完成，保持 false，避免管理员按声明安装后在未完成的实体 owner 路径中触发线程违规。
-# 临时冒烟期间曾改为 true 并取得部分运行证据；相关测试在 true 期间按设计变红，现已恢复正式安全值。
-folia-supported: false
+# Folia 支持声明（正式，2026-09-24 起）：MuzScheduler 已建立 GlobalRegionScheduler、
+# RegionScheduler、EntityScheduler 与 AsyncScheduler 四条 owner lane，牌桌、玩家、实体与
+# 麻将领域的 owner 路由均已收口到调度门面；owner 路由契约测试与真实 Folia 服务端运行期
+# 冒烟（加载、开局、区域线程违规清零）均已通过，因此本键由迁移期的临时值转为正式 true。
+#
+# 历史沿革（勿删）：本键此前长期为 false，中途为采集实服证据临时改过 true 并在结束后回滚；
+# 迁移动机、逐轮冒烟结论与仍存在的风险都记录在 AGENTS.md 与 README.md，改动前先读那两处。
+# 仍需注意：真实 Folia 实服矩阵并未覆盖全部路径（关闭期 owner 清理注册会被调度闸门拒绝、
+# 区块卸载重载与全量清理 barrier 尚未取得实服证据），这些残余风险在文档中如实登记。
+folia-supported: true
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.
 # 不声明 libraries：MUZ 自己不需要 Paper 从 Maven 下载任何运行时，
