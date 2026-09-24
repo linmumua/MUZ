@@ -84,6 +84,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.block.BlockFace;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.Command;
+import org.bukkit.command.CommandMap;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -364,6 +365,17 @@ public final class DoudizhuPlugin extends JavaPlugin {
     /** 本次启动累计恢复成功的张数，供完成文案使用（异步下成功分散在多个回调里）。 */
     private final AtomicInteger persistedTableRestoredCount = new AtomicInteger();
     private boolean craftEngineProtectionListenerRegistered;
+    /**
+     * 已注册的 /muz 命令引用，供关闭阶段注销使用。
+     *
+     * <p>【为什么必须保存引用】paper-plugin.yml 不支持 commands 段，/muz 只能在
+     * {@link #registerMuzCommand()} 里经 CommandMap 手动注册。CommandMap 不会随插件 disable
+     * 自动摘除命令：插件被禁用后，玩家或控制台仍能选中 /muz，派发时会去解析插件类加载器里的类，
+     * 而此时 Paper 已经关闭了插件 JAR（PluginClassLoader 持有的 JarFile 已 close），解析失败即
+     * {@code java.util.zip.ZipException: zip file closed}。保存引用是为了在 onDisable
+     * （插件类加载器关闭之前）把它从 CommandMap 摘掉。
+     */
+    private volatile Command muzCommand;
     private static final DateTimeFormatter HISTORY_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
 
     public MuzScheduler scheduler() {
@@ -602,6 +614,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 scheduler.newGeneration();
             }
         });
+        // 先注销 /muz：命令派发会解析插件类加载器里的类，必须在 Paper 关闭插件 JAR 之前摘掉，
+        // 否则残留命令被触发时会抛 ZipException: zip file closed。放最前面也能让关闭期间到达的
+        // /muz 直接落空，不再进入正在拆解的业务。摘除失败只记日志、不中断后续关闭步骤。
+        runShutdownStep("注销 /muz 命令", this::unregisterMuzCommand);
 
         // Debug Web 和业务输出先停，但 scheduler 仍保持可用，给 owner 清理与已入队数据库任务留窗口。
         runShutdownStep("关闭 Debug Web", () -> {
@@ -6257,8 +6273,20 @@ public final class DoudizhuPlugin extends JavaPlugin {
      *
      * 只包一层转发，不改 DoudizhuCommand：它那 15 个子命令和状态感知的 tab 补全
      * 是已经跑通的逻辑，重写成 Brigadier 树只会凭空多出一批出错的机会。
+     *
+     * <p>注册成功后把命令实例存进 {@link #muzCommand}：CommandMap 不会随插件 disable
+     * 自动摘除命令，关闭阶段必须靠这个引用手动注销，否则插件 JAR 关闭后残留的 /muz
+     * 派发会抛 {@code ZipException: zip file closed}。本方法幂等——重复注册时先摘掉旧实例，
+     * 不会把上一份命令引用泄漏在 CommandMap 里。
      */
     private void registerMuzCommand() {
+        CommandMap commandMap = getServer().getCommandMap();
+        // 重复注册（重复 enable / 外部 reload）会留下指向上一个插件实例的命令引用：先摘掉旧的再注册，
+        // 避免旧实例被 CommandMap 长期持有（那正是泄漏，也是「注销时摘错对象」的来源）。
+        Command previous = muzCommand;
+        if (previous != null) {
+            detachMuzCommand(commandMap, previous, "重复注册");
+        }
         DoudizhuCommand executor = new DoudizhuCommand(this);
         Command command = new Command("muz", "管理 MUZ 牌桌与对局。", "/muz help", List.of("MUZ")) {
             @Override
@@ -6282,7 +6310,77 @@ public final class DoudizhuPlugin extends JavaPlugin {
         };
         command.setPermission("muz.command");
         // 前缀用插件名小写：万一别的插件也占了 muz，玩家还能用 /muz:muz 兜底
-        getServer().getCommandMap().register("muz", "muz", command);
+        boolean registered = commandMap.register("muz", "muz", command);
+        if (registered) {
+            muzCommand = command;
+        } else {
+            // 没注册上就不能记成自己的命令：否则关闭时会去摘一个不属于本插件的命令。
+            getLogger().warning("/muz 命令注册失败：CommandMap 已存在同名命令，可能被其它插件占用。");
+        }
+    }
+
+    /**
+     * 关闭阶段注销 /muz。
+     *
+     * <p>必须在 onDisable（插件类加载器被 Paper 关闭之前）调用。命令摘除失败只记日志、
+     * 不抛异常：关闭流程不能因为一条命令注销不掉而中断，其余实体的清理优先级更高。
+     */
+    private void unregisterMuzCommand() {
+        Command command = muzCommand;
+        // 先清引用再摘除：即使摘除抛异常，也不会留下指向已失效命令的字段（幂等，重复调用安全）。
+        muzCommand = null;
+        if (command == null) {
+            return;
+        }
+        detachMuzCommand(getServer().getCommandMap(), command, "关闭");
+    }
+
+    /**
+     * 把命令从 CommandMap 真正摘掉，返回是否确认已不再被派发。
+     *
+     * <p>【为什么要两步】{@code Command.unregister(commandMap)} 只清掉命令自身的注册引用，
+     * 不会把条目从 CommandMap 的 knownCommands 里删掉；真正决定「还能不能被派发」的是 knownCommands。
+     * Paper 的 {@code CraftCommandMap} 用的是一张转发到 Brigadier dispatcher 的 map
+     * （{@code BukkitBrigForwardingMap}），按 key remove 会同步删掉 Brigadier 节点，所以第二步必须做。
+     * 两个调用都可能抛异常，各自兜住并留痕，绝不外抛打断关闭。
+     */
+    private boolean detachMuzCommand(CommandMap commandMap, Command command, String reason) {
+        if (commandMap == null) {
+            getLogger().warning("注销 /muz 命令（" + reason + "）失败：CommandMap 不可用，命令可能残留为未注销状态。");
+            return false;
+        }
+        boolean detached = false;
+        try {
+            detached = command.unregister(commandMap);
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.WARNING, "注销 /muz 命令（" + reason + "）时 Command.unregister 抛出异常。", failure);
+        }
+        int removed = 0;
+        try {
+            Map<String, Command> known = commandMap.getKnownCommands();
+            if (known != null) {
+                // 先快照 key 再删：knownCommands 在 Paper 上转发自 Brigadier，边遍历边删会踩并发修改。
+                List<String> stale = new ArrayList<>();
+                for (Map.Entry<String, Command> entry : known.entrySet()) {
+                    if (entry.getValue() == command) {
+                        stale.add(entry.getKey());
+                    }
+                }
+                for (String key : stale) {
+                    if (known.remove(key) != null) {
+                        removed++;
+                    }
+                }
+            }
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.WARNING, "注销 /muz 命令（" + reason + "）时从 CommandMap 摘除登记抛出异常。", failure);
+        }
+        if (removed > 0 || detached) {
+            getLogger().info("已注销 /muz 命令（" + reason + "）：摘除 CommandMap 登记 " + removed + " 条。");
+            return true;
+        }
+        getLogger().warning("注销 /muz 命令（" + reason + "）未生效：CommandMap 中没有本插件的 /muz 登记。");
+        return false;
     }
 
     private void logShutdownDiagnostics() {

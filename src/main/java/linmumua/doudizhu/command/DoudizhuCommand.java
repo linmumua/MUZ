@@ -33,6 +33,16 @@ public final class DoudizhuCommand implements TabExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        // 【为什么必须有这道门】/muz 是经 CommandMap 手动注册的（paper-plugin.yml 不支持 commands 段），
+        // 命令对象可能在插件 disable 之后仍被服务端派发。此时继续往下走会解析插件类加载器里的类，
+        // 而 Paper 已经关闭了插件 JAR（PluginClassLoader 的 JarFile 已 close），解析失败即
+        // java.util.zip.ZipException: zip file closed。
+        // 门禁只读 Plugin 生命周期状态，且刻意不调用 message()/MuzTheme 等本插件类，
+        // 只用 Adventure 的 Component（服务端类路径），因此即使插件已被禁用也总能安全执行。
+        if (!isRuntimeAvailable()) {
+            sender.sendMessage(Component.text("MUZ 正在关闭，命令暂不可用。", NamedTextColor.RED));
+            return true;
+        }
         try {
             if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
                 help(sender);
@@ -349,6 +359,11 @@ public final class DoudizhuCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        // 与 onCommand 同一道门：插件关闭后补全同样会解析本插件类并触发 zip file closed，
+        // 直接返回空补全即可，不提示、不触碰任何业务类。
+        if (!isRuntimeAvailable()) {
+            return List.of();
+        }
         if (args.length == 1) {
             List<String> options = new ArrayList<>(List.of("help", "create", "set", "give", "history", "chip", "remove", "bot", "list", "settings", "labels", "status"));
             if (sender.hasPermission("muz.admin")) {
@@ -792,6 +807,19 @@ public final class DoudizhuCommand implements TabExecutor {
 
     private Component message(String text, NamedTextColor color) {
         return MuzTheme.named(text, color).decoration(TextDecoration.ITALIC, false);
+    }
+
+    /**
+     * 插件是否仍可安全执行 /muz。
+     *
+     * <p>{@code isEnabled()} 在 Paper 里由 {@code JavaPlugin.setEnabled} 维护，进入 onDisable 之前
+     * 就已被置为 false；{@code isShuttingDown()} 是本插件在 onDisable 首行置位的自制标志，用于覆盖
+     * 「插件仍启用但已开始拆解」的窗口。两者任一为假都拒绝执行。
+     *
+     * <p>只读生命周期状态，不触碰任何懒加载的业务类，所以即便插件 JAR 已经关闭也能安全求值。
+     */
+    private boolean isRuntimeAvailable() {
+        return plugin != null && plugin.isEnabled() && !plugin.isShuttingDown();
     }
 
     private List<String> filter(List<String> values, String token) {
