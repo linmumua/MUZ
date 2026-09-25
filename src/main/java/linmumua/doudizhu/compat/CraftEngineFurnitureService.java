@@ -2,6 +2,8 @@ package linmumua.doudizhu.compat;
 
 import linmumua.doudizhu.DoudizhuPlugin;
 import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -19,7 +21,15 @@ import taboolib.library.reflex.ClassAnalyser;
 import taboolib.library.reflex.ClassMethod;
 import taboolib.library.reflex.ReflexClass;
 
-public final class CraftEngineFurnitureService {
+/**
+ * CraftEngine 家具桥。
+ *
+ * <p>【为什么这个类不是 final】本类的解析与降级逻辑必须能被真实驱动：{@link #bridge()} 里唯一没法在单测中
+ * 复现的一步是「按 CE 插件类加载器取类」（替身插件给不出自定义类加载器），因此把它收口成包内可见的
+ * {@link #ceClass(String, ClassLoader)}，测试顶替这一步、其余全部跑生产代码。同包的
+ * {@code CraftEngineOffsetService}（其诊断测试用同一手法顶替 {@code fontManagerClass}）同样刻意不是 final。
+ */
+public class CraftEngineFurnitureService {
     private final DoudizhuPlugin plugin;
     private Plugin craftEngine;
     private Class<?> keyClass;
@@ -367,22 +377,38 @@ public final class CraftEngineFurnitureService {
             // 【为什么这里仍然是 Class.forName】：CraftEngine 是 compileOnly，它的类在 MUZ 自己的
             // ClassLoader 里【根本看不到】，必须先按 CE 插件类加载器把 Class 取回来。
             // TabooLib 的 ReflexClass 接的是一个已拿到的 Class<?>，不替代类加载这一步。
-            keyClass = Class.forName("net.momirealms.craftengine.core.util.Key", true, loader);
-            Class<?> furnitureClass = Class.forName("net.momirealms.craftengine.bukkit.api.CraftEngineFurniture", true, loader);
-            Class<?> furnitureManagerClass = Class.forName("net.momirealms.craftengine.bukkit.entity.furniture.BukkitFurnitureManager", true, loader);
-            Class<?> itemManagerClass = Class.forName("net.momirealms.craftengine.bukkit.item.BukkitItemManager", true, loader);
-            Class<?> itemClass = Class.forName("net.momirealms.craftengine.core.item.Item", true, loader);
-            Class<?> blockStateParserClass = Class.forName("net.momirealms.craftengine.core.block.parser.BlockStateParser", true, loader);
-            immutableBlockStateClass = Class.forName("net.momirealms.craftengine.core.block.ImmutableBlockState", true, loader);
-            Class<?> craftEngineBlocksClass = Class.forName("net.momirealms.craftengine.bukkit.api.CraftEngineBlocks", true, loader);
+            // 【为什么把取类收口到 ceClass(...)】：这是本类唯一依赖「CE 在另一个类加载器里」的一步，
+            // 也正是单测没法直接复现的一步（替身插件提供不了自定义类加载器）。收口之后，测试可以顶替
+            // 「按名取类」这一步、但仍然完整跑后面的解析与降级逻辑（沿用 CraftEngineOffsetService 的既有做法）。
+            keyClass = ceClass("net.momirealms.craftengine.core.util.Key", loader);
+            Class<?> furnitureClass = ceClass("net.momirealms.craftengine.bukkit.api.CraftEngineFurniture", loader);
+            Class<?> furnitureManagerClass = ceClass("net.momirealms.craftengine.bukkit.entity.furniture.BukkitFurnitureManager", loader);
+            Class<?> itemManagerClass = ceClass("net.momirealms.craftengine.bukkit.item.BukkitItemManager", loader);
+            Class<?> itemClass = ceClass("net.momirealms.craftengine.core.item.Item", loader);
+            Class<?> blockStateParserClass = ceClass("net.momirealms.craftengine.core.block.parser.BlockStateParser", loader);
+            immutableBlockStateClass = ceClass("net.momirealms.craftengine.core.block.ImmutableBlockState", loader);
+            Class<?> craftEngineBlocksClass = ceClass("net.momirealms.craftengine.bukkit.api.CraftEngineBlocks", loader);
             // 一律按「方法名 + 完整参数列表」取方法（注意 getMethodByTypes 是宽松匹配，见其说明），
             // 每个 API 都把参数列表写全；参数类型要与 CE 签名一致（含 primitive 的 .class，
             // 例如 int.class），否则取不到。
+            // 【取方法会沿继承链查找】CE 会把 API 声明在父类或接口上（26.8 的 furnitureById 就声明在
+            // 父类 AbstractFurnitureManager 与接口 FurnitureManager 上，子类 BukkitFurnitureManager
+            // 自己没有）；只认本类声明会把它们误判成缺失。语义与理由见 methodByTypes 的说明。
             keyOfMethod = methodByTypes(keyClass, "of", String.class);
             keyAsStringMethod = methodByTypes(keyClass, "asString");
             placeMethod = methodByTypes(furnitureClass, "place", Location.class, keyClass);
             furnitureManagerInstanceMethod = methodByTypes(furnitureManagerClass, "instance");
-            furnitureByIdMethod = methodByTypes(furnitureManagerClass, "furnitureById", keyClass);
+            // furnitureById 是【可选】API：detectPlacementKind 本来就按「字段为 null」降级到方块/未知
+            // （见那里的判空），而放置、清理与自定义物品解析都不依赖它。因此这里用「找不到返回 null」的
+            // 入口取它：缺失只降级牌型探测、留下带期望/实际签名的告警，不把整条家具桥打成不可用——
+            // 否则一个可选 API 的形状变化会连带关掉家具放置。
+            furnitureByIdMethod = methodByTypesSilently(furnitureManagerClass, "furnitureById", keyClass);
+            if (furnitureByIdMethod == null) {
+                plugin.getLogger().warning(
+                    "CraftEngine furniture manager 未提供 furnitureById(Key)，家具牌型探测降级；该类（含父类）实际同名方法："
+                        + describeMethodsNamed(furnitureManagerClass, "furnitureById")
+                        + "；该类实际声明的方法：" + describeAllMethods(furnitureManagerClass));
+            }
             itemManagerInstanceMethod = methodByTypes(itemManagerClass, "instance");
             itemWrapMethod = methodByTypes(itemManagerClass, "wrap", Object.class);
             itemIsCustomMethod = methodByTypes(itemClass, "isCustomItem");
@@ -409,17 +435,32 @@ public final class CraftEngineFurnitureService {
             craftEngine = detected;
             return craftEngine;
         } catch (ClassNotFoundException | RuntimeException | LinkageError exception) {
+            // 【为什么这里能兜住「CE 缺方法」】解析失效一律经 methodByTypes 转成运行时异常（受检的
+            // NoSuchMethodException 会从这里溜到 onEnable、让插件加载失败，理由见其说明），
+            // 于是本条 catch 就是「缺类 / 缺方法 / 链接错误」的统一降级出口，插件仍可正常启动。
             unavailable = true;
             plugin.getLogger().warning("CraftEngine detected but furniture bridge could not initialize: " + exception.getMessage());
             return null;
         }
     }
 
+    /**
+     * 按名从 CraftEngine 的类加载器取一个 CE 类：生产行为就是一行 {@code Class.forName}，没有旁路、没有缓存。
+     *
+     * <p>【为什么单独抽一个入口】{@link #bridge()} 与 {@link #initializeHitboxVisibilityBridge} 里所有
+     * CE 类都必须按「CE 插件类加载器」加载（CraftEngine 是 compileOnly，MUZ 自己的类加载器里看不到它），
+     * 这一步在单测里没法复现——替身插件给不出自定义类加载器。把这一步收口后，测试可以只顶替「取类」，
+     * 让后面的方法解析与降级逻辑仍然跑生产代码（与 {@code CraftEngineOffsetService#fontManagerClass} 同源同理）。
+     */
+    Class<?> ceClass(String name, ClassLoader loader) throws ClassNotFoundException {
+        return Class.forName(name, true, loader);
+    }
+
     private void initializeHitboxVisibilityBridge(ClassLoader loader, Class<?> furnitureApiClass) throws ClassNotFoundException {
-        Class<?> furnitureClass = Class.forName("net.momirealms.craftengine.core.entity.furniture.Furniture", true, loader);
-        Class<?> snapshotClass = Class.forName("net.momirealms.craftengine.core.entity.furniture.FurnitureSnapshotState", true, loader);
-        Class<?> playerClass = Class.forName("net.momirealms.craftengine.core.entity.player.Player", true, loader);
-        Class<?> networkManagerClass = Class.forName("net.momirealms.craftengine.bukkit.plugin.network.BukkitNetworkManager", true, loader);
+        Class<?> furnitureClass = ceClass("net.momirealms.craftengine.core.entity.furniture.Furniture", loader);
+        Class<?> snapshotClass = ceClass("net.momirealms.craftengine.core.entity.furniture.FurnitureSnapshotState", loader);
+        Class<?> playerClass = ceClass("net.momirealms.craftengine.core.entity.player.Player", loader);
+        Class<?> networkManagerClass = ceClass("net.momirealms.craftengine.bukkit.plugin.network.BukkitNetworkManager", loader);
         getLoadedFurnitureByMetaEntityMethod = methodByTypes(furnitureApiClass, "getLoadedFurnitureByMetaEntity", Entity.class);
         getLoadedFurnitureBySeatMethod = methodByTypes(furnitureApiClass, "getLoadedFurnitureBySeat", Entity.class);
         getLoadedFurnitureByColliderMethod = methodByTypes(furnitureApiClass, "getLoadedFurnitureByCollider", Entity.class);
@@ -460,14 +501,104 @@ public final class CraftEngineFurnitureService {
      * 不是签名全等。旧注释写的「精确参数类型」是不准确的。本类每个调用点都把完整参数列表写出来，
      * 且这些 CE API 都无重载，所以宽松与否不影响结果；但若 CE 给同一名字加上重载，必须改成
      * 逐个显式比较签名，不能依赖这个入口「精确」到唯一解。
+     *
+     * <p>【必须沿继承链查找（第二个布尔量为 true）】这个参数是「是否在本类找不到后继续到父类与接口里找」。
+     * 原先传 {@code false}，等于只认【该类自己声明】的方法，而 CE 惯于把 API 放在父类/接口上——实测
+     * 26.8 的 {@code BukkitFurnitureManager} 自身没有 {@code furnitureById(Key)}，它声明在父类
+     * {@code AbstractFurnitureManager} 与接口 {@code FurnitureManager} 上；于是解析抛
+     * NoSuchMethodException，家具牌型探测与整条家具桥都被误判成不可用。传 {@code true} 与
+     * {@code Class.getMethod} 的语义一致：先本类、再父类、再接口，最派生的声明优先。
+     *
+     * <p>【为什么把受检异常换成运行时异常】{@code getMethodByTypes} 找不到方法时抛的是
+     * {@code NoSuchMethodException}（受检），但 ReflexClass 是 Kotlin 类，它的字节码签名【没有 throws
+     * 子句】（实测 common-reflex 6.3.0），javac 因此认为它不抛受检异常——直接写
+     * {@code catch (NoSuchMethodException e)} 会以「在相应的 try 语句主体中不能抛出异常」编译不过。
+     * 后果是它会从调用点既有的 {@code catch (ClassNotFoundException | RuntimeException | LinkageError)}
+     * 与 {@code catch (ClassNotFoundException | RuntimeException)} 旁边溜过去，一路冒到 {@code onEnable}
+     * 并让插件加载失败。这里统一把它转成带「期望签名 + 该类（含父类）实际同名方法 + 该类实际方法表」
+     * 的运行时异常，于是调用点既有的 catch 就能正常降级，并把可排查的签名清单写进日志。
      */
     private static ClassMethod methodByTypes(Class<?> type, String name, Class<?>... parameterTypes) {
-        return analyse(type).getMethodByTypes(name, false, false, parameterTypes);
+        try {
+            return analyse(type).getMethodByTypes(name, true, false, parameterTypes);
+        } catch (Exception failure) {
+            // 【只处理「方法缺失」这一条路径】不是 NoSuchMethodException 时按原样上抛，交给调用点既有的
+            // 通用告警与降级处理；绝不把别的失败误报成「CE 没提供这个方法」。
+            if (!(failure instanceof NoSuchMethodException)) {
+                throw failure;
+            }
+            throw new IllegalStateException(
+                "CraftEngine API 缺失：" + type.getName() + "#" + name
+                    + "(" + parameterNames(parameterTypes) + ")"
+                    + "；该类（含父类）实际同名方法：" + describeMethodsNamed(type, name)
+                    + "；该类实际声明的方法：" + describeAllMethods(type));
+        }
     }
 
-    /** 同上，但找不到时返回 null，供「按代次回退到另一个重载」的分支使用。 */
+    /** 同上（同样沿继承链查找），但找不到时返回 null，供「可选 API 缺失只降级该能力」的分支使用。 */
     private static ClassMethod methodByTypesSilently(Class<?> type, String name, Class<?>... parameterTypes) {
-        return analyse(type).getMethodByTypeSilently(name, false, false, parameterTypes);
+        return analyse(type).getMethodByTypeSilently(name, true, false, parameterTypes);
+    }
+
+    /**
+     * 汇总某个类自身与父类上全部同名方法的签名；没有则返回「无」。
+     *
+     * <p>与 {@link #firstMethod} 同源地沿继承链向上走：CE 把 API 挪到父类时，只看本类声明会误报「无」，
+     * 而这个诊断的全部价值就在于如实反映运行期到底有什么（见 {@link #methodByTypes} 的失败分支）。
+     * 与 {@code CraftEngineOffsetService#describeMethodsNamed} 同一套写法与措辞，便于对照排查。
+     */
+    private static String describeMethodsNamed(Class<?> type, String name) {
+        List<String> signatures = new ArrayList<>();
+        Class<?> current = type;
+        while (current != null && current != Object.class) {
+            for (ClassMethod method : methodsDeclaredIn(current, name)) {
+                signatures.add(signatureOf(method));
+            }
+            current = current.getSuperclass();
+        }
+        return signatures.isEmpty() ? "无" : String.join(", ", signatures);
+    }
+
+    /**
+     * 列出类自身声明的全部方法签名，按字典序排序（诊断信息必须确定，不依赖枚举顺序）。
+     *
+     * <p>为什么连整张方法表都列：CE 若把方法改名，只报「无同名方法」仍然查不出正确名字；
+     * 把实际声明的方法表放进日志，维护者一眼就能看出它变成了什么（与
+     * {@code CraftEngineOffsetService#describeAllMethods} 同一套写法）。
+     */
+    private static String describeAllMethods(Class<?> type) {
+        List<String> signatures = new ArrayList<>();
+        for (List<ClassMethod> overloads : analyse(type).getStructure().getMethodsMap().values()) {
+            for (ClassMethod method : overloads) {
+                signatures.add(signatureOf(method));
+            }
+        }
+        signatures.sort(Comparator.naturalOrder());
+        return signatures.isEmpty() ? "无" : String.join(", ", signatures);
+    }
+
+    /** 方法签名文本，用于诊断（形参类型 + 返回类型）。 */
+    private static String signatureOf(ClassMethod method) {
+        return method.getName() + "(" + parameterNames(method.getParameterTypes()) + ") -> "
+            + method.getReturnType().getSimpleName();
+    }
+
+    /** 形参类型文本，用于诊断（simple name，逗号分隔；与 {@link #signatureOf} 同一套写法）。 */
+    private static String parameterNames(Class<?>[] parameterTypes) {
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < parameterTypes.length; index++) {
+            if (index > 0) {
+                builder.append(", ");
+            }
+            builder.append(parameterTypes[index].getSimpleName());
+        }
+        return builder.toString();
+    }
+
+    /** 取某个类【自己声明】的全部同名方法；没有则返回空列表。 */
+    private static List<ClassMethod> methodsDeclaredIn(Class<?> type, String name) {
+        List<ClassMethod> methods = analyse(type).getStructure().getMethodsMap().get(name);
+        return methods == null ? List.of() : methods;
     }
 
     /**
