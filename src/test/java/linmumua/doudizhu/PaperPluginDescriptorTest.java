@@ -85,10 +85,32 @@ class PaperPluginDescriptorTest {
 
     @Test
     void noRuntimeLibrariesAreRequested() throws IOException {
-        // MUZ 唯一的第三方运行时 SnakeYAML 已重定位进 JAR，不需要 Paper 从 Maven 下载任何东西。
-        // 这条守的是"别再加空 libraries 键"：Paper 解析空列表会报错，
-        // 而随手补一条依赖又会让启动多一次联网下载。
-        assertFalse(descriptor().containsKey("libraries"), "不再需要 libraries 段，SnakeYAML 已打进 JAR");
+        // 【1.10.54 起这条的语义变了，但结论不变】以前理由是「SnakeYAML 已重定位进 JAR，
+        // 不需要 Paper 下载任何东西」；现在第三方运行期库是【外置】的，改由 loader 下载。
+        // 但 paper-plugin.yml 的 libraries 键仍然不能写：它不是 Paper 插件的加载方式
+        // （那是旧 Bukkit PluginLoader 的机制），空列表会被 Paper 判为解析错误。
+        // 外置依赖一律走 loader，见下面的 loader 声明测试。
+        assertFalse(
+            descriptor().containsKey("libraries"),
+            "外置依赖走 loader，不写 libraries 键（空列表会让 Paper 解析报错）"
+        );
+    }
+
+    @Test
+    void loaderIsDeclaredSoExternalizedLibrariesGetDownloaded() throws IOException {
+        // 【为什么这条最关键】1.10.54 把 gson / sqlite-jdbc / snakeyaml / TabooLib common-reflex
+        // 及其 Kotlin、ASM、commons-lang3 全部移出了 JAR。运行期能拿到它们【只】靠这里声明的
+        // 加载器：loader 一旦写错或漏写，插件会在启动阶段抛 NoClassDefFoundError，
+        // 而且编译与单测都发现不了（它们用的是 Gradle 解析出来的那份坐标）。
+        assertEquals(
+            "linmumua.doudizhu.MuzPluginLoader",
+            descriptor().get("loader"),
+            "paper-plugin.yml 必须声明 loader 指向 MuzPluginLoader，否则外置依赖不会被下载"
+        );
+        assertTrue(
+            descriptor().get("loader") instanceof String,
+            "loader 必须是单个类名字符串（不是列表）"
+        );
     }
 
     @Test

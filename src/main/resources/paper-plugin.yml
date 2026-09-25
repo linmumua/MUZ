@@ -1,5 +1,12 @@
 name: MUZ
 main: linmumua.doudizhu.DoudizhuPlugin
+# 插件加载器（Paper loader API）。1.10.54 起 gson / sqlite-jdbc / snakeyaml / TabooLib
+# common-reflex 及其 Kotlin、ASM、commons-lang3 全部不在插件 JAR 里，由这个类在【插件类加载器
+# 建立之前】从 Maven 下载到服务端本地缓存（<服务端根目录>/libraries/）并加入插件 classpath。
+# 首次启动必须联网；下载失败（离线首启、仓库不可达、校验和不符）会让插件加载失败而不是半启动。
+# 库进缓存后重启不再下载。缓存边界与失败行为详见 README.md。
+# 该类只能依赖 JDK / Paper loader API / Aether，不得引用本插件或其它第三方类型。
+loader: linmumua.doudizhu.MuzPluginLoader
 version: ${version}
 api-version: "${apiVersion}"
 # Folia 支持声明（正式，2026-09-24 起）：MuzScheduler 已建立 GlobalRegionScheduler、
@@ -14,8 +21,9 @@ api-version: "${apiVersion}"
 folia-supported: true
 author: linmumua
 description: MUZ card table plugin for Paper and Purpur.
-# 不声明 libraries：MUZ 自己不需要 Paper 从 Maven 下载任何运行时，
-# SnakeYAML 已重定位打进 JAR，写个空的 libraries 键反而会让 Paper 解析报错。
+# 不声明 libraries：paper-plugin.yml 的这个键不是 Paper 插件加载第三方库的方式
+# （那是旧 Bukkit PluginLoader 的机制），外置依赖统一由上面的 loader 负责；
+# 写个空的 libraries 键反而会让 Paper 解析报错。
 # paper-plugin.yml 不支持 commands 段，/muz 改在 onEnable 里通过 CommandMap 注册。
 # 命令的描述、用法、别名和权限都挪到了 DoudizhuPlugin.registerMuzCommand()。
 dependencies:
