@@ -669,7 +669,9 @@ public final class GameTable {
             throw new IllegalStateException("这桌满了。");
         }
         if (!plugin.canAffordEntry(playerId, roomLevel)) {
-            throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, roomLevel));
+            // 门槛不足是玩家操作的常见结果，不是系统故障：用业务拒绝类型让它只提示玩家、不记系统堆栈
+            // （见 InteractionRejectionException 的判据说明）。
+            throw new InteractionRejectionException(plugin.insufficientEntryMessage(playerId, roomLevel));
         }
         if (playerNames != null && playerName != null && !playerName.isBlank()) {
             playerNames.put(playerId, playerName);
@@ -753,7 +755,7 @@ public final class GameTable {
         requireAtTable(playerId);
         ensurePhase(GamePhase.LOBBY, "现在不是准备阶段。");
         if (!readyPlayers.contains(playerId) && !plugin.canAffordEntry(playerId, roomLevel)) {
-            throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, roomLevel));
+            throw new InteractionRejectionException(plugin.insufficientEntryMessage(playerId, roomLevel));
         }
         if (readyPlayers.contains(playerId)) {
             readyPlayers.remove(playerId);
@@ -802,7 +804,8 @@ public final class GameTable {
         }
         for (UUID seat : seats) {
             if (!isBot(seat) && !plugin.canAffordEntry(seat, roomLevel)) {
-                throw new IllegalStateException(displayName(seat) + " 资格不足: " + plugin.insufficientEntryMessage(seat, roomLevel));
+                throw new InteractionRejectionException(
+                    displayName(seat) + " 资格不足: " + plugin.insufficientEntryMessage(seat, roomLevel));
             }
         }
     }

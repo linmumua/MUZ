@@ -6,6 +6,7 @@ import linmumua.doudizhu.compat.VersionCompat;
 import linmumua.doudizhu.game.SimpleBotBrain;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.InteractionRejectionException;
 import linmumua.doudizhu.game.PlayerRole;
 import linmumua.doudizhu.game.TableManager;
 import linmumua.doudizhu.game.PlayerOutputDispatcher;
@@ -3960,7 +3961,8 @@ public final class PhysicalTableManager {
         }
         UUID playerId = player.getUniqueId();
         if (switchingFromOtherDdz && !plugin.canAffordEntry(playerId, table.getRoomLevel())) {
-            throw new IllegalStateException(plugin.insufficientEntryMessage(playerId, table.getRoomLevel()));
+            // 同 GameTable 的加入/准备门槛：余额不足是业务拒绝，不是系统异常（见 InteractionRejectionException）。
+            throw new InteractionRejectionException(plugin.insufficientEntryMessage(playerId, table.getRoomLevel()));
         }
         int previousSeat = placedSeatIndex(placed, playerId);
         if (previousSeat == seatIndex) {
@@ -4002,8 +4004,19 @@ public final class PhysicalTableManager {
      *
      * <p>交互由点击驱动、同一异常可能高频复现，所以按「动作 + 异常摘要」限频：既不刷屏，也不静默吞掉。
      * 玩家提示与对局流程完全不受影响——调用方仍照旧 {@code hint(..., exception.getMessage(), RED)}。
+     *
+     * <p>【例外：业务拒绝不按系统异常留痕】{@link InteractionRejectionException} 表达的是「插件主动拒绝玩家
+     * 操作、且文本就是给玩家看的中文提示」——典型是金币/筹码门槛不足。它们是玩家操作的常见结果，不是故障，
+     * 记满堆栈只会把真正的系统故障淹没在同一种告警里（实服日志的信噪比就是这么丢的）。判据收口在这里而不是
+     * 分散到三处 catch：三处 catch 的留痕语义必须一致，玩家提示一律照旧（调用方不再改动）。
+     * 判据是**异常类型**而非消息文本——文本会随文案漂移，类型不会，也不会误伤同样抛消息的真实故障
+     * （例如 Hotbar 布局算式不闭合那种内部不一致必须继续留栈）。
      */
     private void reportInteractionFailure(String action, Player player, RuntimeException exception) {
+        if (exception instanceof InteractionRejectionException) {
+            // 业务拒绝：玩家提示由调用方的 hint(...) 照常发出，这里刻意不记日志。
+            return;
+        }
         String detail = exception == null ? null : exception.getMessage();
         String key = action + '|' + (detail == null ? "" : detail);
         long now = System.currentTimeMillis();

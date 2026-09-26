@@ -119,10 +119,18 @@ class PhysicalTableOwnerTickContractTest {
         assertTrue(dispatcher.contains(
             "public void hideEntity(UUID viewerId, Plugin plugin, UUID entityId)"),
             "PlayerOutputDispatcher 必须提供 UUID-first hideEntity 入口");
+        // 【2026-09-25 机制变更】实体可见性不再走 player lane：Paper 的 showEntity/hideEntity 会读实体状态
+        // （CraftEntity#getHandle 带 owner region 门禁），只有实体自己的 region 才合法。这里钉住
+        // 「投递到实体 owner region + 在该 lane 内按 UUID 重新解析」这条新形状（旧断言钉的是 player lane，
+        // 属于编码旧机制，已按机制变更升级，不是弱化）。
+        assertTrue(dispatcher.contains("entityRegionLane.runOnEntityRegion("),
+            "实体可见性必须经 EntityRegionLane 投递到实体 owner region");
         assertTrue(dispatcher.contains("Entity entity = Bukkit.getEntity(entityId);"),
-            "实体可见性必须在 player lane 通过 UUID 重新解析实体");
-        assertTrue(dispatcher.contains("entity != null && entity.isValid()"),
+            "投递键必须是实体 UUID，实体在执行 lane 内按 UUID 重新解析");
+        assertTrue(dispatcher.contains("!entity.isValid()"),
             "重新解析的实体必须经过有效性校验");
+        assertTrue(dispatcher.contains("if (!Bukkit.isOwnedByCurrentRegion(entity)) {"),
+            "执行 lane 内必须复核实体归属，实体中途换 region 时让位而不是硬改");
 
         int showLegacyStart = dispatcher.indexOf(
             "public void showEntity(UUID viewerId, Plugin plugin, Entity entity)");

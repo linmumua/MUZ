@@ -8,6 +8,8 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,8 +21,10 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.TableManager;
+import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.scheduler.SchedulerBackend;
 import org.bukkit.Location;
@@ -103,17 +107,63 @@ class InteractionFailureLoggingBehaviorTest {
             "换动作后的失败也必须留痕：" + logs.messages());
     }
 
+    /**
+     * 「金币门槛不足」是正常业务拒绝，只提示玩家、不按系统异常记堆栈；而未归类的异常仍必须留痕。
+     *
+     * <p>【为什么必须有这条】玩家点 JOIN 按钮但余额不够时，链路是
+     * {@code handleInteraction → joinSeat → TableManager.joinTable → GameTable.addPlayer}，
+     * 抛出的是 {@code InteractionRejectionException(insufficientEntryMessage(...))}。改造前它和
+     * 「开局定时器被调度器拒绝」那种真故障走的是同一条 catch，于是每次点按钮都在控制台刷一条带完整堆栈的
+     * WARNING——玩家只是没钱而已。判据必须是**异常类型**：本条用同一个 JOIN 按钮制造两种结果，
+     * 一种被归类为业务拒绝（零日志），一种没被归类（照旧留痕），以此证明分类没有退化成「按文本猜」。
+     */
+    @Test
+    void 金币门槛业务拒绝只提示不记堆栈而其它异常仍留痕() throws Exception {
+        CapturedLogs logs = new CapturedLogs();
+        Fixture fixture = fixture(logs.logger());
+        UUID playerId = UUID.fromString("00000000-0000-0000-0000-00000000a002");
+        fixture.enableThresholdRoom(TableLevel.LOW);
+        Player player = playerStub(playerId, "Alice", fixture.world);
+
+        // 情形一：门槛房已放置、座位空着 → joinSeat 进门槛分支，addPlayer 抛业务拒绝。
+        fixture.registerJoinableTable("t-low", TableLevel.LOW);
+        fixture.placeTable("t-low");
+        UUID rejectEntityId = UUID.fromString("00000000-0000-0000-0000-00000000b101");
+        fixture.bindAction(rejectEntityId, "t-low", PhysicalTableManager.ButtonAction.JOIN, 0);
+
+        boolean handled = fixture.manager.handleInteraction(
+            player, actionEntityStub(rejectEntityId, fixture.world));
+
+        assertTrue(handled, "业务拒绝也必须被当成已处理返回 true，玩家提示与流程语义不变");
+        assertEquals(0, logs.records.size(),
+            "金币门槛不足是正常业务拒绝，不该按系统异常记堆栈（实服就是这条在刷屏）：" + logs.messages());
+
+        // 情形二：同一 JOIN 按钮，但该桌【没有】放置记录 → joinSeat 抛未归类的 IllegalStateException。
+        fixture.registerJoinableTable("t-noplaced", TableLevel.LOW);
+        UUID anomalyEntityId = UUID.fromString("00000000-0000-0000-0000-00000000b102");
+        fixture.bindAction(anomalyEntityId, "t-noplaced", PhysicalTableManager.ButtonAction.JOIN, 0);
+
+        fixture.manager.handleInteraction(player, actionEntityStub(anomalyEntityId, fixture.world));
+
+        assertEquals(1, logs.records.size(),
+            "没被归类为业务拒绝的异常仍必须留痕，否则分类会把真故障一起吞掉：" + logs.messages());
+        assertNotNull(logs.records.get(0).getThrown(),
+            "未被归类的异常仍必须带上堆栈，否则实服无法定位");
+    }
+
     // ---- 夹具 ----
 
     private static final class Fixture {
         private final PhysicalTableManager manager;
         private final TableManager tableManager;
         private final World world;
+        private final DoudizhuPlugin plugin;
 
-        private Fixture(PhysicalTableManager manager, TableManager tableManager, World world) {
+        private Fixture(PhysicalTableManager manager, TableManager tableManager, World world, DoudizhuPlugin plugin) {
             this.manager = manager;
             this.tableManager = tableManager;
             this.world = world;
+            this.plugin = plugin;
         }
 
         /**
@@ -145,6 +195,75 @@ class InteractionFailureLoggingBehaviorTest {
                 (Map<UUID, Object>) field(PhysicalTableManager.class, "actionBindings").get(manager);
             bindings.put(entityId, binding);
         }
+
+        /**
+         * 插一张「可加入」的领域桌：座位为空、阶段 LOBBY、按给定房间等级计门槛。
+         *
+         * <p>与 {@link #registerTable} 的差别正是本测试要的：座位里【不能】有这个玩家，否则
+         * {@code addPlayer} 会在 {@code contains(playerId)} 处直接返回，走不到门槛判定；
+         * 且必须把 {@code plugin} 真正接上，否则 {@code canAffordEntry} 会在 null 插件上 NPE。
+         */
+        private void registerJoinableTable(String name, TableLevel level) throws Exception {
+            GameTable table = (GameTable) unsafe().allocateInstance(GameTable.class);
+            setField(table, "plugin", plugin);
+            setField(table, "name", name);
+            setField(table, "phase", GamePhase.LOBBY);
+            setField(table, "roomLevel", level);
+            setField(table, "seats", new ArrayList<UUID>());
+            setField(table, "readyPlayers", new HashSet<UUID>());
+            @SuppressWarnings("unchecked")
+            Map<String, GameTable> tables = (Map<String, GameTable>) field(TableManager.class, "tables").get(tableManager);
+            tables.put(name.trim().toLowerCase(java.util.Locale.ROOT), table);
+        }
+
+        /** 给放置表登记一个「未挂 Vault 也未开筹码」的门槛房配置，使 {@code canAffordEntry} 恒为 false。 */
+        private void enableThresholdRoom(TableLevel level) throws Exception {
+            Class<?> profileType = Class.forName("linmumua.doudizhu.DoudizhuPlugin$RoomLevelProfile");
+            var canonical = profileType.getDeclaredConstructors()[0];
+            canonical.setAccessible(true);
+            // economyEnabled=true 才会进入门槛判定；multiplier>0 是 isRoomEconomyEnabled 的另一半。
+            Object profile = canonical.newInstance(level, level.defaultLabel(), 1.0d, true);
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Map<TableLevel, Object> profiles = (Map) new EnumMap<>(TableLevel.class);
+            profiles.put(level, profile);
+            setField(plugin, "roomLevelProfiles", profiles);
+        }
+
+        /**
+         * 登记一张已放置表（{@code placedTables}）——{@code joinSeat} 需要它才进得了座位门槛分支。
+         *
+         * <p>{@code PlacedTable} 是生产私有 record，这里按它的规范构造器实例化，只填本路径会读到的
+         * {@code tableName} 与可变的 {@code seatAssignments}，其余组件给空集合/null（该路径不读它们）。
+         */
+        private void placeTable(String name) throws Exception {
+            Class<?> placedType = Class.forName("linmumua.doudizhu.world.PhysicalTableManager$PlacedTable");
+            var canonical = placedType.getDeclaredConstructors()[0];
+            canonical.setAccessible(true);
+            Object placed = canonical.newInstance(
+                name,
+                null,
+                0.0f,
+                null,
+                new ArrayList<Long>(),
+                new ArrayList<UUID>(),
+                new ArrayList<UUID>(),
+                new ArrayList<Object>(),
+                new LinkedHashMap<Integer, UUID>(),
+                new ArrayList<Object>(),
+                new LinkedHashMap<UUID, List<UUID>>(),
+                new LinkedHashMap<UUID, Object>(),
+                new LinkedHashMap<UUID, List<UUID>>(),
+                new LinkedHashMap<UUID, Object>(),
+                null,
+                null,
+                new ArrayList<UUID>(),
+                new ArrayList<UUID>(),
+                new ArrayList<UUID>());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> placedTables =
+                (Map<String, Object>) field(PhysicalTableManager.class, "placedTables").get(manager);
+            placedTables.put(name.trim().toLowerCase(java.util.Locale.ROOT), placed);
+        }
     }
 
     private static Fixture fixture(Logger logger) throws Exception {
@@ -158,7 +277,7 @@ class InteractionFailureLoggingBehaviorTest {
         setField(plugin, "tableManager", tableManager);
         PhysicalTableManager manager = new PhysicalTableManager(plugin);
         setField(plugin, "physicalTableManager", manager);
-        return new Fixture(manager, tableManager, eyeWorld());
+        return new Fixture(manager, tableManager, eyeWorld(), plugin);
     }
 
     /** 眼睛位置取 (0,0,0)，判定框取 (0,0,0)..(1,1,1)，按钮距离判为 0，必在 3 格范围内。 */

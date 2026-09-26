@@ -1,5 +1,6 @@
 package linmumua.doudizhu.world;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -21,6 +22,8 @@ import org.junit.jupiter.api.Test;
 class InteractionFailureLoggingContractTest {
     private static final Path MANAGER =
         Path.of("src/main/java/linmumua/doudizhu/world/PhysicalTableManager.java");
+    private static final Path GAME_TABLE =
+        Path.of("src/main/java/linmumua/doudizhu/game/GameTable.java");
 
     /**
      * 三处"只提示"catch 都必须改成"先留痕、再照旧提示玩家"。
@@ -62,6 +65,44 @@ class InteractionFailureLoggingContractTest {
             "必须把异常本体（含堆栈）交给 logger，只记 getMessage() 会让实服看不到堆栈");
         assertTrue(helper.contains("interactionFailureLogMillis") && helper.contains("INTERACTION_FAILURE_LOG_INTERVAL_MILLIS"),
             "留痕必须限频：同一动作+同一异常在窗口内只记一条，否则高频点击会刷屏");
+    }
+
+    /**
+     * 金币/筹码门槛这条「业务拒绝」必须在【所有】抛点统一用 {@code InteractionRejectionException}。
+     *
+     * <p>【为什么用源码契约而不是行为测试】四个抛点（加入、准备、开局资格复核、换桌门槛）共享同一个分类点
+     * {@code reportInteractionFailure}，行为测试只能同时驱动其中一条路径；只要有一个抛点退回裸
+     * {@code IllegalStateException}，那一条又会按系统异常刷完整堆栈——正是本轮要修掉的缺陷，而且它不会让
+     * 行为测试变红。这里把四个抛点一起钉住，并确认分类点是按【类型】判定（标了类型却不分类等于没修）。
+     */
+    @Test
+    void 门槛不足必须一律走业务拒绝类型而不是裸IllegalStateException() throws IOException {
+        String table = Files.readString(GAME_TABLE);
+        String manager = Files.readString(MANAGER);
+
+        assertEquals(3, occurrences(table, "new InteractionRejectionException("),
+            "加入/准备/开局资格三处门槛都必须标成业务拒绝，漏一个就还会刷一条系统堆栈");
+        assertEquals(1, occurrences(manager, "new InteractionRejectionException("),
+            "换桌门槛也必须标成业务拒绝");
+        assertEquals(0, occurrences(table, "throw new IllegalStateException(plugin.insufficientEntryMessage"),
+            "门槛拒绝不得退回裸 IllegalStateException——那正是本轮要修掉的刷堆栈缺陷");
+        assertEquals(0, occurrences(manager, "throw new IllegalStateException(plugin.insufficientEntryMessage"),
+            "换桌门槛同样不得退回裸 IllegalStateException");
+
+        String helper = methodBody(MANAGER,
+            "private void reportInteractionFailure(String action, Player player, RuntimeException exception)");
+        assertTrue(helper.contains("instanceof InteractionRejectionException"),
+            "留痕助手必须按【类型】识别业务拒绝：只标注类型而不在分类点判定等于没修");
+    }
+
+    private static int occurrences(String source, String needle) {
+        int count = 0;
+        int index = source.indexOf(needle);
+        while (index >= 0) {
+            count++;
+            index = source.indexOf(needle, index + needle.length());
+        }
+        return count;
     }
 
     private static void assertCatchLogsAndHints(String signature, String what) throws IOException {
