@@ -117,6 +117,9 @@ final class RegionizedCoreDetector {
                 Class.forName(className, false, RegionizedCoreDetector.class.getClassLoader());
                 return true;
             },
-            message -> org.bukkit.Bukkit.getLogger().warning("[MUZ] " + message));
+            // 这是【共享】的 Bukkit logger：既不能在它上面装门禁（会波及别的插件），本类也拿不到
+            // 插件自己的 logger，故显式经统一门禁转发 —— debug.enabled=false 时直接不输出。
+            message -> linmumua.doudizhu.log.MuzLogGate.warn(
+                org.bukkit.Bukkit.getLogger(), "[MUZ] " + message));
     }
 }

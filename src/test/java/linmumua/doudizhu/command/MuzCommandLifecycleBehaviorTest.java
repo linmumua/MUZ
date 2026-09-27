@@ -466,6 +466,8 @@ class MuzCommandLifecycleBehaviorTest {
         private CapturedLogs() {
             this.logger = Logger.getLogger("muz-command-lifecycle-" + System.nanoTime());
             this.logger.setUseParentHandlers(false);
+            // 与 installLogGate() 同形：把统一门禁装到本插件 logger 上，使本用例在 debug=true（fail-open 初值）下断言 WARNING。
+            linmumua.doudizhu.log.MuzLogGate.install(logger);
             this.logger.setLevel(Level.ALL);
             this.logger.addHandler(new Handler() {
                 @Override

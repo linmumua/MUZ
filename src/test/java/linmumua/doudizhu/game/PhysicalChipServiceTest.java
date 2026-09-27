@@ -295,6 +295,8 @@ class PhysicalChipServiceTest {
         RecordingHandler handler = new RecordingHandler();
         Logger logger = Logger.getLogger("PhysicalChipServiceRollbackTest");
         logger.setUseParentHandlers(false);
+        // 与 installLogGate() 同形：把统一门禁装到本插件 logger 上，使本用例在 debug=true（fail-open 初值）下断言 WARNING。
+        linmumua.doudizhu.log.MuzLogGate.install(logger);
         logger.addHandler(handler);
         try {
             TestRuntime runtime = new TestRuntime();
@@ -329,6 +331,8 @@ class PhysicalChipServiceTest {
         RecordingHandler handler = new RecordingHandler();
         Logger logger = Logger.getLogger("PhysicalChipServiceRollbackFailureTest");
         logger.setUseParentHandlers(false);
+        // 与 installLogGate() 同形：把统一门禁装到本插件 logger 上，使本用例在 debug=true（fail-open 初值）下断言 WARNING。
+        linmumua.doudizhu.log.MuzLogGate.install(logger);
         logger.addHandler(handler);
         try {
             TestRuntime runtime = new TestRuntime();

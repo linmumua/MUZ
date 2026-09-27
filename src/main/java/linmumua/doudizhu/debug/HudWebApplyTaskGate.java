@@ -7,7 +7,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -184,7 +183,7 @@ final class HudWebApplyTaskGate implements AutoCloseable {
                     exposed.complete(result);
                 }
             } catch (Throwable throwable) {
-                LOGGER.log(Level.WARNING, "Debug Web HUD raw 结果映射失败。", throwable);
+                linmumua.doudizhu.log.MuzLogGate.warn(LOGGER, "Debug Web HUD raw 结果映射失败。", throwable);
                 exposed.completeExceptionally(throwable);
             }
         });
@@ -214,7 +213,7 @@ final class HudWebApplyTaskGate implements AutoCloseable {
         try {
             rawFinished.run();
         } catch (Throwable throwable) {
-            LOGGER.log(Level.WARNING, "Debug Web HUD raw 任务收尾回调失败。", throwable);
+            linmumua.doudizhu.log.MuzLogGate.warn(LOGGER, "Debug Web HUD raw 任务收尾回调失败。", throwable);
         }
     }
 
@@ -226,7 +225,7 @@ final class HudWebApplyTaskGate implements AutoCloseable {
         try {
             task.exposed.complete(((Supplier<T>) inactiveResult).get());
         } catch (Throwable throwable) {
-            LOGGER.log(Level.WARNING, "Debug Web HUD 失效任务结果生成失败。", throwable);
+            linmumua.doudizhu.log.MuzLogGate.warn(LOGGER, "Debug Web HUD 失效任务结果生成失败。", throwable);
             task.exposed.completeExceptionally(throwable);
         }
     }

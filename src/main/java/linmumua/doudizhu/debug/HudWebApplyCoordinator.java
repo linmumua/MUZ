@@ -486,11 +486,14 @@ public final class HudWebApplyCoordinator implements AutoCloseable {
             cause = cause.getCause();
         }
         String detail = "HUD 资源应用失败：" + String.valueOf(cause.getMessage());
+        // 首选插件自有 logger（统一门禁按 debug.enabled 决定是否输出）；仅当它不可用时退回类名 logger，
+        // 同样经门禁转发，避免绕过开关。
         try {
-            plugin.getLogger().warning(detail);
+            linmumua.doudizhu.log.MuzLogGate.warn(plugin.getLogger(), detail);
         } catch (Throwable loggingFailure) {
-            java.util.logging.Logger.getLogger(HudWebApplyCoordinator.class.getName())
-                .log(java.util.logging.Level.WARNING, detail, loggingFailure);
+            linmumua.doudizhu.log.MuzLogGate.warn(
+                java.util.logging.Logger.getLogger(HudWebApplyCoordinator.class.getName()),
+                detail, loggingFailure);
         }
         return ApplyResult.failed(controller.snapshot(), List.of(detail));
     }

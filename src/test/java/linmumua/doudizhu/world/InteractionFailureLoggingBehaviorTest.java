@@ -24,6 +24,7 @@ import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.TableManager;
+import linmumua.doudizhu.log.MuzLogGate;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.scheduler.MuzScheduler;
 import linmumua.doudizhu.scheduler.SchedulerBackend;
@@ -32,6 +33,7 @@ import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.util.BoundingBox;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import sun.misc.Unsafe;
 
@@ -151,6 +153,65 @@ class InteractionFailureLoggingBehaviorTest {
             "未被归类的异常仍必须带上堆栈，否则实服无法定位");
     }
 
+    /**
+     * 【开关语义：debug.enabled=false 时本插件的全部 WARNING 静默（含故障类），SEVERE 不受影响】
+     *
+     * <p>这是 linmumua 明确要求、覆盖历史约定的行为：以前刻意让故障类 WARNING 永远留痕，
+     * 现在改为「{@code debug.enabled=false}（出厂默认）→ 本插件的所有 WARNING 都不输出」，
+     * 需要排查故障时把 {@code debug.enabled} 改成 true 再 {@code /muz reload} 即可恢复。
+     *
+     * <p>用 {@link Unsafe} 夹具驱动**真实** {@code handleInteraction}（按钮动作拒绝），在插件 logger 上
+     * 装好统一门禁（与 {@code installLogGate} 同形），只切换开关：
+     * <ul>
+     *   <li>关闭 → 连这条交互失败 WARNING 也必须被静默（0 条）；</li>
+     *   <li>打开 → WARNING 恢复，且【堆栈与限频语义不变】：带异常本体，窗口内重复只落一条。</li>
+     * </ul>
+     * 守的风险：把门禁写成「按名字/按文本挑诊断」会漏掉直接 Logger 路径；写成「不看级别、一律吞」
+     * 又会连 SEVERE 一起吞（后者由 {@code MuzLogGateTest} 用 SEVERE 单独钉住）。
+     *
+     * <p>两段用【不同动作】而不是同一动作：限频键是「动作 + 异常摘要」且与开关无关，同一动作在 debug
+     * 关闭时也会推进限频窗口，从而把紧随其后的 debug=true 断言挡掉——那会测成假象。副作用是「debug 打开
+     * 不会补发被限频挡下的旧消息」，这属预期行为。
+     */
+    @Test
+    void debug关闭时交互失败WARNING静默而开启时带堆栈且限频不变() throws Exception {
+        CapturedLogs logs = new CapturedLogs();
+        Fixture fixture = fixture(logs.logger());
+        UUID playerId = UUID.fromString("00000000-0000-0000-0000-00000000a003");
+        fixture.registerTable("t1", playerId);
+        UUID passEntityId = UUID.fromString("00000000-0000-0000-0000-00000000b201");
+        fixture.bindAction(passEntityId, "t1", PhysicalTableManager.ButtonAction.PASS_TURN, 0);
+        UUID readyEntityId = UUID.fromString("00000000-0000-0000-0000-00000000b202");
+        fixture.bindAction(readyEntityId, "t1", PhysicalTableManager.ButtonAction.READY, 0);
+        Player player = playerStub(playerId, "Alice", fixture.world);
+
+        // 开关关闭：本插件的全部 WARNING（含这条交互失败）都必须被门禁静默。
+        fixture.setDebugEnabled(false);
+        fixture.manager.handleInteraction(player, actionEntityStub(passEntityId, fixture.world));
+        assertEquals(0, logs.records.size(),
+            "debug.enabled=false 必须静默本插件的全部 WARNING（含故障类）：" + logs.messages());
+
+        // 开关打开（等价 /muz reload 后）：换一个动作，WARNING 恢复且保留堆栈与限频语义。
+        fixture.setDebugEnabled(true);
+        fixture.manager.handleInteraction(player, actionEntityStub(readyEntityId, fixture.world));
+        assertEquals(1, logs.records.size(),
+            "debug.enabled=true 时交互失败必须恢复为一条 WARNING：" + logs.messages());
+        assertEquals(Level.WARNING, logs.records.get(0).getLevel(), "恢复后仍必须是 WARNING");
+        assertNotNull(logs.records.get(0).getThrown(),
+            "恢复后必须带异常本体（堆栈），否则 debug 打开也定位不到根因");
+
+        // 限频语义与开关无关：窗口内重复同一动作仍只留一条。
+        fixture.manager.handleInteraction(player, actionEntityStub(readyEntityId, fixture.world));
+        assertEquals(1, logs.records.size(),
+            "限频必须照旧生效，否则等于换个开关刷屏：" + logs.messages());
+    }
+
+    /** 门禁开关是静态全局状态：每个用例后恢复 fail-open 初值，避免用例间互相污染。 */
+    @AfterEach
+    void restoreGateDefault() {
+        MuzLogGate.setDebugEnabled(true);
+    }
+
     // ---- 夹具 ----
 
     private static final class Fixture {
@@ -264,10 +325,22 @@ class InteractionFailureLoggingBehaviorTest {
                 (Map<String, Object>) field(PhysicalTableManager.class, "placedTables").get(manager);
             placedTables.put(name.trim().toLowerCase(java.util.Locale.ROOT), placed);
         }
+
+        /**
+         * 切换门禁开关（等价 {@code debug.enabled} 经 {@code installLogGate} / {@code /muz reload} 写入的快照）。
+         *
+         * <p>门禁是全局静态的；{@code fixture(Logger)} 已把门禁装到被注入的插件 logger 上，所以这里只负责
+         * 翻转开关。用例结束由 {@link InteractionFailureLoggingBehaviorTest#restoreGateDefault()} 复位。
+         */
+        private void setDebugEnabled(boolean enabled) {
+            MuzLogGate.setDebugEnabled(enabled);
+        }
     }
 
     private static Fixture fixture(Logger logger) throws Exception {
         DoudizhuPlugin plugin = (DoudizhuPlugin) unsafe().allocateInstance(DoudizhuPlugin.class);
+        // 与 installLogGate() 同形：把统一门禁装到本插件的 logger 上，否则本用例无法验证开关语义。
+        MuzLogGate.install(logger);
         // Unsafe 分配出的插件实例没有 PluginMeta，而管理器构造器要用 NamespacedKey(plugin, …) 取 namespace。
         setField(plugin, "pluginMeta", pluginMetaStub());
         setField(plugin, "logger", logger);

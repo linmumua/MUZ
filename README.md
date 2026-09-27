@@ -38,6 +38,16 @@ Gradle 构建期自动裁切牌面贴图、生成字形码位和 CraftEngine 配
 
 渲染偏移、HUD 档位、音效、经济、房间等级、机器人行为全部可配。玩家个人偏好（手牌微调等）走独立存储，不混进全局配置。
 
+### 调试开关
+
+`config.yml` 的 `debug` 段提供调试开关，**默认全部关闭**；改动后执行 `/muz reload` 即可生效，无需重启服务端。
+
+- `debug.enabled`（默认 `false`）：**MUZ WARNING 日志总开关**。关闭时本插件**所有** `WARNING` 都不输出，开启后 `WARNING` 全部恢复（原有的限频与堆栈语义不变）。它只影响日志，不改变任何渲染、对局或资源行为。
+- `debug.table-spacing`（默认 `0`）：`/muz debug add` 生成多张观察桌时桌与桌之间的间距。
+- `debug.web-ui.enabled` / `debug.web-ui.port`（默认 `false` / `2000`）：Debug Web HUD 编辑器，详见下一节。
+
+该开关只作用于本插件自己的日志，**不会影响别的插件**；`SEVERE`（严重错误）**不受开关影响**，任何时候都会输出。玩家可见提示（ActionBar / 聊天 / 标题）与业务拒绝提示也不受该开关影响。需要排查问题时把 `debug.enabled` 改成 `true` 再 `/muz reload`，`WARNING` 立即恢复。
+
 ## 安装
 
 1. 从 [Releases](https://github.com/linmumua/MUZ/releases) 下载与服务器版本对应的三个文件：

@@ -723,6 +723,91 @@ class TrickHudSettingsTest {
         }
     }
 
+    /**
+     * 【debug.enabled 是诊断类告警的开关】同一个会重叠的组合，只改这一个键，结果必须不同。
+     *
+     * <p>重叠诊断是「两行各自随便调」方案唯一的防线，但它属于诊断而非错误，所以默认（开关关闭）
+     * 不许输出 —— 否则每个默认配置的服主一进服就刷一条他并不关心的布局告警，真正的错误会被淹掉。
+     * 开关打开时必须输出，否则这个开关开不开毫无区别，等于没有诊断。
+     */
+    @Test
+    void debug关闭时重叠诊断不输出_开启时才输出() {
+        // 与「两行重叠时必须留警告」用的是同一组重叠值，只差 debug.enabled。
+        int cardOffset = PackAssets.cardGlyphDownOffsetAt(0);
+        int scale = PackAssets.AVATAR_PIXEL_SCALE_TIERS[0];
+
+        warnings.clear();
+        TrickHudService.readSettings(
+            configWith(Map.of(
+                "trick-hud.offset-down", cardOffset,
+                "trick-hud.avatar-offset-down", 0,
+                "trick-hud.avatar-scale", scale
+            )),
+            warnings::add
+        );
+        assertTrue(warnings.isEmpty(),
+            "debug.enabled 默认关闭时不许输出布局重叠诊断（它属诊断类，不是错误）：" + warnings);
+
+        warnings.clear();
+        TrickHudService.readSettings(
+            configWith(Map.of(
+                "trick-hud.offset-down", cardOffset,
+                "trick-hud.avatar-offset-down", 0,
+                "trick-hud.avatar-scale", scale,
+                "debug.enabled", true
+            )),
+            warnings::add
+        );
+        assertEquals(1, warnings.size(),
+            "debug.enabled=true 时必须输出重叠诊断，否则开关开不开都一样：" + warnings);
+        assertTrue(warnings.getFirst().contains("avatar-offset-down"),
+            "诊断要指名该改哪一项：" + warnings);
+    }
+
+    /**
+     * 【readSettings 是纯函数：非法配置诊断的文本与 debug.enabled 无关，是否落日志由注入的 sink 决定】
+     *
+     * <p>{@code readSettings} 只把诊断文本交给调用方的 {@code Consumer<String>}，它自己不做日志开关判定
+     * （除重叠诊断那条按需求一直只读 {@code debug.enabled} 外）。生产的 sink 是
+     * {@code message -> plugin.getLogger().warning(message)}，而门禁装在插件 logger 上，所以
+     * {@code debug.enabled=false} 时这些 WARNING 由门禁在 logger 层被静默（见 {@code MuzLogGateTest}
+     * 与 {@code MuzLogGateCoverageContractTest}），而不是在 readSettings 里被吞。
+     *
+     * <p>本条把同一组非法配置分别配在 {@code debug.enabled=false} 与 {@code =true} 下，断言
+     * 【产出的诊断文本完全一致】——证明门禁没有（也不应该）在纯函数里掺一脚：一旦有人在 readSettings
+     * 里按下开关吞掉非法配置诊断，这里会变红。
+     */
+    @Test
+    void readSettings是纯函数非法配置诊断不受debug开关影响而由sink决定() {
+        Map<String, Object> invalid = Map.of(
+            "trick-hud.card-height", 999,   // 越界 → 回退 + 必须产出诊断
+            "trick-hud.card-step", 0,       // 非正 → 回退 + 必须产出诊断
+            "trick-hud.counter.gap", -3     // 负值 → 回退 + 必须产出诊断
+        );
+
+        warnings.clear();
+        TrickHudService.readSettings(configWith(invalid), warnings::add);
+        List<String> withDebugOff = List.copyOf(warnings);
+
+        warnings.clear();
+        Map<String, Object> withDebugOn = new java.util.LinkedHashMap<>(invalid);
+        withDebugOn.put("debug.enabled", true);
+        TrickHudService.readSettings(configWith(withDebugOn), warnings::add);
+        List<String> withDebugOnList = List.copyOf(warnings);
+
+        assertEquals(3, withDebugOff.size(),
+            "三类非法配置都必须各自产出诊断文本（纯函数行为，与开关无关）：" + withDebugOff);
+        assertTrue(withDebugOff.stream().anyMatch(w -> w.contains("card-height")),
+            "越界的 card-height 必须产出诊断：" + withDebugOff);
+        assertTrue(withDebugOff.stream().anyMatch(w -> w.contains("card-step")),
+            "非正的 card-step 必须产出诊断：" + withDebugOff);
+        assertTrue(withDebugOff.stream().anyMatch(w -> w.contains("trick-hud.counter.gap")),
+            "负的 counter.gap 必须产出诊断：" + withDebugOff);
+        assertEquals(withDebugOff, withDebugOnList,
+            "readSettings 是纯函数，非法配置诊断文本不得随 debug.enabled 变化（开关由 logger 层门禁负责）："
+                + withDebugOff + " vs " + withDebugOnList);
+    }
+
     /** 总开关要能真的关掉，否则「不想要这条 BossBar」的服主没有退路。 */
     @Test
     void disabledSwitchIsHonoured() {

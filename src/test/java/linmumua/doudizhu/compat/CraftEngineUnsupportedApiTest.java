@@ -222,6 +222,8 @@ class CraftEngineUnsupportedApiTest {
 
         private CollectingLogs() {
             logger.setUseParentHandlers(false);
+            // 与 installLogGate() 同形：把统一门禁装到本插件 logger 上，使本用例在 debug=true（fail-open 初值）下断言 WARNING。
+            linmumua.doudizhu.log.MuzLogGate.install(logger);
             logger.setLevel(Level.ALL);
             logger.addHandler(new Handler() {
                 @Override

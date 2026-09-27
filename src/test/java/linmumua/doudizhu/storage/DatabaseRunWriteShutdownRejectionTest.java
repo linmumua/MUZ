@@ -155,6 +155,8 @@ class DatabaseRunWriteShutdownRejectionTest {
             // 用唯一名字避免与其它测试共享 JUL logger，也不向上传播污染控制台。
             this.logger = Logger.getLogger("muz-db-runwrite-" + System.nanoTime());
             this.logger.setUseParentHandlers(false);
+            // 与 installLogGate() 同形：把统一门禁装到本插件 logger 上，使本用例在 debug=true（fail-open 初值）下断言 WARNING。
+            linmumua.doudizhu.log.MuzLogGate.install(logger);
             this.logger.setLevel(Level.ALL);
             this.logger.addHandler(new Handler() {
                 @Override

@@ -313,8 +313,10 @@ public class GadgetBoxGuiService implements Listener {
         try {
             saveListener.accept(playerId);
         } catch (RuntimeException exception) {
-            java.util.logging.Logger.getLogger(GadgetBoxGuiService.class.getName()).log(
-                java.util.logging.Level.WARNING, "道具箱已保存，但预览通知失败：" + playerId, exception);
+            // 该服务没有插件 logger 引用，用类名 logger；经统一门禁转发，debug.enabled=false 时不输出。
+            linmumua.doudizhu.log.MuzLogGate.warn(
+                java.util.logging.Logger.getLogger(GadgetBoxGuiService.class.getName()),
+                "道具箱已保存，但预览通知失败：" + playerId, exception);
         }
     }
 

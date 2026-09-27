@@ -365,11 +365,14 @@ public final class HudOverlayWriter {
     }
 
     private void warn(String message) {
+        // 首选插件自有 logger（其上的统一门禁会按 debug.enabled 决定是否输出）；
+        // 只有插件 logger 不可用时才退回类名 logger，同样经门禁转发。
         try {
-            plugin.getLogger().warning(message);
+            linmumua.doudizhu.log.MuzLogGate.warn(plugin.getLogger(), message);
         } catch (Throwable loggingFailure) {
-            java.util.logging.Logger.getLogger(HudOverlayWriter.class.getName())
-                .warning(message + "（日志通道不可用：" + loggingFailure.getMessage() + "）");
+            linmumua.doudizhu.log.MuzLogGate.warn(
+                java.util.logging.Logger.getLogger(HudOverlayWriter.class.getName()),
+                message + "（日志通道不可用：" + loggingFailure.getMessage() + "）");
         }
     }
 

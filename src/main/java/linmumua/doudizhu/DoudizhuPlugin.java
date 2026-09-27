@@ -39,6 +39,7 @@ import linmumua.doudizhu.listener.HandGuiListener;
 import linmumua.doudizhu.listener.PlayerConnectionListener;
 import linmumua.doudizhu.listener.TableWorldLifecycleListener;
 import linmumua.doudizhu.listener.WorldTableInteractionListener;
+import linmumua.doudizhu.log.MuzLogGate;
 import linmumua.doudizhu.placeholder.MuzPlaceholderExpansion;
 import linmumua.doudizhu.room.TableLevel;
 import linmumua.doudizhu.scheduler.MuzScheduler;
@@ -451,8 +452,37 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * 装配统一日志门禁（见 {@link MuzLogGate}）。
+     *
+     * <p>【做两件事：写快照 + 把门禁装到本插件自己的 logger 上】门禁是一个 {@link java.util.logging.Filter}，
+     * 只装在 【本插件自己的】logger 上（{@code getLogger()} 以及本插件兜底用的 {@code "MUZ"} 命名 logger），
+     * 绝不装到 root / 服务端共享 logger 上 —— 那样会连别的插件的 WARNING 一起吞掉。
+     * 装上之后，本插件经 {@code getLogger()} 发出的【全部】WARNING（含故障类）都受 {@code debug.enabled}
+     * 控制，SEVERE 一律放行。这不是「只门控诊断」——按 linmumua 的明确要求，{@code debug=false} 时
+     * 本插件的 WARNING 全部静默，故障排查改由 {@code debug.enabled=true} + {@code /muz reload} 打开。
+     *
+     * <p>【为什么放在 onEnable 的第一句】本插件最早的刷新就可能发 WARNING，先把门禁装好，
+     * 避免用 fail-open 的初值放行一批本该收敛的告警。
+     *
+     * <p>【读写不到配置时不留痕、不抛异常】{@code yamlConfig()} 缺键按 false（与出厂默认一致）；
+     * 门禁是横切关注点，不能反过来把插件启动搞失败。
+     */
+    private void installLogGate() {
+        MuzLogGate.setDebugEnabled(debugLoggingEnabled());
+        MuzLogGate.install(getLogger());
+        MuzLogGate.install(java.util.logging.Logger.getLogger("MUZ"));
+    }
+
+    /** 读取 {@code debug.enabled} 快照；缺键按 false（与 config.yml 出厂默认一致）。 */
+    private boolean debugLoggingEnabled() {
+        return yamlConfig().getBoolean("debug.enabled", false);
+    }
+
     @Override
     public void onEnable() {
+        // 统一日志门禁先装配：此后本插件经 getLogger() 出口发出的 WARNING 全部受 debug.enabled 控制。
+        installLogGate();
         // 关服时保存玩家设置会输出空映射，那条 FLOW 分支的 Emitter 内部类必须在此刻加载好：
         // onDisable 阶段 Paper 已不再为插件 ClassLoader 提供新类。
         MuzYamlConfig.warmUpFlowEmitter();
@@ -3575,6 +3605,9 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         hintGroupLimit = cfgInt("hints.max-groups", 6);
         debugTableSpacing = cfgDouble("debug.table-spacing", 6.5);
+        // 日志门禁与 debug 段同源：loadRenderSettings 每次 reload 都会跑，改完 debug.enabled 后
+        // /muz reload 立即生效，不需要重启服务端。
+        MuzLogGate.setDebugEnabled(debugLoggingEnabled());
         vaultEconomyEnabled = yamlConfig().getBoolean("economy.vault.enabled", true);
         chipPaymentEnabled = yamlConfig().getBoolean("economy.payment.use-chip", false);
         vaultDoudizhuCurrencyPerPoint = Math.max(0.0001, cfgDouble("economy.vault.doudizhu.currency-per-point", 1.0));

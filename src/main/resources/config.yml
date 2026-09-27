@@ -426,9 +426,11 @@ hints:
   max-groups: 0  # 默认 6
 
 debug:
-  # 是否输出 Trick HUD 的布局诊断（例如头像与牌行重叠提示）。
-  # 默认关闭；开启只增加诊断告警，不修改任何 HUD 偏移、不关闭正式 HUD，
-  # 资源未就绪或其它非法配置错误仍会照常提示。
+  # 是否输出 MUZ 的 WARNING 日志。默认关闭。
+  # 关闭时，本插件发出的所有 WARNING（含各种失败/告警）都不输出，只保留 SEVERE（含 Error 级）；
+  # 不修改任何 HUD 偏移、不关闭正式 HUD、也不影响玩家可见提示（ActionBar/聊天/标题仍照常发出）。
+  # 开启后 WARNING 全部恢复（原有的限频与堆栈语义不变），排查问题时可临时打开。
+  # 改动后执行 /muz reload 即可生效，无需重启服务端。
   enabled: false
   # /muz debug add 生成多张观察桌时，桌与桌之间的间距
   table-spacing: 0  # 默认 6.50
