@@ -3644,6 +3644,11 @@ public final class DoudizhuPlugin extends JavaPlugin {
         boolean changed = migrateMissingCounterOffsetDown();
         changed |= migrateRetiredHotbarConfig();
         changed |= mergeDefaultYamlConfig();
+        // 【为什么在合并模板之后再补一次】：合并依赖「打包模板里有这个键」，模板一旦漏键
+        // （旧包升级、或将来改模板时漏写）缺键就再也补不回来，用户删掉键后 /muz reload 也看不到它回来。
+        // 所以 debug 段的两个键额外做一次与模板无关的「缺键才补」，与既有 debug.web-ui.* 的补键写法一致。
+        changed |= ensureDebugConfig();
+
         changed |= migrateLegacyFurnitureConfig(FurnitureType.TABLE);
         changed |= migrateLegacyFurnitureConfig(FurnitureType.CHAIR);
         changed |= migrateLegacyRenderConfig();
@@ -3658,6 +3663,42 @@ public final class DoudizhuPlugin extends JavaPlugin {
         if (changed) {
             saveYamlConfig();
         }
+    }
+
+    /**
+     * 补 {@code debug} 段的缺键；存在就跳过，绝不覆盖用户值。
+     *
+     * <p>【为什么不能只靠 mergeDefaultYamlConfig】：那次合并以「打包模板里存在该键」为前提。
+     * {@code debug.enabled} 是 1.10.58 才进模板的键，1.10.57 及更早的包里 {@code debug} 段只有
+     * {@code table-spacing} 与 {@code web-ui}；模板一旦漏键，缺键就补不回来（已用模板缺键的夹具复现）。
+     * 这里补一道与模板内容无关的补键，保证启动与每次 {@code /muz reload} 后这两个键一定在场，
+     * 日志门禁 {@link linmumua.doudizhu.log.MuzLogGate} 也就一定读到确定值
+     * （{@code loadRenderSettings()} 在 {@link #ensureConfigIntegrity()} 之后调用，顺序见 {@code onEnable}）。
+     *
+     * @return 配置是否发生变化（true 才会触发落盘）
+     */
+    private boolean ensureDebugConfig() {
+        return ensureDebugConfig(yamlConfig());
+    }
+
+    /**
+     * {@link #ensureDebugConfig()} 的可测核心：只依赖传入的配置对象，不碰插件状态。
+     *
+     * <p>{@code debug.table-spacing} 缺键写 {@code 0} 而不是 {@code 6.5}：{@code 0} 是本项目既有的
+     * 「用源码里固化的默认值」语义（读取点是 {@code cfgDouble("debug.table-spacing", 6.5)}），
+     * 与出厂模板 {@code table-spacing: 0  # 默认 6.50} 一致；写成 6.5 会改掉这条语义。
+     */
+    static boolean ensureDebugConfig(MuzYamlConfig config) {
+        boolean changed = false;
+        if (!config.contains("debug.enabled")) {
+            config.set("debug.enabled", false);
+            changed = true;
+        }
+        if (!config.contains("debug.table-spacing")) {
+            config.set("debug.table-spacing", 0);
+            changed = true;
+        }
+        return changed;
     }
 
     /**

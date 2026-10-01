@@ -1203,4 +1203,139 @@ public class DebugWebServerTest {
         assertTrue(actionsRule.contains("position:sticky"), "玻璃操作栏仍必须保持 sticky");
         assertTrue(actionsRule.contains("bottom:0"), "玻璃操作栏仍必须吸附底部");
     }
+
+    // ── 只读道具栏预览图层（第四行）──
+
+    /**
+     * 用户要求：Debug Web 预览目前只有牌行/头像行/记牌器三层，必须补一个【只读】道具栏图层。
+     *
+     * <p>「只读」是硬约束：不进 18 键白名单、不新增可保存字段、不参与拖动/缩放/坐标面板，
+     * 所以它不能用可编辑层的 {@code .layer} / {@code data-layer} 机制，也不能出现在 layerTabs 或
+     * 任何偏移键映射里。这条扫两份 HTML（仓库根原型与内嵌正式页）防止只改一份。
+     */
+    @Test
+    void 两份页面的只读道具栏图层都不进入可编辑层机制() throws IOException {
+        for (Path page : List.of(Path.of("debug-hud-preview.html"),
+            Path.of("src/main/resources/debug-hud-preview.html"))) {
+            String html = Files.readString(page);
+            assertTrue(html.contains("class=\"gadget-bar-layer\"") || html.contains("class='gadget-bar-layer'"),
+                page + " 必须包含只读道具栏图层节点");
+            assertTrue(html.contains("data-gadget-bar"), page + " 只读道具栏图层必须带独立标识");
+            assertTrue(html.contains("function renderGadgetBarLayer()"),
+                page + " 必须渲染只读道具栏图层");
+            assertTrue(html.contains("renderGadgetBarLayer();"),
+                page + " 渲染主流程必须调用道具栏图层");
+            assertFalse(html.contains("data-layer=\"gadgetbar\"") || html.contains("data-layer='gadgetbar'"),
+                page + " 只读道具栏不得注册成可编辑层（否则会被拖动/缩放/写配置）");
+            assertFalse(html.contains("gadgetbar:['trick-hud"),
+                page + " 只读道具栏不得出现在图层偏移键映射里");
+        }
+    }
+
+    /**
+     * 只读道具栏的格数与竖直位置都必须来自服务端与道具快照，页面不复算。
+     *
+     * <p>【竖直位置为什么要有行为测试】：第四行不像其余三行那样有 Y 配置键，位置由构建期固定下移档
+     * {@code GADGET_BAR_ROW_DOWN_OFFSET} 换算而来。这里用 Node 执行页面里那段纯几何函数
+     * （{@code gadgetBarBox}），对着真实 geometry 验算：
+     *   <li>行顶 = 基线 − snapshotCounterOffset + (rowDownOffset − cellHeight)，与记牌器同一套基准；</li>
+     *   <li>整条宽度 = (N+1) × cellAdvance，N=0 时只剩语音格；</li>
+     *   <li>行宽小于其他行时不得顶宽容器宽（水平居中口径与 TrickHudView 一致）。</li>
+     * 这三条都是「实现改坏就变红」的性质，而不是复述实现。
+     */
+    @Test
+    void 只读道具栏竖直位置与格宽由服务端几何换算() throws Exception {
+        String page = Files.readString(Path.of("src/main/resources/debug-hud-preview.html"));
+        DebugHudConfigController.PreviewGeometry geometry = DebugHudConfigController.currentGeometry();
+        DebugHudConfigController.PreviewGeometry.GadgetBarGeometry bar = geometry.gadgetBar();
+        assertNotNull(bar, "geometry 必须下发道具栏几何");
+        assertEquals(PackAssets.GADGET_BAR_CELL_ADVANCE, bar.cellAdvance());
+        assertEquals(PackAssets.GADGET_BAR_ROW_DOWN_OFFSET, bar.rowDownOffset());
+        assertEquals(PackAssets.GADGET_BAR_SLOT_COUNT, bar.maxCells());
+        assertEquals(6, bar.textures().size(), "底图/选框/四个图标都必须下发真实 PNG 键");
+        for (String name : List.of("base", "select", "egg", "water", "tomato", "speech")) {
+            assertTrue(bar.textures().containsKey(name), "缺少纹理条目：" + name);
+        }
+
+        int fnStart = page.indexOf("function gadgetBarBox(");
+        int fnEnd = page.indexOf("function gadgetBarRowWidths()", fnStart);
+        // 页面把数值归一化写成箭头函数 n=v=>...（非有限值按 0）；按终止符取原文，避免在测试里另抄一份。
+        int nStart = page.indexOf("n=v=>");
+        assertTrue(fnStart > 0 && fnEnd > fnStart && nStart > 0, "必须能提取页面里的 pure 几何函数");
+        int nEnd = nStart;
+        while (nEnd < page.length() && page.charAt(nEnd) != ',' && page.charAt(nEnd) != ';') {
+            nEnd++;
+        }
+        String nDeclaration = "const " + page.substring(nStart, nEnd) + ";";
+        assertTrue(nDeclaration.contains("Number.isFinite"), "必须提取到页面真实的数值归一化函数：" + nDeclaration);
+
+        String geometryJson = new Gson().toJson(geometry);
+        String nodeScript = "const assert=require('node:assert/strict');"
+            + nDeclaration
+            + page.substring(fnStart, fnEnd)
+            + "const g=" + geometryJson + ".gadgetBar?{screenWidth:" + geometry.screenWidth()
+            + ",screenHeight:" + geometry.screenHeight() + ",bossBarBaselineY:" + geometry.bossBarBaselineY()
+            + "}:null;"
+            + "const gb=" + geometryJson + ".gadgetBar;"
+            + "const rows={'card':10,'avatar':120,'counter':400,'offsetX':0,'counterOffsetDown':122};"
+            + "const four=gadgetBarBox(g,gb,4,rows),one=gadgetBarBox(g,gb,1,rows);"
+            + "assert.equal(four.w, 4*gb.cellAdvance, '整条宽度必须是格数乘格宽');"
+            + "assert.equal(one.w, gb.cellAdvance, 'N=0 时只剩语音格');"
+            + "assert.equal(four.y, g.bossBarBaselineY - rows.counterOffsetDown + (gb.rowDownOffset - gb.cellHeight),"
+            + " '行顶必须由固定下移档换算');"
+            + "assert.equal(four.x, Math.floor((g.screenWidth-rows.counter)/2)+Math.floor((rows.counter-four.w)/2),"
+            + " '行宽窄于记牌行时必须按容器宽居中，不得顶宽');"
+            + "const tall=gadgetBarBox(g,gb,4,{'card':10,'avatar':120,'counter':10,'offsetX':0,'counterOffsetDown':122});"
+            + "assert.equal(tall.x, Math.floor((g.screenWidth-tall.w)/2), '道具栏最宽时它自己就是居中基准');"
+            + "process.stdout.write('gadget bar geometry checks passed');";
+        Path script = Files.createTempFile("muz-gadget-bar-", ".js");
+        Path log = Files.createTempFile("muz-gadget-bar-", ".log");
+        try {
+            Files.writeString(script, nodeScript, java.nio.charset.StandardCharsets.UTF_8);
+            Process process = new ProcessBuilder("node", script.toString())
+                .redirectErrorStream(true)
+                .redirectOutput(log.toFile())
+                .start();
+            boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            String output = Files.readString(log, java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(finished, "Node 道具栏几何测试超时：" + output);
+            assertEquals(0, process.exitValue(), output);
+            assertTrue(output.contains("gadget bar geometry checks passed"), output);
+        } finally {
+            Files.deleteIfExists(script);
+            Files.deleteIfExists(log);
+        }
+    }
+
+    /** 页面必须按服务端 geometry 与道具快照决定格数，不复算码位或文件名。 */
+    @Test
+    void 只读道具栏格数取自道具快照且路径来自服务端几何() throws IOException {
+        for (Path page : List.of(Path.of("debug-hud-preview.html"),
+            Path.of("src/main/resources/debug-hud-preview.html"))) {
+            String html = Files.readString(page);
+            assertTrue(html.contains("function gadgetBarCellCount()"), page + " 必须由快照决定显示格数");
+            assertTrue(html.contains("gadgetPlayers") && html.contains("barIcon"),
+                page + " 格数与图标必须取自服务端道具快照的 barIcon");
+            assertTrue(html.contains("gb.rowDownOffset") && html.contains("gb.cellAdvance"),
+                page + " 竖直位置与格宽必须读服务端 geometry.gadgetBar");
+            assertFalse(html.contains("GADGET_BAR") || html.contains("0xF700"),
+                page + " 页面不得复算道具栏码位");
+        }
+    }
+
+    /** 服务端必须把道具栏六张真实 PNG 加进 /api/resource 白名单与预览清单。 */
+    @Test
+    void 服务端为只读道具栏登记真实PNG白名单() throws IOException {
+        String server = Files.readString(Path.of("src/main/java/linmumua/doudizhu/debug/DebugWebServer.java"));
+        assertTrue(server.contains("PackAssets.GADGET_BAR_TEXTURE_BASE")
+                && server.contains("PackAssets.GADGET_BAR_TEXTURE_SELECT"),
+            "底图与选框 PNG 必须经 PackAssets 常量登记，不能手写路径");
+        assertTrue(server.contains("PackAssets.gadgetBarIconTexturePath(kind)"),
+            "四个图标 PNG 必须按种类登记");
+        assertTrue(server.contains("\"gadget-bar\""), "预览清单必须给道具栏独立 family");
+    }
 }

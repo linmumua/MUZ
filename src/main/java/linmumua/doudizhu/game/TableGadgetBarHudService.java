@@ -1,5 +1,7 @@
 package linmumua.doudizhu.game;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -8,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import linmumua.doudizhu.DoudizhuPlugin;
 import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
@@ -26,14 +29,38 @@ import org.bukkit.inventory.ItemStack;
 /**
  * 牌桌对局中的九格道具栏数据源。
  *
- * <p>不打开 Bukkit Inventory GUI。八个虚拟道具槽和第九个语音入口由本服务维护数据与选择状态，
- * 九格栏【本身】已经并入出牌 HUD（BossBar 第四行），由 {@link TrickHudService} 经
- * {@link #hudBarGlyphText(UUID)} 读取只读字形快照后渲染；本服务不再拼 ActionBar、也不碰 ActionBar
+ * <p>不打开 Bukkit Inventory GUI。八个虚拟道具槽和语音入口由本服务维护数据与选择状态，
+ * 栏【本身】已经并入出牌 HUD（BossBar 第四行），由 {@link TrickHudService} 经
+ * {@link #hudBarSnapshot(UUID)} 读取只读渲染快照后渲染；本服务不再拼 ActionBar、也不碰 ActionBar
  * 槽位（那是普通状态提示的），所以道具栏与状态提示不再互相覆盖闪烁。
  * 玩家仍用滚轮/数字键选择槽位，右键沿既有桌内道具路由执行；选择第九槽时右键打开仅自己可见的实体语音面板。
  */
 public final class TableGadgetBarHudService implements Listener {
+    /**
+     * 九格栏的【最大】格数：8 个道具格 + 1 个语音入口格。
+     *
+     * <p>【实际显示格数是变长的】：按用户确认的语义，玩家道具槽里有 N 个非空物品就只显示
+     * N 个道具格加 1 个语音格，共 N+1 格、整体居中；空槽不再占位。所以 {@code SLOT_COUNT}
+     * 只用于「原版快捷栏索引」与「真实槽位」的合法范围校验，不再等于实际渲染格数。
+     */
     public static final int SLOT_COUNT = VirtualGadgetBar.SLOT_COUNT + 1;
+
+    /**
+     * 桌内道具栏一帧的只读渲染快照。
+     *
+     * <p>【为什么宽度要和字形一起交出去】：栏现在按实际非空道具数变长，宽度不再是固定常量
+     * （满格 198px 只是 N=8 时的特例）。若调用方按常量自己推算宽度，两侧一改一漏就会让整条
+     * BossBar 的水平居中漂掉，所以由本服务一次性给出字形与真实宽度，{@code TrickHudView} 只负责居中。
+     *
+     * @param glyphText     底图 + 图标 + 选框三层字形；每个片段自带 {@code muz_gadget_bar} 字体标签
+     * @param advancePixels 整条栏的净前进量 = (visibleSlots + 1) × {@link PackAssets#GADGET_BAR_CELL_ADVANCE}
+     * @param visibleSlots  实际显示的道具格数 N（不含固定在末位的语音格）
+     */
+    public record HudBarSnapshot(String glyphText, int advancePixels, int visibleSlots) {
+        public HudBarSnapshot {
+            glyphText = glyphText == null ? "" : glyphText;
+        }
+    }
 
     /* 预取失败限频窗口：本预取每 40 tick 跑一次，失败可能持续复现，限频既避免刷屏也不静默吞掉。 */
     private static final long FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
@@ -208,65 +235,161 @@ public final class TableGadgetBarHudService implements Listener {
     }
 
     /**
-     * 九格栏的只读字形快照，供 {@link TrickHudService} 拼出出牌 HUD 的第四行。
+     * 桌内道具栏的只读渲染快照，供 {@link TrickHudService} 拼出出牌 HUD 的第四行。
      *
-     * <p>返回的字符串已经套好 {@code muz_gadget_bar} 字体标签与白色，调用方直接把它接进第四行；
+     * <p>返回的字形片段都自带 {@code muz_gadget_bar} 字体标签，调用方直接接进第四行；
      * 该玩家不该显示这道栏（不在 PLAYING、机器人、道具功能关闭、字体偏移层不可用）时返回 {@code null}，
      * 第四行整条不产出，其余三行照旧。
      *
      * <p>【为什么在 Service 侧取字体偏移而不是回退】：并入 BossBar 后栏不再是客户端居中的主体，
      * 但底图/图标/选框三层仍靠 CraftEngine 的负空格叠回同一槽位；偏移不可用时回退会让三层错位，
-     * 不如整行不显示。宽度恒等于 {@link PackAssets#gadgetBarRowAdvance()}，与 TrickHudView 同源。
+     * 不如整行不显示。宽度由 {@link #layout} 按真实格数算出，与 TrickHudView 同源。
      */
-    public String hudBarGlyphText(UUID playerId) {
+    public HudBarSnapshot hudBarSnapshot(UUID playerId) {
         if (stopped || playerId == null || !gadgets.settings().enabled()) {
             return null;
         }
         if (!offsetService.isAvailable()) {
             return null;
         }
-        GameTable table = plugin.getTableManager().getTableOf(playerId);
-        if (table == null || table.getPhase() != GamePhase.PLAYING || table.isBot(playerId)) {
+        // 【为什么先判空 TableManager】：本方法从出牌 HUD 的渲染链上被调用，异常会一路抛到
+        // PlayerTaskRegistry，把这个玩家整条 BossBar 的刷新打死（表现是「三行也不动了」）。
+        // 而「manager 可能为 null」在本项目是既有共识：TableGadgetService.tick 与本类的
+        // prefetchActivePlayers 都有同口径的空值早退。这里对齐，把「查不到桌」收敛成「第四行不产出」。
+        TableManager manager = plugin.getTableManager();
+        GameTable table = manager == null ? null : manager.getTableOf(playerId);
+        if (!barRowVisible(
+            stopped,
+            gadgets.settings().enabled(),
+            offsetService.isAvailable(),
+            table != null && table.getPhase() == GamePhase.PLAYING,
+            table != null && table.isBot(playerId))) {
             return null;
         }
-        return renderGlyphs(playerId);
+        return layout(bar(playerId), selectedIndex(playerId), offsetService::offset);
     }
 
-    /** 拼九格栏三层字形；底层是纯字符串，调用方负责套字体颜色上下文。 */
-    private String renderGlyphs(UUID playerId) {
-        VirtualGadgetBar bar = bar(playerId);
-        int selected = selectedIndex(playerId);
+    /**
+     * 第四行是否应当产出的唯一判据。
+     *
+     * <p>门禁条件全部集中在这里，便于逐条验算（也便于把「为什么没显示」讲清楚）：
+     * 服务未停止、桌内道具功能开启、CraftEngine 字体偏移层可用、玩家在 PLAYING 阶段的牌桌上、且不是机器人。
+     * 任何一条不成立就整条不产出（返回 null），其余三行照旧渲染 —— 这是设计语义，不是缺陷。
+     *
+     * <p>【注意这里没有「数据已加载」这一条】：道具数据用的是「加载到就用玩家的、没加载到就用
+     * {@code VirtualGadgetBar.defaults()}」的兜底，所以数据缺失只会让栏显示默认三件，不会让栏消失；
+     * 排查「道具栏完全不显示」时不要往这条上找。
+     */
+    static boolean barRowVisible(
+        boolean stopped,
+        boolean gadgetEnabled,
+        boolean offsetsAvailable,
+        boolean tablePlaying,
+        boolean bot
+    ) {
+        return !stopped && gadgetEnabled && offsetsAvailable && tablePlaying && !bot;
+    }
+
+    /**
+     * 道具栏纯排版核心：出「N 个非空道具格 + 1 个语音格」的三层字形与整条净前进量。
+     *
+     * <p>不依赖插件状态、不起任务、不碰 Bukkit 世界（ItemStack 只用来判空与选图标种类），
+     * 所以行为测试可以直接驱动它验算格数、叠加顺序与宽度。
+     *
+     * <p>叠加顺序与旧九格版一致：每格先画底图，再回退一个格宽叠图标（图标自带本格 advance，
+     * 因此净前进量不变），选中格再回退一个格宽叠选框。语音格恒在末位且永远存在。
+     *
+     * @param bar          该玩家的八格快照
+     * @param selectedSlot 选中的【真实槽位】（0..7，或 {@link VirtualGadgetBar#BUBBLE_SLOT}）
+     * @param offsetProvider 给定位移像素数返回一段负空格文本（CraftEngine 偏移字形）
+     */
+    static HudBarSnapshot layout(VirtualGadgetBar bar, int selectedSlot, IntFunction<String> offsetProvider) {
+        List<Integer> displayed = displayedSlots(bar);
         StringBuilder text = new StringBuilder();
-        for (int slot = 0; slot < SLOT_COUNT; slot++) {
-            int kind = slot == VirtualGadgetBar.BUBBLE_SLOT
-                ? PackAssets.GADGET_BAR_SPEECH
-                : PackAssets.gadgetBarKind(bar.slot(slot));
-            text.append(PackAssets.gadgetBarBaseGlyphText());
-            if (kind != PackAssets.GADGET_BAR_EMPTY) {
-                // 图标与底图共用一个 22px 槽位：先回退到底图起点，再让图标自身承担本槽 advance。
-                text.append(offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE));
-                text.append(PackAssets.gadgetBarIconGlyphText(kind));
-            }
-            if (slot == selected) {
-                // 选框独立叠加，保持底图/图标的净前进量不变。
-                text.append(offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE));
-                text.append(PackAssets.gadgetBarSelectGlyphText());
+        for (int slot : displayed) {
+            appendCell(text, PackAssets.gadgetBarKind(bar.slot(slot)), slot == selectedSlot, offsetProvider);
+        }
+        appendCell(text, PackAssets.GADGET_BAR_SPEECH,
+            selectedSlot == VirtualGadgetBar.BUBBLE_SLOT, offsetProvider);
+        int cells = displayed.size() + 1;
+        return new HudBarSnapshot(text.toString(), PackAssets.gadgetBarRowAdvance(cells), displayed.size());
+    }
+
+    /** 追加一个格子的三层字形；空槽不叠图标，但仍然只前进底图那一格。 */
+    private static void appendCell(StringBuilder text, int kind, boolean selected, IntFunction<String> offsetProvider) {
+        text.append(PackAssets.gadgetBarBaseGlyphText());
+        if (kind != PackAssets.GADGET_BAR_EMPTY) {
+            // 图标与底图共用一个 22px 槽位：先回退到底图起点，再让图标自身承担本槽 advance。
+            text.append(offsetProvider.apply(-PackAssets.GADGET_BAR_CELL_ADVANCE));
+            text.append(PackAssets.gadgetBarIconGlyphText(kind));
+        }
+        if (selected) {
+            // 选框独立叠加，保持底图/图标的净前进量不变。
+            text.append(offsetProvider.apply(-PackAssets.GADGET_BAR_CELL_ADVANCE));
+            text.append(PackAssets.gadgetBarSelectGlyphText());
+        }
+    }
+
+    /**
+     * 栏里实际显示的道具槽：八格快照中的【非空】槽，按槽位升序（也就是玩家在道具箱里看到的顺序）。
+     *
+     * <p>空槽不再占位，这是本轮语义变更的核心；语音格不属于本列表，由 {@link #layout} 固定追加在末位。
+     */
+    static List<Integer> displayedSlots(VirtualGadgetBar bar) {
+        List<Integer> slots = new ArrayList<>();
+        if (bar == null) {
+            return slots;
+        }
+        for (int slot = 0; slot < VirtualGadgetBar.SLOT_COUNT; slot++) {
+            if (bar.slot(slot) != null) {
+                slots.add(slot);
             }
         }
-        return text.toString();
+        return slots;
+    }
+
+    /**
+     * 原版快捷栏索引（滚轮/数字键给出的 0..8）映射到九格栏的真实槽位。
+     *
+     * <p>前 N 个索引按显示顺序命中实际道具槽（N = 当前显示的道具格数），其余索引一律落到语音格。
+     * 语音格恒在末位且永远存在，所以「选中索引超出显示范围」有确定归宿：永远能高亮到最后一格，
+     * 不会出现「选了个不存在的格子，屏幕上没有任何选框」这种没有反馈的状态。
+     */
+    static int slotForHotbarIndex(List<Integer> displayed, int hotbarIndex) {
+        if (displayed != null && hotbarIndex >= 0 && hotbarIndex < displayed.size()) {
+            return displayed.get(hotbarIndex);
+        }
+        return VirtualGadgetBar.BUBBLE_SLOT;
+    }
+
+    /** 用当前快照取该玩家的显示列表；{@link #slotForHotbarIndex} 的实例入口。 */
+    private List<Integer> displayedSlots(UUID playerId) {
+        return displayedSlots(bar(playerId));
+    }
+
+    /**
+     * 把选中槽收敛到一个当前【确实显示】的槽位。
+     *
+     * <p>旧语义是「越界就回 0」，在变长栏下不够用：选中槽位即使还在 0..8 内，
+     * 只要它对应的道具已经被移除（空槽不显示），屏幕上就没有任何格子带选框。
+     * 现在统一回落到语音格——它恒在末位且永远存在，是唯一一定有对应格子的归宿。
+     */
+    static int normalizeSelectedSlot(List<Integer> displayed, int selected) {
+        if (selected == VirtualGadgetBar.BUBBLE_SLOT) {
+            return VirtualGadgetBar.BUBBLE_SLOT;
+        }
+        return displayed != null && displayed.contains(selected)
+            ? selected
+            : VirtualGadgetBar.BUBBLE_SLOT;
     }
 
     private VirtualGadgetBar bar(UUID playerId) {
         return bars.getOrDefault(playerId, VirtualGadgetBar.defaults());
     }
 
+    /** 载入/保存后把选中槽收敛到仍显示的格子上；判定见 {@link #normalizeSelectedSlot}。 */
     private void normalizeSelection(UUID playerId) {
-        int selected = selectedIndex(playerId);
-        if (selected < 0 || selected >= SLOT_COUNT) {
-            select(playerId, 0);
-            return;
-        }
-        select(playerId, selected);
+        select(playerId, normalizeSelectedSlot(displayedSlots(playerId), selectedIndex(playerId)));
     }
 
     /** 右键语音入口由监听器调用，避免把面板实体逻辑塞进本 HUD。 */
@@ -305,7 +428,9 @@ public final class TableGadgetBarHudService implements Listener {
             return;
         }
         event.setCancelled(true);
-        select(player.getUniqueId(), Math.max(0, Math.min(SLOT_COUNT - 1, event.getNewSlot())));
+        // 快捷栏索引按【显示顺序】映射到真实槽位（见 slotForHotbarIndex）：空槽不占位后，
+        // 索引 i 对应的就是第 i 个可见道具；超过可见道具数的索引一律落到语音格。
+        select(player.getUniqueId(), slotForHotbarIndex(displayedSlots(player.getUniqueId()), event.getNewSlot()));
         // 并入 BossBar 后选槽不会自己触发重绘（本服务已经不派发 ActionBar），
         // 所以这里主动让该玩家的出牌 HUD 立刻重画一次，选框才会跟着移动到新槽位。
         redrawHud(table, player);

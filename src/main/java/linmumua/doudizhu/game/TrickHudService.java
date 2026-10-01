@@ -762,21 +762,22 @@ final class TrickHudService {
     }
 
     /**
-     * 取该玩家当前桌内九格栏的只读快照，包成第四行片段；没有就返回空行。
+     * 取该玩家当前桌内道具栏的只读快照，包成第四行片段；没有就返回空行。
      *
-     * <p>宽度用与 {@code TableGadgetBarHudService} 完全同源的 {@link PackAssets#gadgetBarRowAdvance()}，
-     * 否则容器宽 {@code W} 算错，整条 HUD 的水平居中会跟着漂。字体标签由字形片段自带。
+     * <p>宽度【直接取快照自带的真实宽度】，不再由这里按「满格 9 格」的常量推算：
+     * 栏现在按「N 个非空道具格 + 1 个语音格」变长，自己推算就会与 Service 的实际字形长度脱节，
+     * 容器宽 {@code W} 一算错整条 HUD 的水平居中就跟着漂。字体标签由字形片段自带。
      */
     private TrickHudView.GadgetBarRow gadgetBarRowOf(UUID viewerId) {
         TableGadgetBarHudService gadgetBar = plugin.getTableGadgetBarHudService();
         if (gadgetBar == null) {
             return TrickHudView.GadgetBarRow.EMPTY;
         }
-        String glyphs = gadgetBar.hudBarGlyphText(viewerId);
-        if (glyphs == null || glyphs.isEmpty()) {
+        TableGadgetBarHudService.HudBarSnapshot snapshot = gadgetBar.hudBarSnapshot(viewerId);
+        if (snapshot == null || snapshot.glyphText().isEmpty() || snapshot.advancePixels() <= 0) {
             return TrickHudView.GadgetBarRow.EMPTY;
         }
-        return new TrickHudView.GadgetBarRow(glyphs, PackAssets.gadgetBarRowAdvance());
+        return new TrickHudView.GadgetBarRow(snapshot.glyphText(), snapshot.advancePixels());
     }
 
     /**

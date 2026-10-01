@@ -656,6 +656,37 @@ class TrickHudViewTest {
             "加入第四行后净前进量必须仍恒等于容器宽，否则客户端居中会漂移");
     }
 
+    /**
+     * 【第四行宽度是变长的】栏现在按实际非空道具数显示 N+1 格，宽度由快照给出，不再是常量 198。
+     *
+     * <p>这条钉住「窄栏不得被当成满格 198 去参与取最大」：栏只有 88（4 格）时牌行才是最宽的，
+     * 容器宽必须还是牌行的宽度；旧实现若仍按 198 计，容器宽会虚高 110px，整条四行 HUD 一起左移。
+     */
+    @Test
+    void 变长九格栏按真实宽度参与容器宽计算() {
+        int slot = 40;
+        List<DoudizhuCard> hand = cards(CardRank.THREE, CardRank.FOUR);
+        int barred = TrickHudView.containerAdvance(
+            slot, GAP, hand.size(), STEP, 0, List.of(), 0, 88);
+        int threeRowOnly = TrickHudView.containerAdvance(
+            slot, GAP, hand.size(), STEP, 0, List.of(), 0, 0);
+        assertEquals(threeRowOnly, barred, "88 宽的窄栏不得把容器宽顶宽");
+
+        String line = fourRowLine(hand, slot, gadgetBar(88));
+        assertEquals(barred, netAdvance(line),
+            "窄栏参与后净前进量仍必须恒等于容器宽（居中闭合）");
+    }
+
+    /** 变长栏成为最宽一行时也要居中并闭合（空桌只挂一条窄栏也会走这条分支）。 */
+    @Test
+    void 变长九格栏成为最宽行时仍居中且闭合() {
+        TrickHudView.GadgetBarRow bar = gadgetBar(88);
+        String line = TrickHudView.buildMiniMessage(
+            null, null, null, 0, 0, List.of(), 0, OFFSETS, 0, 0, 0,
+            TrickHudView.RowXOffsets.NONE, List.of(), 0, false, bar, 0);
+        assertEquals(88, netAdvance(line), "只有一条 88 宽的道具栏时容器宽就是它，且必须闭合");
+    }
+
     /** 没有九格栏快照时第四行整条不产出，净前进量仍等于三行版的容器宽。 */
     @Test
     void 无九格栏快照时第四行不产出且容器宽不变() {

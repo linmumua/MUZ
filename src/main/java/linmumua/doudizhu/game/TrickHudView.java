@@ -101,15 +101,18 @@ final class TrickHudView {
     }
 
     /**
-     * 第四行：桌内九格道具栏（底图 + 图标 + 选框三层叠加）。
+     * 第四行：桌内道具栏（底图 + 图标 + 选框三层叠加）。
      *
      * <p>并入本 HUD 前它走 ActionBar，与对局状态提示抢同一个槽位来回覆盖闪烁；并入 BossBar 后
      * 与其余三行共用同一条标题，靠字形自带的固定下移档 {@link PackAssets#GADGET_BAR_ROW_DOWN_OFFSET}
      * 落在记牌器行下方。它【不是】可连续调的自由整数，而是随资源一次性生成的固定档，
      * 所以这里没有独立 Y 配置，只按整条 HUD 的水平居中算式排布。
      *
-     * <p>{@code glyphText} 已自带 {@code muz_gadget_bar} 字体标签；View 只按整条的净前进量
-     * {@link PackAssets#gadgetBarRowAdvance()} 占位，实际宽度由字体几何保证与之一致。
+     * <p>【宽度是变长的，必须由调用方给】：栏按「N 个非空道具格 + 1 个语音格」渲染
+     * （{@code TableGadgetBarHudService} 的语义，空槽不占位），所以 {@code advancePixels}
+     * 不再等于满格常量 {@link PackAssets#gadgetBarRowAdvance()}，而是 (N+1) × 格宽。
+     * 这里就用调用方给的真实值参与容器宽 {@code W} 的取最大与居中算式，
+     * 「净前进量恒等于 W」的闭合条件因此仍然成立；{@code glyphText} 已自带字体标签。
      */
     static final class GadgetBarRow {
         static final GadgetBarRow EMPTY = new GadgetBarRow("", 0);

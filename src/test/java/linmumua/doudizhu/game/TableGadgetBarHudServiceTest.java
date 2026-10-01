@@ -43,28 +43,38 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("PackAssets.gadgetBarIconGlyphText"), "道具槽必须叠加客户端真实图标字形");
         assertTrue(source.contains("PackAssets.gadgetBarSelectGlyphText"), "选中槽必须叠加独立选框字形");
         assertTrue(source.contains("PackAssets.gadgetBarKind"), "道具槽必须按 ItemStack 选择客户端真实图标");
-        assertTrue(source.contains("PackAssets.GADGET_BAR_SPEECH"), "第九槽必须使用固定语音图标");
-        assertTrue(source.contains("offsetService.offset(-PackAssets.GADGET_BAR_CELL_ADVANCE)"),
+        assertTrue(source.contains("PackAssets.GADGET_BAR_SPEECH"), "语音格必须使用固定语音图标");
+        assertTrue(source.contains("offsetProvider.apply(-PackAssets.GADGET_BAR_CELL_ADVANCE)"),
             "图标和选框必须回退到同一槽位，而不能改变整条栏的净宽度");
+        assertTrue(source.contains("static List<Integer> displayedSlots(VirtualGadgetBar bar)"),
+            "空槽是否占位必须由单一显示列表入口决定（空槽不显示）");
+        assertTrue(source.contains("static int slotForHotbarIndex(List<Integer> displayed, int hotbarIndex)"),
+            "快捷栏索引到真实槽位的映射必须收口成可测纯函数");
         assertFalse(source.contains("Component.text(\"道具 \")"), "额外栏不得继续输出文字标题");
         assertFalse(source.contains("itemLabel("), "额外栏不得继续使用文字道具标签");
         assertFalse(source.contains("openInventory"), "额外栏不得打开 Inventory GUI");
     }
 
     /**
-     * 九格栏已并入出牌 HUD（BossBar 第四行），不再走 ActionBar。
+     * 道具栏已并入出牌 HUD（BossBar 第四行），不再走 ActionBar。
      *
      * <p>用户要求：九格栏与对局状态提示抢同一个 ActionBar 槽位来回覆盖闪烁，必须独立出来并入出牌 HUD。
-     * 所以本服务只保留数据源职责，暴露 {@code hudBarGlyphText} 给 TrickHudService，并【彻底】不再合成/发送
+     * 所以本服务只保留数据源职责，暴露渲染快照给 TrickHudService，并【彻底】不再合成/发送
      * ActionBar（旧机制下的 {@code compose}/{@code HotbarActionBarLayout} 固定宽度算式与聊天兜底都已删除）。
+     *
+     * <p>【本断言随机制升级，不是弱化】：快照由「只返回字形字符串」升级为「字形 + 真实宽度 + 显示格数」
+     * 的不可变记录——栏改成按实际非空道具数变长（N+1 格）之后，宽度不再是常量，
+     * 必须由数据源一次性给出，否则 TrickHudService 只能自己推算、两侧一改一漏就漂。
      */
     @Test
-    void 九格栏并入出牌HUD后不再占用ActionBar() throws IOException {
+    void 道具栏并入出牌HUD后不再占用ActionBar() throws IOException {
         String source = Files.readString(HUD);
-        assertTrue(source.contains("public String hudBarGlyphText(UUID playerId)"),
-            "九格栏必须暴露只读字形快照供出牌 HUD 拼第四行");
-        assertTrue(source.contains("PackAssets.gadgetBarRowAdvance()") || source.contains("gadgetBarRowAdvance"),
-            "九格栏宽度必须与 PackAssets/TrickHudView 同源");
+        assertTrue(source.contains("public HudBarSnapshot hudBarSnapshot(UUID playerId)"),
+            "道具栏必须暴露带真实宽度的只读渲染快照供出牌 HUD 拼第四行");
+        assertTrue(source.contains("record HudBarSnapshot(String glyphText, int advancePixels, int visibleSlots)"),
+            "快照必须同时携带字形、净前进量与显示道具格数");
+        assertTrue(source.contains("PackAssets.gadgetBarRowAdvance(cells)"),
+            "九格栏宽度必须按真实格数经 PackAssets 计算，而不是写死满格常量");
         // 旧机制断言改为【不得再出现】：这些只为 ActionBar 合成服务。
         assertFalse(source.contains("output.sendActionBar(playerId"),
             "九格栏不得再通过 ActionBar 发送（会与状态提示互相覆盖闪烁）");

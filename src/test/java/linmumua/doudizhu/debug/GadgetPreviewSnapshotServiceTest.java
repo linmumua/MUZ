@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.ui.VirtualGadgetBar;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
@@ -77,6 +78,26 @@ class GadgetPreviewSnapshotServiceTest {
         assertEquals("unavailable", snapshot.items().get(1).iconStatus());
         assertEquals("", snapshot.items().get(1).textureUrl());
         assertEquals("<玩家>", snapshot.name());
+    }
+
+    /**
+     * 只读道具栏图层用的图标必须与游戏内一致：栏里嵌的是构建期烘焙的独立图标 PNG，
+     * 而不是道具箱面板显示的那张物品贴图（番茄尤其明显）。种类映射只走 PackAssets 一份。
+     */
+    @Test
+    void 道具栏图标按游戏内种类映射而不是物品贴图() {
+        List<ItemStack> slots = new ArrayList<>();
+        slots.add(new PlainItem(Material.EGG));
+        slots.add(new PlainItem(Material.WATER_BUCKET));
+        slots.add(new PlainItem(Material.DIAMOND));
+        var snapshot = GadgetPreviewSnapshotService.readySnapshot(UUID.randomUUID(), "玩家", VirtualGadgetBar.of(slots));
+
+        assertEquals("muz:" + PackAssets.gadgetBarIconTexturePath(PackAssets.GADGET_BAR_EGG),
+            snapshot.items().get(0).barIcon(), "鸡蛋必须映射到栏内鸡蛋图标");
+        assertEquals("muz:" + PackAssets.gadgetBarIconTexturePath(PackAssets.GADGET_BAR_WATER),
+            snapshot.items().get(1).barIcon(), "水桶必须映射到栏内水桶图标");
+        assertEquals("", snapshot.items().get(2).barIcon(),
+            "未知物品在栏里只画底图，不得冒充某个图标");
     }
 
     @Test
@@ -179,6 +200,12 @@ class GadgetPreviewSnapshotServiceTest {
         PlainItem(Material material) { this.material = material; }
         @Override public Material getType() { return material; }
         @Override public ItemMeta getItemMeta() { return null; }
+        /**
+         * 道具栏图标种类映射（{@code PackAssets.gadgetBarKind}）会先问 hasItemMeta()，
+         * 而父类实现要访问服务端 craftDelegate（独立 JUnit 里为 null，实跑 NPE）。
+         * 替身既然声明「没有 meta」，这里也必须显式说清楚。
+         */
+        @Override public boolean hasItemMeta() { return false; }
         @Override public void setAmount(int amount) { }
         @Override public ItemStack clone() { return new PlainItem(material); }
     }

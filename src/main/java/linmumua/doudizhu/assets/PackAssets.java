@@ -1011,18 +1011,68 @@ public final class PackAssets {
     }
 
     /**
-     * 整条九格栏的净前进量：九格各按 {@link #GADGET_BAR_CELL_ADVANCE} 排列，无额外间距。
+     * 指定格数的桌内道具栏净前进量：每格 {@link #GADGET_BAR_CELL_ADVANCE}，无额外间距。
      *
-     * <p>与 {@code TableGadgetBarHudService} 的栏宽算式 {@code SLOT_COUNT * GADGET_BAR_CELL_ADVANCE} 同值，
-     * 供 TrickHudView 把这个宽度计进容器宽 {@code W}；两侧不一致会让九格栏在 BossBar 里不居中。
+     * <p>【栏现在是变长的】：按用户确认的语义，玩家道具槽里有 N 个非空物品就只显示 N 个道具格
+     * 加 1 个语音入口格，共 N+1 格，空槽不再占位。所以宽度必须按真实格数算，
+     * 运行期由 {@code TableGadgetBarHudService} 把算好的宽度连同字形一起交给 TrickHudView，
+     * 不让两侧各自推算——两侧不一致会让整条 BossBar 的水平居中漂掉。
+     *
+     * @param cellCount 实际显示的格数（道具格 + 语音格）；小于 0 按 0 处理
+     */
+    public static int gadgetBarRowAdvance(int cellCount) {
+        return Math.max(0, cellCount) * GADGET_BAR_CELL_ADVANCE;
+    }
+
+    /**
+     * 满格（{@value #GADGET_BAR_SLOT_COUNT} 格：8 个道具格 + 1 个语音格）的净前进量。
+     *
+     * <p>兼容入口：正式渲染已改用 {@link #gadgetBarRowAdvance(int)} 按真实格数计算，
+     * 这个常量值只用于测试与「满格」语义的对照。
      */
     public static int gadgetBarRowAdvance() {
-        return GADGET_BAR_SLOT_COUNT * GADGET_BAR_CELL_ADVANCE;
+        return gadgetBarRowAdvance(GADGET_BAR_SLOT_COUNT);
     }
+
+    /**
+     * 桌内道具栏各层 PNG 在资源包 {@code textures/} 下的相对路径。
+     *
+     * <p>与 build.gradle.kts 的 {@code gadgetBarTextureDir}（{@code textures/font/gadget_bar}）
+     * 与 {@code gadgetBarIconKinds}（egg/water/tomato/speech）严格同源；Debug Web 的只读道具栏预览
+     * 靠这份路径表拼 {@code /api/resource/} 白名单键，前端不复算文件名。
+     */
+    public static final String GADGET_BAR_TEXTURE_BASE = "font/gadget_bar/base.png";
+    public static final String GADGET_BAR_TEXTURE_SELECT = "font/gadget_bar/select.png";
 
     /** 返回桌内九格栏选框字形片段。 */
     public static String gadgetBarSelectGlyphText() {
         return gadgetBarGlyphText(GADGET_BAR_SELECT_CODEPOINT);
+    }
+
+    /**
+     * 返回指定图标种类（{@link #GADGET_BAR_EGG} 等，不含空槽）的 PNG 相对路径。
+     *
+     * <p>与 {@link #gadgetBarIconGlyphText(int)} 同一个种类编号体系，保证「字形用哪张图」与
+     * 「Debug Web 预览哪张图」不会各写一套。
+     */
+    public static String gadgetBarIconTexturePath(int kind) {
+        return "font/gadget_bar/" + gadgetBarIconName(kind) + ".png";
+    }
+
+    /**
+     * 图标种类对应的构建期文件名（不含扩展名、不含目录），与 build.gradle.kts 的
+     * {@code gadgetBarIconKinds = listOf("egg", "water", "tomato", "speech")} 逐项同源。
+     */
+    public static String gadgetBarIconName(int kind) {
+        if (kind <= GADGET_BAR_EMPTY || kind > GADGET_BAR_SPEECH) {
+            throw new IllegalArgumentException("gadget bar 图标种类超出范围：" + kind);
+        }
+        return switch (kind) {
+            case GADGET_BAR_EGG -> "egg";
+            case GADGET_BAR_WATER -> "water";
+            case GADGET_BAR_TOMATO -> "tomato";
+            default -> "speech";
+        };
     }
 
     /** 返回指定真实物品图标字形片段；空槽不叠加图标。 */

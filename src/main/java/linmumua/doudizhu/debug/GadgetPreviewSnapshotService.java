@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.assets.PackAssets;
 import linmumua.doudizhu.ui.VirtualGadgetBar;
 import linmumua.doudizhu.ui.VirtualGadgetBarStore;
 import org.bukkit.Bukkit;
@@ -192,7 +193,29 @@ public final class GadgetPreviewSnapshotService implements Listener, AutoCloseab
                 iconStatus = "available";
             }
         }
-        return new ItemPreview(slot, itemName(item), item.getType().name(), textureUrl, iconStatus);
+        return new ItemPreview(
+            slot, itemName(item), item.getType().name(), textureUrl, iconStatus,
+            barIconTexture(PackAssets.gadgetBarKind(item)));
+    }
+
+    /**
+     * 桌内道具栏在客户端真正用的那层图标 PNG（{@code muz:font/gadget_bar/*.png}）的 texture 名。
+     *
+     * <p>【为什么要在这里给】：道具箱面板里的 {@code textureUrl} 是【物品贴图】，
+     * 而道具栏字形里嵌的是构建期烘焙过的【独立图标 PNG】——两者不是同一张图（番茄尤其明显）。
+     * 只读道具栏预览要跟游戏内一致，就必须复用同一个种类映射
+     * {@link PackAssets#gadgetBarKind(org.bukkit.inventory.ItemStack)}，
+     * 而不是让前端按物品贴图名自己猜。
+     *
+     * <p>返回的是与 {@code DebugHudConfigController} 下发的
+     * {@code geometry.gadgetBar.textures} 完全同一套 texture 名，前端用
+     * {@code assetByTexture} 直接解析，不需要第二份映射表。空槽/未知物品返回空串，前端只画底图。
+     */
+    static String barIconTexture(int kind) {
+        if (kind == PackAssets.GADGET_BAR_EMPTY) {
+            return "";
+        }
+        return "muz:" + PackAssets.gadgetBarIconTexturePath(kind);
     }
 
     private static String itemName(ItemStack item) {
@@ -252,6 +275,17 @@ public final class GadgetPreviewSnapshotService implements Listener, AutoCloseab
         }
     }
 
-    public record ItemPreview(int slot, String name, String material, String textureUrl, String iconStatus) {
+    /**
+     * 一个非空道具槽的只读预览数据。
+     *
+     * @param textureUrl 物品贴图资源键（道具箱面板用）
+     * @param barIcon    桌内道具栏里真正嵌的图标 PNG 的 texture 名（与 geometry.gadgetBar.textures 同一套）；
+     *                   空串表示该物品在栏里只显示底图
+     */
+    public record ItemPreview(int slot, String name, String material, String textureUrl, String iconStatus,
+                              String barIcon) {
+        public ItemPreview {
+            barIcon = barIcon == null ? "" : barIcon;
+        }
     }
 }
