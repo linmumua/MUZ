@@ -93,4 +93,103 @@ public final class AdminSettingArithmetic {
         next = Math.max(minValue, Math.min(maxValue, next));
         return roundToStorePrecision(next);
     }
+
+    /**
+     * 把一个值换算成「整数步索引」（绝对量）。
+     *
+     * <p>【滑块不要用这个】滑块窗口请用 {@link #sliderWindow} 的相对索引 —— 绝对索引在大值+小步长时
+     * 会超出 float 可精确表示范围。本方法保留给需要「值 ↔ 绝对步数」换算的场景。
+     *
+     * @param value 当前值
+     * @param step 该值使用的步长（&gt; 0 且有限）
+     * @return 最接近的整数步索引
+     * @throws IllegalArgumentException step 非正或非有限
+     */
+    public static long toStepIndex(double value, double step) {
+        requirePositiveFiniteStep(step);
+        return Math.round(roundToStorePrecision(value) / step);
+    }
+
+    /**
+     * 把整数步索引映射回值（与 {@link #toStepIndex} 互逆）。
+     *
+     * @param index 步索引
+     * @param step 步长
+     * @return 对应的值，按存储精度取整
+     */
+    public static double fromStepIndex(long index, double step) {
+        requirePositiveFiniteStep(step);
+        return roundToStorePrecision(index * step);
+    }
+
+    /**
+     * 以当前值为中心构造一个有限的滑块窗口。
+     *
+     * <p>【关键：窗口锚在原值，不许吸值】滑块第 0 档必须**正好是当前值本身**，不能是
+     * {@code round(value/step)*step}——否则玩家把步长切到 0.1、当前值 0.1234，一打开滑块不拖直接确认
+     * 就会被悄悄吸成 0.1。第 k 档 = 原值 + k×step，所以「不拖」保持原值，「±1 步」严格加减一个 step。
+     *
+     * <p>【为什么用相对索引】滑块输入是 32 位 float。若用「值/步长」的绝对长整数当端点，当前值极大
+     * （如 1000000）配极小步长（0.0001）时，绝对索引会超出 float 可精确表示的整数范围，相邻档被并
+     * 成一个数、拖动跳多步。这里改用**小范围相对指数**（{@code -halfSteps..halfSteps}），float 可精确
+     * 表示，映射回 double 时再做 {@code center + index×step}。
+     *
+     * <p>刻意**不**接收该设置声明的 min/max：调整范围已按用户要求放开，用声明的 min/max 当滑块边界
+     * 等于把放开的硬上下限重新施加回来。窗口自身（中心 ± 步数）就是边界。
+     *
+     * @param center 当前值（作为窗口锚点，不会被吸附）
+     * @param step 步长
+     * @param halfSteps 中心两侧各留多少步；小于 0 视作 0
+     * @return 滑块窗口
+     */
+    public static SliderWindow sliderWindow(double center, double step, int halfSteps) {
+        requirePositiveFiniteStep(step);
+        return new SliderWindow(roundToStorePrecision(center), step, Math.max(0, halfSteps));
+    }
+
+    private static void requirePositiveFiniteStep(double step) {
+        if (!Double.isFinite(step) || step <= 0.0) {
+            throw new IllegalArgumentException("步长必须是正有限值：" + step);
+        }
+    }
+
+    /**
+     * 有限滑块窗口：以原值为锚、用**相对**整数指数表达位置。
+     *
+     * <p>索引是相对量（{@code -halfSteps..halfSteps}），不是「值/步长」的绝对值——这样 float 端点总能
+     * 精确表示，且第 0 档恰好等于原值。屏实现用 {@link #valueAt(long)} 把相对索引换算成实际值。
+     */
+    public record SliderWindow(double center, double step, long halfSteps) {
+        /** 起始相对索引（= -halfSteps）。 */
+        public long startIndex() {
+            return -halfSteps;
+        }
+
+        /** 结束相对索引（= +halfSteps）。 */
+        public long endIndex() {
+            return halfSteps;
+        }
+
+        /** 初始相对索引（恒为 0，即原值本身）。 */
+        public long initialIndex() {
+            return 0L;
+        }
+
+        /** 相对索引对应的值：原值 + index×step，按存储精度取整。 */
+        public double valueAt(long relativeIndex) {
+            return roundToStorePrecision(center + relativeIndex * step);
+        }
+
+        public float start() {
+            return (float) (-halfSteps);
+        }
+
+        public float end() {
+            return (float) halfSteps;
+        }
+
+        public Float initial() {
+            return 0f;
+        }
+    }
 }

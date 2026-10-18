@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import linmumua.doudizhu.game.PlayerOutputDispatcher;
+import linmumua.doudizhu.ui.dialog.GadgetBoxDialogOpener;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -20,8 +21,14 @@ import org.bukkit.inventory.ItemStack;
 /**
  * 独立的九格道具箱 GUI。
  *
- * <p>上方 0..7 是玩家虚拟道具快照，8 是固定气泡入口；真实玩家背包只作为
+ * <p>【历史说明，勿删】上方 0..7 是玩家虚拟道具快照，8 是固定气泡入口；真实玩家背包只作为
  * Shift 点击复制来源，不会被 GUI 接管或改写。该类自身实现 Listener，主装配只需注册实例。
+ *
+ * <p>【已退役：open 路径改 Dialog 委托】上面描述的是旧的 Inventory 箱子实现。自「箱子迁 Dialog」
+ * 起，{@link #open(Player)} 不再创建 Inventory，而是把「打开道具箱编辑屏」委托给装配注入的
+ * {@link GadgetBoxDialogOpener}；没有注入时直接返回，**不**回落到 {@code createInventory}，
+ * 保证旧箱子生产路径不可达。{@code refresh}/{@code selectedItem}/{@code close} 等仍按原语义
+ * 服务已经打开的旧窗口（历史兼容），但生产不会再打开它。
  */
 public class GadgetBoxGuiService implements Listener {
     public enum ActionType {
@@ -55,10 +62,13 @@ public class GadgetBoxGuiService implements Listener {
     private final VirtualGadgetBarStore store;
     private final Consumer<Action> actionConsumer;
     private final Consumer<UUID> saveListener;
+    /** 退役的 Inventory 打开通道：旧箱子路径已改走 Dialog，保留字段仅为兼容既有构造器注入。 */
     private final BiConsumer<UUID, Inventory> openInventory;
     private final Consumer<UUID> closeInventory;
     private volatile String title;
     private volatile String bubbleName;
+    /** 旧箱子 open 路径的 Dialog 委托入口；由装配方注入，未注入时 {@link #open(Player)} 直接返回。 */
+    private volatile GadgetBoxDialogOpener dialogOpener;
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
 
     public GadgetBoxGuiService(VirtualGadgetBarStore store) {
@@ -136,17 +146,27 @@ public class GadgetBoxGuiService implements Listener {
         }
     }
 
-    /** 打开或重新创建道具箱 GUI；配置编辑 GUI 只允许在 Bukkit 主线程操作。 */
+    /**
+     * 由装配方注入「打开道具箱编辑 Dialog」的生产实现（见 {@link GadgetBoxDialogOpener}）。
+     * 允许传 null：表示 Dialog 尚未接线，此时 {@link #open(Player)} 不打开任何界面。
+     */
+    public void setDialogOpener(GadgetBoxDialogOpener opener) {
+        this.dialogOpener = opener;
+    }
+
+    /**
+     * 打开道具箱编辑界面；配置编辑入口只允许在 Bukkit 主线程操作。
+     *
+     * <p>生产路径已改为 Dialog：委托注入的 {@link GadgetBoxDialogOpener}；未注入时直接返回，
+     * 旧 Inventory 箱子（{@code createInventory} + {@code GadgetBoxInventoryHolder}）不再创建。
+     */
     public void open(Player player) {
         requirePrimaryThread("open");
         java.util.Objects.requireNonNull(player, "player");
-        VirtualGadgetBar snapshot = store.load(player.getUniqueId());
-        int selected = normalizeSelection(player.getUniqueId(), snapshot);
-        GadgetBoxInventoryHolder holder = new GadgetBoxInventoryHolder(player.getUniqueId(), snapshot);
-        Inventory inventory = Bukkit.createInventory(holder, GUI_SIZE, title);
-        holder.setInventory(inventory);
-        render(inventory, snapshot, selected);
-        openInventory.accept(player.getUniqueId(), inventory);
+        GadgetBoxDialogOpener opener = this.dialogOpener;
+        if (opener != null) {
+            opener.open(player);
+        }
     }
 
     /** 只刷新当前已打开的道具箱；未打开时不创建新窗口。 */

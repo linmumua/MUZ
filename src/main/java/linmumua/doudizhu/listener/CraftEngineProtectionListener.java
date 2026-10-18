@@ -1,6 +1,7 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.compat.MuMenuGadgetBridge;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.TableGadgetService;
@@ -159,6 +160,15 @@ public final class CraftEngineProtectionListener implements Listener {
 
     /** 只有命中语音面板时才消费右键；未命中必须继续手牌/道具路由。 */
     private boolean tryOpenSpeechPanel(Player player) {
+        // 【MuMenu 会话让位】CE 家具右键同样在 MUZ 侧先跑：面板打开期间不得开语音，先判活动会话并早退。
+        // 【lane（已取证）】CE 的 FurnitureInteractEvent 由 CE 的**网络包监听器**
+        // (net.momirealms.craftengine.bukkit.plugin.network.listener.game.InteractListener，一个
+        // ByteBufferPacketListener) 在交互包处理里 fire，与玩家连接同线程——即玩家 region 线程，
+        // 与 MUZ 自身右键入口（folia ServerGamePacketListenerImpl 的 ensureRunningOnSameThread 路径）
+        // 是同一条 lane，故 surface(player) 合法。
+        if (MuMenuGadgetBridge.sessionActive(player)) {
+            return false;
+        }
         if (plugin.getTableSpeechPanelService() != null
             && plugin.getTableSpeechPanelService().tryHandleRightClick(player)) {
             return true;
@@ -169,6 +179,10 @@ public final class CraftEngineProtectionListener implements Listener {
 
     /** CE 发包家具没有 Bukkit 实体事件，右键道具必须在 FurnitureInteractEvent 路由。 */
     private boolean tryUseTableGadget(Player player) {
+        // 【MuMenu 会话让位】理由同 tryOpenSpeechPanel：MUZ 先于 MuMenu 运行，必须在进入道具路由前早退。
+        if (MuMenuGadgetBridge.sessionActive(player)) {
+            return false;
+        }
         if (player == null) {
             return false;
         }

@@ -478,6 +478,26 @@ public final class PlayerOutputDispatcher {
         runPlayer(playerId, Player::closeInventory);
     }
 
+    /**
+     * 在 player lane 展示原生 Dialog。
+     *
+     * <p>Dialog（{@link net.kyori.adventure.dialog.DialogLike}）的展示与关闭必须发生在拥有该玩家的
+     * region 上：Adventure 的 {@code Audience#showDialog} 会经玩家连接发包含 dialog 的包，
+     * 与其它玩家输出同属 player lane。Dialog 核心（{@code MuzDialogService}）只经此入口展示，
+     * 不在调用线程直接触碰玩家。
+     */
+    public void showDialog(UUID playerId, net.kyori.adventure.dialog.DialogLike dialog) {
+        if (dialog == null) {
+            return;
+        }
+        runPlayer(playerId, player -> player.showDialog(dialog));
+    }
+
+    /** 在 player lane 关闭当前 Dialog。 */
+    public void closeDialog(UUID playerId) {
+        runPlayer(playerId, Player::closeDialog);
+    }
+
     /** 在 player lane 向指定玩家发送粒子。 */
     public void spawnParticle(
         UUID playerId,

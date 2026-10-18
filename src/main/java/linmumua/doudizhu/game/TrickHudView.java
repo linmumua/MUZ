@@ -101,18 +101,16 @@ final class TrickHudView {
     }
 
     /**
-     * 第四行：桌内道具栏（底图 + 图标 + 选框三层叠加）。
+     * 【历史兼容类型：BossBar 第四行道具栏已退役】此类型保留只是为了让带道具栏的旧重载仍有合法签名，
+     * 该重载现在把它忽略、直接委托三行版，因此它【不再参与出牌 HUD 的任何排布】。
      *
-     * <p>并入本 HUD 前它走 ActionBar，与对局状态提示抢同一个槽位来回覆盖闪烁；并入 BossBar 后
+     * <p>退役前的语义（保留备查）：第四行桌内道具栏（底图 + 图标 + 选框三层叠加）并入 BossBar 后
      * 与其余三行共用同一条标题，靠字形自带的固定下移档 {@link PackAssets#GADGET_BAR_ROW_DOWN_OFFSET}
-     * 落在记牌器行下方。它【不是】可连续调的自由整数，而是随资源一次性生成的固定档，
-     * 所以这里没有独立 Y 配置，只按整条 HUD 的水平居中算式排布。
-     *
-     * <p>【宽度是变长的，必须由调用方给】：栏按「N 个非空道具格 + 1 个语音格」渲染
-     * （{@code TableGadgetBarHudService} 的语义，空槽不占位），所以 {@code advancePixels}
-     * 不再等于满格常量 {@link PackAssets#gadgetBarRowAdvance()}，而是 (N+1) × 格宽。
-     * 这里就用调用方给的真实值参与容器宽 {@code W} 的取最大与居中算式，
-     * 「净前进量恒等于 W」的闭合条件因此仍然成立；{@code glyphText} 已自带字体标签。
+     * 落在记牌器行下方；它当时【不是】可连续调的自由整数，而是随资源一次性生成的固定档，
+     * 所以没有独立 Y 配置，只按整条 HUD 的水平居中算式排布。栏按「N 个非空道具格 + 1 个语音格」
+     * 渲染（{@code TableGadgetBarHudService} 的语义，空槽不占位），所以 {@code advancePixels}
+     * 不等于满格常量 {@link PackAssets#gadgetBarRowAdvance()}，而是 (N+1) × 格宽；调用方要给真实值，
+     * 让容器宽 {@code W} 的取最大与居中算式闭合。这些语义现由 MuMenu 悬浮道具面板承载。
      */
     static final class GadgetBarRow {
         static final GadgetBarRow EMPTY = new GadgetBarRow("", 0);
@@ -188,7 +186,13 @@ final class TrickHudView {
             counterCells, counterGapPixels, false);
     }
 
-    /** 连续覆盖层入口：牌与记牌器统一使用 base tier 0 的码位和独立 continuous 字体。 */
+    /**
+     * 连续覆盖层入口：牌与记牌器统一使用 base tier 0 的码位和独立 continuous 字体。
+     *
+     * <p>本重载是出牌 HUD 的【真实实现】：牌行、头像行、记牌器行三行的排布与居中算式都在这里
+     * （原实现挂在带道具栏的重载上，第四行退役后下沉到本方法）。带 {@link GadgetBarRow} 的旧重载
+     * 只是委托到这里，因此第四行已无产出路径。
+     */
     static String buildMiniMessage(
         Avatar previous,
         Avatar current,
@@ -206,18 +210,77 @@ final class TrickHudView {
         int counterGapPixels,
         boolean continuousFont
     ) {
-        return buildMiniMessage(
-            previous, current, next, slotPixels, avatarGapPixels, cards, cardStepPixels,
-            offsetProvider, heightTier, cardDownTier, xOffsetPixels, rowXOffsets,
-            counterCells, counterGapPixels, continuousFont, null, 0);
+        RowXOffsets rowX = rowXOffsets == null ? RowXOffsets.NONE : rowXOffsets;
+        List<Avatar> slots = List.of(
+            previous == null ? Avatar.EMPTY : previous,
+            current == null ? Avatar.EMPTY : current,
+            next == null ? Avatar.EMPTY : next
+        );
+        boolean hasAvatarRow = slotPixels > 0 && slots.stream().anyMatch(slot -> !slot.isEmpty());
+        List<DoudizhuCard> ordered = cards == null ? List.of() : new ArrayList<>(cards);
+        boolean hasCardRow = !ordered.isEmpty();
+        List<CounterCell> counters = counterCells == null ? List.of() : List.copyOf(counterCells);
+        boolean hasCounterRow = !counters.isEmpty();
+        if (!hasAvatarRow && !hasCardRow && !hasCounterRow) {
+            // 三行都没有：不在 PLAYING、或者三个座位都取不到人。留一条空 BossBar 没有意义。
+            return "";
+        }
+
+        // 各行各自的净前进量。行内一切偏移都算进来，这样「补到 W」的算式才闭合。
+        int cardRowAdvance = hasCardRow
+            ? (ordered.size() - 1) * cardStepPixels + PackAssets.cardGlyphAdvance(heightTier)
+            : 0;
+        int avatarRowAdvance = hasAvatarRow ? 3 * slotPixels + 2 * avatarGapPixels : 0;
+        int counterRowAdvance = counterRowAdvance(counters, counterGapPixels);
+        int containerAdvance = Math.max(
+            Math.max(cardRowAdvance, avatarRowAdvance), counterRowAdvance);
+
+        StringBuilder builder = new StringBuilder();
+        // 水平偏移【必须首尾配对】：行首 +x、行尾 -x，两者相加为 0，客户端算出的总宽不变，
+        // 于是居中基准不动，而行首那一段把所有可见字形整体推走 x 像素 —— 净效果就是精确位移 x。
+        // 只在行首加 +x 是错的：总宽会跟着涨 x，客户端居中时又把起点左移 x/2，实际只移动一半。
+        appendOffset(builder, offsetProvider, xOffsetPixels);
+
+        // 【每行的 x 必须和 pad 一起首尾配对】：行首多推 rowX，行尾就要多退 rowX，
+        // 否则「退回行首 / 补到容器宽」这两个算式不再闭合，后面的行会被前一行的 x 带着跑，
+        // 而且容器总宽会变，客户端的居中基准跟着动 —— 表现为「调 A 行的 x，B 行也在动」。
+        if (hasCardRow) {
+            int pad = (containerAdvance - cardRowAdvance) / 2 + rowX.card();
+            appendOffset(builder, offsetProvider, pad);
+            appendCardRow(builder, ordered, cardStepPixels, offsetProvider, heightTier, cardDownTier, continuousFont);
+            // 后面还有行要画就退回行首（每行都从同一个原点开始）；否则直接把光标补到容器宽。
+            appendOffset(builder, offsetProvider, hasAvatarRow || hasCounterRow
+                ? -(pad + cardRowAdvance)
+                : containerAdvance - pad - cardRowAdvance);
+        }
+        if (hasAvatarRow) {
+            int pad = (containerAdvance - avatarRowAdvance) / 2 + rowX.avatar();
+            appendOffset(builder, offsetProvider, pad);
+            appendAvatarRow(builder, slots, slotPixels, avatarGapPixels, offsetProvider);
+            appendOffset(builder, offsetProvider, hasCounterRow
+                ? -(pad + avatarRowAdvance)
+                : containerAdvance - pad - avatarRowAdvance);
+        }
+        if (hasCounterRow) {
+            int pad = (containerAdvance - counterRowAdvance) / 2 + rowX.counter();
+            appendOffset(builder, offsetProvider, pad);
+            appendCounterRow(builder, counters, counterGapPixels, offsetProvider);
+            appendOffset(builder, offsetProvider, containerAdvance - pad - counterRowAdvance);
+        }
+
+        appendOffset(builder, offsetProvider, -xOffsetPixels);
+        return builder.toString();
     }
 
     /**
-     * 带第四行（桌内九格道具栏）的连续覆盖层入口。
+     * 【历史兼容重载：BossBar 第四行道具栏已退役】保留旧签名只为兼容既有调用方，
+     * 内部直接委托给不带道具栏的三行版；{@code gadgetBar} 与 {@code gadgetBarXOffset}
+     * 一律被忽略，因此本重载【绝不产出第四行】。
      *
-     * <p>九格栏与其余三行共用容器宽 {@code W} 的居中算式：行首垫 {@code (W - 栏宽)/2}、行尾补到 {@code W}，
-     * 末行负责收口，所以「净前进量恒等于 W」与三行版本完全同构。栏不可用时传 null 或空宽，
-     * 该行整条不产出，其余三行照旧。
+     * <p>退役前的语义（保留备查）：九格栏曾作为第四行与其余三行共用容器宽 {@code W} 的居中算式
+     * ——行首垫 {@code (W - 栏宽)/2}、行尾补到 {@code W}，末行负责收口，所以「净前进量恒等于 W」
+     * 与三行版本完全同构；栏不可用时传 null 或空宽，该行整条不产出，其余三行照旧。
+     * 该栏现已改由 MuMenu 悬浮道具面板承载，出牌 HUD 只保留牌行、头像行、记牌器行。
      */
     static String buildMiniMessage(
         Avatar previous,
@@ -238,79 +301,10 @@ final class TrickHudView {
         GadgetBarRow gadgetBar,
         int gadgetBarXOffset
     ) {
-        RowXOffsets rowX = rowXOffsets == null ? RowXOffsets.NONE : rowXOffsets;
-        List<Avatar> slots = List.of(
-            previous == null ? Avatar.EMPTY : previous,
-            current == null ? Avatar.EMPTY : current,
-            next == null ? Avatar.EMPTY : next
-        );
-        boolean hasAvatarRow = slotPixels > 0 && slots.stream().anyMatch(slot -> !slot.isEmpty());
-        List<DoudizhuCard> ordered = cards == null ? List.of() : new ArrayList<>(cards);
-        boolean hasCardRow = !ordered.isEmpty();
-        List<CounterCell> counters = counterCells == null ? List.of() : List.copyOf(counterCells);
-        boolean hasCounterRow = !counters.isEmpty();
-        boolean hasGadgetBarRow = gadgetBar != null && !gadgetBar.isEmpty();
-        if (!hasAvatarRow && !hasCardRow && !hasCounterRow && !hasGadgetBarRow) {
-            // 四行都没有：不在 PLAYING、或者三个座位都取不到人。留一条空 BossBar 没有意义。
-            return "";
-        }
-
-        // 各行各自的净前进量。行内一切偏移都算进来，这样「补到 W」的算式才闭合。
-        int cardRowAdvance = hasCardRow
-            ? (ordered.size() - 1) * cardStepPixels + PackAssets.cardGlyphAdvance(heightTier)
-            : 0;
-        int avatarRowAdvance = hasAvatarRow ? 3 * slotPixels + 2 * avatarGapPixels : 0;
-        int counterRowAdvance = counterRowAdvance(counters, counterGapPixels);
-        int gadgetBarAdvance = hasGadgetBarRow ? gadgetBar.advancePixels() : 0;
-        int containerAdvance = Math.max(
-            Math.max(cardRowAdvance, avatarRowAdvance),
-            Math.max(counterRowAdvance, gadgetBarAdvance));
-
-        StringBuilder builder = new StringBuilder();
-        // 水平偏移【必须首尾配对】：行首 +x、行尾 -x，两者相加为 0，客户端算出的总宽不变，
-        // 于是居中基准不动，而行首那一段把所有可见字形整体推走 x 像素 —— 净效果就是精确位移 x。
-        // 只在行首加 +x 是错的：总宽会跟着涨 x，客户端居中时又把起点左移 x/2，实际只移动一半。
-        appendOffset(builder, offsetProvider, xOffsetPixels);
-
-        // 【每行的 x 必须和 pad 一起首尾配对】：行首多推 rowX，行尾就要多退 rowX，
-        // 否则「退回行首 / 补到容器宽」这两个算式不再闭合，后面的行会被前一行的 x 带着跑，
-        // 而且容器总宽会变，客户端的居中基准跟着动 —— 表现为「调 A 行的 x，B 行也在动」。
-        if (hasCardRow) {
-            int pad = (containerAdvance - cardRowAdvance) / 2 + rowX.card();
-            appendOffset(builder, offsetProvider, pad);
-            appendCardRow(builder, ordered, cardStepPixels, offsetProvider, heightTier, cardDownTier, continuousFont);
-            // 后面还有行要画就退回行首（每行都从同一个原点开始）；否则直接把光标补到容器宽。
-            appendOffset(builder, offsetProvider, hasAvatarRow || hasCounterRow || hasGadgetBarRow
-                ? -(pad + cardRowAdvance)
-                : containerAdvance - pad - cardRowAdvance);
-        }
-        if (hasAvatarRow) {
-            int pad = (containerAdvance - avatarRowAdvance) / 2 + rowX.avatar();
-            appendOffset(builder, offsetProvider, pad);
-            appendAvatarRow(builder, slots, slotPixels, avatarGapPixels, offsetProvider);
-            appendOffset(builder, offsetProvider, hasCounterRow || hasGadgetBarRow
-                ? -(pad + avatarRowAdvance)
-                : containerAdvance - pad - avatarRowAdvance);
-        }
-        if (hasCounterRow) {
-            int pad = (containerAdvance - counterRowAdvance) / 2 + rowX.counter();
-            appendOffset(builder, offsetProvider, pad);
-            appendCounterRow(builder, counters, counterGapPixels, offsetProvider);
-            appendOffset(builder, offsetProvider, hasGadgetBarRow
-                ? -(pad + counterRowAdvance)
-                : containerAdvance - pad - counterRowAdvance);
-        }
-        if (hasGadgetBarRow) {
-            // 九格栏自己没有独立 Y 配置：竖直位置由字形自带的固定下移档决定，这里只管水平居中，
-            // 与前几行共用同一原点，并由本行（末行）把光标补到容器宽。
-            int pad = (containerAdvance - gadgetBarAdvance) / 2 + gadgetBarXOffset;
-            appendOffset(builder, offsetProvider, pad);
-            builder.append(gadgetBar.glyphText());
-            appendOffset(builder, offsetProvider, containerAdvance - pad - gadgetBarAdvance);
-        }
-
-        appendOffset(builder, offsetProvider, -xOffsetPixels);
-        return builder.toString();
+        return buildMiniMessage(
+            previous, current, next, slotPixels, avatarGapPixels, cards, cardStepPixels,
+            offsetProvider, heightTier, cardDownTier, xOffsetPixels, rowXOffsets,
+            counterCells, counterGapPixels, continuousFont);
     }
 
     /**
@@ -498,15 +492,24 @@ final class TrickHudView {
         List<CounterCell> counterCells,
         int counterGapPixels
     ) {
-        return containerAdvance(
-            slotPixels, avatarGapPixels, cardCount, cardStepPixels, heightTier,
-            counterCells, counterGapPixels, 0);
+        int cardRow = cardCount <= 0
+            ? 0
+            : (cardCount - 1) * cardStepPixels + PackAssets.cardGlyphAdvance(heightTier);
+        int counterRow = counterRowAdvance(
+            counterCells == null ? List.of() : counterCells, counterGapPixels);
+        return Math.max(
+            Math.max(cardRow, 3 * slotPixels + 2 * avatarGapPixels), counterRow);
     }
 
     /**
-     * 带第四行（桌内九格道具栏）的版本：容器宽取四行里最宽的一行，九格栏自身宽度也要计进来。
+     * 【历史兼容重载：BossBar 第四行道具栏已退役】此入口保留旧签名以兼容既有调用方，
+     * 但 {@code gadgetBarAdvance} 参数已被忽略：第四行不再接入出牌 HUD，容器宽只由牌行、
+     * 头像行、记牌器行决定，因此本重载恒等于不带道具栏的七参版本。
      *
-     * @param gadgetBarAdvance 九格栏整条的净前进量；0 表示这一行不渲染，不参与取最大
+     * <p>退役前它取「四行里最宽的一行」，把九格栏自身宽度也计进来；栏改由 MuMenu 悬浮道具面板
+     * 承载后，出牌 HUD 的容器宽不再含任何道具栏宽度。
+     *
+     * @param gadgetBarAdvance 旧签名遗留的九格栏整条净前进量；已忽略，不参与取最大
      */
     static int containerAdvance(
         int slotPixels,
@@ -518,13 +521,8 @@ final class TrickHudView {
         int counterGapPixels,
         int gadgetBarAdvance
     ) {
-        int cardRow = cardCount <= 0
-            ? 0
-            : (cardCount - 1) * cardStepPixels + PackAssets.cardGlyphAdvance(heightTier);
-        int counterRow = counterRowAdvance(
-            counterCells == null ? List.of() : counterCells, counterGapPixels);
-        return Math.max(
-            Math.max(Math.max(cardRow, 3 * slotPixels + 2 * avatarGapPixels), counterRow),
-            Math.max(0, gadgetBarAdvance));
+        return containerAdvance(
+            slotPixels, avatarGapPixels, cardCount, cardStepPixels, heightTier,
+            counterCells, counterGapPixels);
     }
 }

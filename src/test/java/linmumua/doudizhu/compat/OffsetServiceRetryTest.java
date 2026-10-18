@@ -77,7 +77,13 @@ class OffsetServiceRetryTest {
         String source = Files.readString(PLUGIN);
         int at = source.indexOf("private ReloadSummary reloadVisualState");
         assertTrue(at > 0, "reloadVisualState 应当存在");
-        assertTrue(source.substring(at, at + 900).contains("craftEngineOffsetService.invalidate()"),
+        // 取整个方法体再断言，不用固定字符窗口：本轮 dialog-core 在方法前部新增了
+        // muzDialogService.invalidateAll() 一段（含注释），把 invalidate 调用挤出了旧的 900 字符窗口。
+        // 改成「方法体截取」后，只要 reloadVisualState 里还调 invalidate 就命中，不受前面代码增删影响。
+        int end = source.indexOf("\n    }", at);
+        assertTrue(end > at, "reloadVisualState 必须有完整方法体（找不到结束锚点）");
+        String reloadBody = source.substring(at, end);
+        assertTrue(reloadBody.contains("craftEngineOffsetService.invalidate()"),
             "/muz reload 要重试偏移解析，否则修好配置仍要重启");
     }
 

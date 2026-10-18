@@ -21,7 +21,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
@@ -30,10 +29,15 @@ import org.bukkit.inventory.ItemStack;
  * 牌桌对局中的九格道具栏数据源。
  *
  * <p>不打开 Bukkit Inventory GUI。八个虚拟道具槽和语音入口由本服务维护数据与选择状态，
- * 栏【本身】已经并入出牌 HUD（BossBar 第四行），由 {@link TrickHudService} 经
- * {@link #hudBarSnapshot(UUID)} 读取只读渲染快照后渲染；本服务不再拼 ActionBar、也不碰 ActionBar
- * 槽位（那是普通状态提示的），所以道具栏与状态提示不再互相覆盖闪烁。
- * 玩家仍用滚轮/数字键选择槽位，右键沿既有桌内道具路由执行；选择第九槽时右键打开仅自己可见的实体语音面板。
+ * 栏【本身】并入出牌 HUD（BossBar 第四行，由 {@link TrickHudService} 经
+ * {@link #hudBarSnapshot(UUID)} 读取只读渲染快照渲染；该行的实际接线由 HUD 退役批次处理）。
+ *
+ * <p>【选择不再劫持原版快捷栏】旧实现监听 {@code PlayerItemHeldEvent}（滚轮/数字键）并取消原版快捷栏
+ * 切换来选槽，会和 MuMenu 面板的滚轮/指针输入抢事件。现在选择由 MuMenu 面板经
+ * {@code /muz gadget select <1..8>} 命令真正接通（见 {@link GadgetPanelService}），本服务只保留
+ * 数据与 {@link #select(UUID, int)} 这条选择接缝，不再消费任何原版快捷栏事件。
+ * 右键沿既有桌内道具路由执行；语音入口经 {@link #openVoicePanel(Player)}（命令/面板）或
+ * {@link #tryOpenVoice(Player)}（右键九宫格第九格）打开仅自己可见的实体语音面板。
  */
 public final class TableGadgetBarHudService implements Listener {
     /**
@@ -62,6 +66,25 @@ public final class TableGadgetBarHudService implements Listener {
         }
     }
 
+    /**
+     * PAPI 用的**不可变**槽位快照。
+     *
+     * <p>【为什么单独一份】PlaceholderAPI 的 {@code onRequest} 可能被别的插件在任意线程调用，
+     * 而 {@link VirtualGadgetBar} 的读取会克隆 {@code ItemStack}（Bukkit 访问）。所以快照在
+     * player lane 上一次性构建为「纯 String / Boolean」，之后只在任意线程**读**这个不可变对象，
+     * 绝不在异步线程读背包或实体。
+     *
+     * @param slotNames  8 个真实槽位的显示名（空槽为 ""），索引用内部 0-based 槽号
+     * @param empty      8 个真实槽位是否为空，与 {@code slotNames} 同序
+     * @param selectedSlot 当前选中槽（内部 0-based，或 {@link VirtualGadgetBar#BUBBLE_SLOT} 表示语音格）
+     */
+    public record GadgetSlotSnapshot(List<String> slotNames, List<Boolean> empty, int selectedSlot) {
+        public GadgetSlotSnapshot {
+            slotNames = slotNames == null ? List.of() : List.copyOf(slotNames);
+            empty = empty == null ? List.of() : List.copyOf(empty);
+        }
+    }
+
     /* 预取失败限频窗口：本预取每 40 tick 跑一次，失败可能持续复现，限频既避免刷屏也不静默吞掉。 */
     private static final long FAILURE_LOG_INTERVAL_MILLIS = 10_000L;
 
@@ -73,6 +96,13 @@ public final class TableGadgetBarHudService implements Listener {
     private final Consumer<Player> voiceOpener;
     private final Map<UUID, VirtualGadgetBar> bars = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> selectedSlots = new ConcurrentHashMap<>();
+    /**
+     * PAPI 用的不可变槽位快照；只在 player lane 上写（载入完成、选择、保存后），任意线程可读。
+     *
+     * <p>与 {@link #bars} 分开存：{@code bars} 里是 {@link VirtualGadgetBar}（读取会克隆 ItemStack），
+     * 只能 player lane 访问；快照是纯数据，供 PlaceholderAPI 跨线程读。
+     */
+    private final Map<UUID, GadgetSlotSnapshot> snapshots = new ConcurrentHashMap<>();
     private final Map<UUID, Long> loading = new ConcurrentHashMap<>();
     private final Map<UUID, RefreshState> refreshStates = new ConcurrentHashMap<>();
     /** 已记录过「重画被跳过」告警的「桌名/玩家」键；同一组合只记一次，避免 clearTable 遍历座位时刷屏。 */
@@ -217,6 +247,7 @@ public final class TableGadgetBarHudService implements Listener {
         return selectedIndex(playerId) == VirtualGadgetBar.BUBBLE_SLOT;
     }
 
+    /** 选择指定虚拟槽位及其独立 ItemStack 快照。 */
     public void select(UUID playerId, int slot) {
         if (playerId == null || slot < 0 || slot >= SLOT_COUNT) {
             return;
@@ -232,6 +263,44 @@ public final class TableGadgetBarHudService implements Listener {
         } else {
             gadgets.clear(playerId);
         }
+        // 选择变化后重建 PAPI 快照（本方法按既有契约只在 player lane 调用，见类注释）。
+        publishSnapshot(playerId, slot);
+    }
+
+    /**
+     * 该玩家当前可见的八格快照（已加载则用缓存，未加载回退 {@link VirtualGadgetBar#defaults()}，与 HUD 同源）。
+     *
+     * <p>【只读接缝】给 Dialog 编辑屏幕读取真实物品用；返回的是不可变 {@link VirtualGadgetBar}，
+     * 但 {@code slot(i)} 会克隆 {@code ItemStack}（Bukkit 访问），所以**只能在 player lane 调用**。
+     * 不要用这条路径去读 {@code VirtualGadgetBarStore}（那是同步文件 IO）。
+     *
+     * <p>**永不返回 null**：未加载时回退 defaults()，调用方不必再兜底。
+     */
+    public VirtualGadgetBar visibleBar(UUID playerId) {
+        return bar(playerId);
+    }
+
+    /**
+     * 该玩家的不可变槽位快照（供 PlaceholderAPI 跨线程读）。
+     *
+     * <p>只返回纯数据；未加载时返回 null（而不是去读背包/实体），调用方按「无数据」处理。
+     */
+    public GadgetSlotSnapshot gadgetSlotSnapshot(UUID playerId) {
+        return playerId == null ? null : snapshots.get(playerId);
+    }
+
+    /** 在 player lane 上把八格快照拍成纯 String/Boolean，供任意线程读。 */
+    private void publishSnapshot(UUID playerId, int selectedSlot) {
+        VirtualGadgetBar snapshot = bar(playerId);
+        List<String> names = new ArrayList<>(VirtualGadgetBar.SLOT_COUNT);
+        List<Boolean> empty = new ArrayList<>(VirtualGadgetBar.SLOT_COUNT);
+        for (int slot = 0; slot < VirtualGadgetBar.SLOT_COUNT; slot++) {
+            ItemStack item = snapshot.slot(slot);
+            boolean isEmpty = item == null;
+            names.add(isEmpty ? "" : item.getType().name());
+            empty.add(isEmpty);
+        }
+        snapshots.put(playerId, new GadgetSlotSnapshot(names, empty, selectedSlot));
     }
 
     /**
@@ -349,11 +418,15 @@ public final class TableGadgetBarHudService implements Listener {
     }
 
     /**
-     * 原版快捷栏索引（滚轮/数字键给出的 0..8）映射到九格栏的真实槽位。
+     * 把「显示顺序索引」（0..N-1）映射到九格栏的真实槽位。
      *
      * <p>前 N 个索引按显示顺序命中实际道具槽（N = 当前显示的道具格数），其余索引一律落到语音格。
-     * 语音格恒在末位且永远存在，所以「选中索引超出显示范围」有确定归宿：永远能高亮到最后一格，
+     * 语音格恒在末位且永远存在，所以「索引超出显示范围」有确定归宿：永远能高亮到最后一格，
      * 不会出现「选了个不存在的格子，屏幕上没有任何选框」这种没有反馈的状态。
+     *
+     * <p>【语义变更注记】这里原先由 {@code PlayerItemHeldEvent}（滚轮/数字键）驱动，现在选择改由 MuMenu
+     * 面板的命令走**真实槽**（见 {@link GadgetPanelService}），不再经过本映射。方法保留为纯显示顺序
+     * 映射助手（也被契约测试直接验证），不影响面板路径：面板传的永远是真实槽，不按显示顺序。
      */
     static int slotForHotbarIndex(List<Integer> displayed, int hotbarIndex) {
         if (displayed != null && hotbarIndex >= 0 && hotbarIndex < displayed.size()) {
@@ -405,6 +478,30 @@ public final class TableGadgetBarHudService implements Listener {
         return true;
     }
 
+    /**
+     * 直接打开语音面板的公开接缝（不要求先选中语音格）。
+     *
+     * <p>给 {@code /muz gadget voice} 命令与 Dialog 编辑屏幕的「语音」按钮用：它们本就表达「进语音」，
+     * 不该先强迫玩家选中第九格。校验与 {@link #tryOpenVoice} 相同的同桌在线真人 PLAYING 条件，
+     * 满足才在合法 lane 打开。
+     *
+     * <p>IMPORTANT LANE: player lane。
+     *
+     * @return 已打开返回 true；玩家/桌面/阶段不满足返回 false
+     */
+    public boolean openVoicePanel(Player player) {
+        if (player == null || !player.isOnline()) {
+            return false;
+        }
+        TableManager manager = plugin.getTableManager();
+        GameTable table = manager == null ? null : manager.getTableOf(player);
+        if (table == null || table.getPhase() != GamePhase.PLAYING || table.isBot(player.getUniqueId())) {
+            return false;
+        }
+        voiceOpener.accept(player);
+        return true;
+    }
+
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
@@ -418,23 +515,15 @@ public final class TableGadgetBarHudService implements Listener {
         invalidateRefresh(playerId);
         bars.remove(playerId);
         selectedSlots.remove(playerId);
+        snapshots.remove(playerId);
     }
 
-    @EventHandler
-    public void onHeldChange(PlayerItemHeldEvent event) {
-        Player player = event.getPlayer();
-        GameTable table = plugin.getTableManager().getTableOf(player);
-        if (table == null || table.getPhase() != GamePhase.PLAYING || table.isBot(player.getUniqueId())) {
-            return;
-        }
-        event.setCancelled(true);
-        // 快捷栏索引按【显示顺序】映射到真实槽位（见 slotForHotbarIndex）：空槽不占位后，
-        // 索引 i 对应的就是第 i 个可见道具；超过可见道具数的索引一律落到语音格。
-        select(player.getUniqueId(), slotForHotbarIndex(displayedSlots(player.getUniqueId()), event.getNewSlot()));
-        // 并入 BossBar 后选槽不会自己触发重绘（本服务已经不派发 ActionBar），
-        // 所以这里主动让该玩家的出牌 HUD 立刻重画一次，选框才会跟着移动到新槽位。
-        redrawHud(table, player);
-    }
+    // 【退役：原版快捷栏选择劫持（历史说明，保留以免日后照旧因果链摸索）】
+    // 旧实现监听 PlayerItemHeldEvent（滚轮/数字键），event.setCancelled(true) 后按【显示顺序】映射真实槽
+    // （见 slotForHotbarIndex）选槽，并 redrawHud 让第四行选框跟着动。问题在于 MUZ 事件优先级是 LOWEST、
+    // MuMenu 是 HIGHEST：取消原版快捷栏切换会与 MuMenu 面板的滚轮/指针输入抢事件，而 MUZ 先跑，晚取消
+    // 拦不住它已经做出的决定。现在选择由 MuMenu 面板经 `/muz gadget select <1..8>` 走**真实槽**接通
+    // （见 GadgetPanelService.selectSlot → 本服务 select(UUID,int)），本服务不再消费任何原版快捷栏事件。
 
     public void onSaved(UUID playerId) {
         if (playerId == null) {
@@ -443,6 +532,7 @@ public final class TableGadgetBarHudService implements Listener {
         invalidateRefresh(playerId);
         bars.remove(playerId);
         selectedSlots.remove(playerId);
+        snapshots.remove(playerId);
         refresh(playerId);
     }
 
@@ -460,6 +550,7 @@ public final class TableGadgetBarHudService implements Listener {
         for (UUID playerId : table.getSeats()) {
             bars.remove(playerId);
             selectedSlots.remove(playerId);
+            snapshots.remove(playerId);
         }
         // 主动让仍在线的同桌玩家重画一次 HUD。注意回 LOBBY 路径上本方法在切阶段之前调用，
         // 此时重画的是默认九格栏，要等阶段切到 LOBBY 后的下一次刷新才整条隐藏；关桌路径则立即消失。
@@ -470,16 +561,12 @@ public final class TableGadgetBarHudService implements Listener {
     }
 
     /**
-     * 让某玩家的出牌 HUD 立刻重画一次（选槽、拆桌收尾时用）。
+     * 让某玩家的出牌 HUD 立刻重画一次（拆桌/回 LOBBY 收尾时用）。
      *
      * <p>复用 {@link GameTable} 的既有 HUD 刷新入口，与每秒的周期刷新同一条路径，避免另开一套渲染。
+     * 【退役注记】原「选槽后重画」的调用点随快捷栏劫持一起退役（见 onHeldChange 的退役说明）；
+     * 现在选择由 MuMenu 面板走命令接通，不再需要本服务主动重画第四行。
      */
-    private void redrawHud(GameTable table, Player player) {
-        if (table != null && player != null) {
-            redrawHud(table, player.getUniqueId());
-        }
-    }
-
     private void redrawHud(GameTable table, UUID playerId) {
         if (table == null || playerId == null) {
             return;
@@ -582,6 +669,7 @@ public final class TableGadgetBarHudService implements Listener {
         }
         bars.clear();
         selectedSlots.clear();
+        snapshots.clear();
         loading.clear();
         refreshStates.clear();
     }

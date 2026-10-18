@@ -1,9 +1,11 @@
 package linmumua.doudizhu.listener;
 
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.compat.MuMenuGadgetBridge;
 import linmumua.doudizhu.game.ActionBarOverlayService;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.GameTable;
+import linmumua.doudizhu.game.GadgetPanelService;
 import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.game.TableGadgetService;
 import linmumua.doudizhu.mahjong.MahjongTableManager;
@@ -65,9 +67,21 @@ public final class WorldTableInteractionListener implements Listener {
     /* 调试棒右键也可能同时投递 AT、INTERACT 两个事件，按玩家和 tick 去重。 */
     private final Map<UUID, Integer> consumedHudDebugClicks = new LinkedHashMap<>();
 
+    /**
+     * 椅侧内置面板最近一次被消费的点击时刻（纳秒）。
+     *
+     * <p>同一次物理右键会分别投递 {@code PlayerInteractEntityEvent} 与
+     * {@code PlayerInteractAtEntityEvent}（两条独立的 handler list），左键还会再走
+     * {@code EntityDamageByEntityEvent}。面板一旦被消费就必须把其它入口吃掉，否则
+     * 「点一下选中两次」会在并发下变成重复投递命令。
+     */
+    private final Map<UUID, Long> consumedChairPanelClicks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 面板点击去重窗口：150ms 足够覆盖同一次物理点击的多个事件，又不会吞掉真实连点。 */
+    private static final long CHAIR_PANEL_CLICK_DEBOUNCE_NANOS = 150_000_000L;
+
     /* 已通过调试棒建立临时行覆盖的玩家；离桌/退出时清除。 */
-    private final java.util.Set<UUID> hudDebugSessionPlayers = new java.util.LinkedHashSet<>();
-    /* 曾在牌桌内使用过调试棒的玩家；用于 tick 识别离桌。 */
+    private final java.util.Set<UUID> hudDebugSessionPlayers = new java.util.LinkedHashSet<>();    /* 曾在牌桌内使用过调试棒的玩家；用于 tick 识别离桌。 */
     private final java.util.Set<UUID> hudDebugTablePlayers = new java.util.LinkedHashSet<>();
     /* 当前仍显示假预览的玩家；换手时只隐藏预览，不清行覆盖。 */
     private final java.util.Set<UUID> hudDebugPreviewPlayers = new java.util.LinkedHashSet<>();
@@ -83,8 +97,26 @@ public final class WorldTableInteractionListener implements Listener {
         plugin.scheduler().runTimer(1L, 4L, this::tickToolPreviews);
     }
 
-    /** 只有命中语音面板时才消费右键；未命中必须放行到后续手牌/保护路由。 */
+    /**
+     * 只有命中语音面板时才消费右键；未命中必须放行到后续手牌/保护路由。
+     *
+     * <p>【MuMenu 会话让位】面板打开期间 MUZ 不得开语音：MUZ 事件优先级是 LOWEST、MuMenu 是 HIGHEST，
+     * MUZ 先跑，晚取消拦不住它已经做出的决定，所以必须由我们自己先检测活动 MuMenu 会话并早退。
+     * 返回 false = 不消费这次右键，把事件让给 MuMenu。
+     *
+     * <p>【lane 说明（已取证）】会话判据 `surface(player)` 要求在该玩家的 owner region 上调用。
+     * 本入口的三种事件都在玩家的 region 线程上触发：`PlayerInteractEvent` / `PlayerInteractEntityEvent` /
+     * `PlayerInteractAtEntityEvent` 均由 {@code ServerGamePacketListenerImpl} 的交互包处理里 fire，
+     * javap 反编译 folia-26.1.2 确认这些处理入口以 `PacketUtils.ensureRunningOnSameThread(...)` 起手
+     * （Folia 会把包派发到拥有该玩家的 region 线程），`handleInteract` 另加 `TickThread.isTickThreadFor(Entity)`
+     * 门禁；与既有手牌仲裁、工具预览是同一条 lane 假设。守卫必须**同步**决策，不能改成「投递到 player lane
+     * 再读结果」——那样拦不住当前这一次点击。若某条事件哪天不再位于玩家 lane，桥内对被拒调用不产生副作用
+     * （MuMenu 的 check 在任何操作之前），仅降级为「未判到会话」。
+     */
     private boolean tryOpenSpeechPanel(Player player) {
+        if (MuMenuGadgetBridge.sessionActive(player)) {
+            return false;
+        }
         if (plugin.getTableSpeechPanelService() != null
             && plugin.getTableSpeechPanelService().tryHandleRightClick(player)) {
             return true;
@@ -93,8 +125,16 @@ public final class WorldTableInteractionListener implements Listener {
             && plugin.getTableGadgetBarHudService().tryOpenVoice(player);
     }
 
-    /** 只有确定性路由的所有更高优先级处理都未消费时，才尝试桌内虚拟道具。 */
+    /**
+     * 只有确定性路由的所有更高优先级处理都未消费时，才尝试桌内虚拟道具。
+     *
+     * <p>【MuMenu 会话让位】面板打开期间 MUZ 不得误投掷：理由同 {@link #tryOpenSpeechPanel}——
+     * MUZ 先于 MuMenu 运行，必须在进入道具路由前先检测活动会话并早退（返回 false，让 MuMenu 处理）。
+     */
     private boolean tryUseTableGadget(Player player, ItemStack item) {
+        if (MuMenuGadgetBridge.sessionActive(player)) {
+            return false;
+        }
         if (plugin.isHudDebugStick(item)
             || plugin.isTablePlacer(item)
             || plugin.isDoudizhuTableRemover(item)) {
@@ -353,6 +393,10 @@ public final class WorldTableInteractionListener implements Listener {
      */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInteract(PlayerInteractEntityEvent event) {
+        if (handleChairPanelClick(event.getPlayer(), event.getRightClicked())) {
+            event.setCancelled(true);
+            return;
+        }
         if (event.getHand() == EquipmentSlot.HAND
             && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
@@ -466,6 +510,10 @@ public final class WorldTableInteractionListener implements Listener {
      */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInteractAt(PlayerInteractAtEntityEvent event) {
+        if (handleChairPanelClick(event.getPlayer(), event.getRightClicked())) {
+            event.setCancelled(true);
+            return;
+        }
         if (event.getHand() == EquipmentSlot.HAND
             && plugin.isHudDebugStick(event.getPlayer().getInventory().getItemInMainHand())) {
             event.setCancelled(true);
@@ -614,6 +662,11 @@ public final class WorldTableInteractionListener implements Listener {
         // 左键只发这个攻击事件，PlayerInteractEvent 压根不触发。
         // 不在这里补一次，那些角度下就永远出不了牌（悬停却照常高亮，因为悬停不看实体）。
         Player damager = (Player) event.getDamager();
+        // 椅侧内置面板：左键同样要能选格（面板的 Interaction 被攻击时只会走这条事件）。
+        if (handleChairPanelClick(damager, event.getEntity())) {
+            event.setCancelled(true);
+            return;
+        }
         // 追踪：六个事件入口之一。onAttack 是唯一走左键的入口
         boolean rightClick = false;
         Entity blocking = event.getEntity();
@@ -638,6 +691,59 @@ public final class WorldTableInteractionListener implements Listener {
     public void onEntityDamage(EntityDamageEvent event) {
         if (plugin.getPhysicalTableManager().isProtectedEntity(event.getEntity().getUniqueId())) {
             event.setCancelled(true);
+        }
+    }
+
+    /**
+     * 椅侧内置双面板的点击路由：射线命中 → 九宫格格位 → 选中道具 / 打开语音。
+     *
+     * <p>【为什么放在事件入口最前】面板的判定盒会拦右键，一旦让后面的手牌、按钮或保护判定先跑，
+     * 面板看起来就像「点了没反应」。这里是 UI 优先，命中即消费，并且**选完立刻关闭两块板**：
+     * 关闭后右键才能继续用于投掷道具，这与既有「选完即关、再瞄准投掷」的交互一致。
+     *
+     * <p>【去重】一次物理点击会投递多个事件，用 {@link #CHAIR_PANEL_CLICK_DEBOUNCE_NANOS}
+     * 窗口只让第一个生效；否则同一次点击会向命令层重复投递。
+     *
+     * @return 是否消费了本次点击（调用方据此取消事件）
+     */
+    private boolean handleChairPanelClick(Player player, Entity clicked) {
+        if (player == null || clicked == null) {
+            return false;
+        }
+        linmumua.doudizhu.game.ChairPanelDisplayService panels = plugin.getChairPanelDisplayService();
+        if (panels == null || !panels.ownsPanelEntity(clicked.getUniqueId())) {
+            return false;
+        }
+        UUID playerId = player.getUniqueId();
+        long now = System.nanoTime();
+        Long previous = consumedChairPanelClicks.get(playerId);
+        if (previous != null && now - previous < CHAIR_PANEL_CLICK_DEBOUNCE_NANOS) {
+            return true;
+        }
+        consumedChairPanelClicks.put(playerId, now);
+        GadgetPanelService gadgetPanels = plugin.getGadgetPanelService();
+        linmumua.doudizhu.game.ChairPanelDisplayService.Click click = panels.click(player);
+        // 命中后立刻关板：Interaction 会一直拦右键，留着玩家就投不出道具。
+        panels.close(playerId);
+        if (click == null || gadgetPanels == null) {
+            return true;
+        }
+        GadgetPanelService.Status status = click.cell() == linmumua.doudizhu.game.ChairPanelSurface.VOICE_CELL
+            ? gadgetPanels.openVoice(player)
+            : gadgetPanels.selectSlot(player, click.cell() + 1);
+        if (status != GadgetPanelService.Status.OK) {
+            hintChairPanel(player, gadgetPanels.hint(status));
+        }
+        return true;
+    }
+
+    private void hintChairPanel(Player player, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        PlayerOutputDispatcher output = plugin.getPlayerOutputDispatcher();
+        if (output != null) {
+            output.sendActionBar(player.getUniqueId(), MuzTheme.warning(text));
         }
     }
 

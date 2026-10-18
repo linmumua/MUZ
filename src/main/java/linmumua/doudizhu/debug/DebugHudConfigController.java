@@ -294,36 +294,13 @@ public final class DebugHudConfigController {
             PackAssets.COUNTER_DIGIT_HEIGHT,
             PackAssets.COUNTER_LABEL_ASCENT,
             PackAssets.COUNTER_FRAME_TOP_DELTA,
-            PackAssets.COUNTER_DIGIT_INSET,
-            gadgetBarGeometry());
+            PackAssets.COUNTER_DIGIT_INSET);
     }
 
-    /**
-     * 只读道具栏预览图层的几何。
-     *
-     * <p>【它是只读预览，不是可编辑层】：道具栏的竖直位置由构建期固定下移档
-     * {@link PackAssets#GADGET_BAR_ROW_DOWN_OFFSET} 决定，没有配置键，也不进 18 键白名单，
-     * 所以几何只需要「格宽/格高/净前进量/下移档/各层真实 PNG 路径」，前端据此换算位置与图片。
-     * 各层 PNG 的键与 {@code DebugWebServer} 的 {@code /api/resource/} 白名单同源（都取
-     * {@link PackAssets#gadgetBarIconTexturePath(int)} 这批常量），前端不复算文件名或码位。
-     */
-    private static PreviewGeometry.GadgetBarGeometry gadgetBarGeometry() {
-        LinkedHashMap<String, String> textures = new LinkedHashMap<>();
-        textures.put("base", "muz:" + PackAssets.GADGET_BAR_TEXTURE_BASE);
-        textures.put("select", "muz:" + PackAssets.GADGET_BAR_TEXTURE_SELECT);
-        for (int kind = PackAssets.GADGET_BAR_EGG; kind <= PackAssets.GADGET_BAR_SPEECH; kind++) {
-            textures.put(PackAssets.gadgetBarIconName(kind),
-                "muz:" + PackAssets.gadgetBarIconTexturePath(kind));
-        }
-        return new PreviewGeometry.GadgetBarGeometry(
-            PackAssets.GADGET_BAR_FONT,
-            PackAssets.GADGET_BAR_CELL_WIDTH,
-            PackAssets.GADGET_BAR_CELL_HEIGHT,
-            PackAssets.GADGET_BAR_CELL_ADVANCE,
-            PackAssets.GADGET_BAR_ROW_DOWN_OFFSET,
-            PackAssets.GADGET_BAR_SLOT_COUNT,
-            Map.copyOf(textures));
-    }
+    // 退役：原先这里是「只读道具栏预览图层」（原出牌 HUD BossBar 第四行）的几何出口 gadgetBarGeometry()。
+    // 该图层随第四行一并移除，Debug Web 页面不再消费道具栏几何，所以这里不再下发 gadgetBar。
+    // 注意：正式的九格道具栏字体/PNG 资源（PackAssets.GADGET_BAR_* 及其构建期产物）仍然保留——
+    // 它们服务游戏内出牌 HUD 与资源包，与 Debug Web 预览是两个消费者，不要跟着一并删掉。
 
     private static int defaultAvatarScale() {
         return PackAssets.avatarPixelScaleTierOf(6) >= 0
@@ -724,8 +701,7 @@ public final class DebugHudConfigController {
         List<CounterTierGeometry> counterTiers,
         int counterCellWidth, int counterCellHeight, int counterAdvance,
         int counterLabelHeight, int counterFrameHeight, int counterDigitHeight,
-        int counterLabelAscent, int counterFrameTopDelta, int counterDigitInset,
-        GadgetBarGeometry gadgetBar) {
+        int counterLabelAscent, int counterFrameTopDelta, int counterDigitInset) {
         public PreviewGeometry {
             cards = List.copyOf(cards);
             avatars = List.copyOf(avatars);
@@ -736,25 +712,8 @@ public final class DebugHudConfigController {
             counterTiers = List.copyOf(counterTiers);
         }
 
-        /**
-         * 只读道具栏预览图层的几何；全部是构建期常量，前端只做换算不做复算。
-         *
-         * @param font           字形族名（仅信息展示用）
-         * @param cellWidth      单元格宽（MC 像素）
-         * @param cellHeight     单元格高（MC 像素）
-         * @param cellAdvance    单元格净前进量；整条栏宽 = 显示格数 × 本值
-         * @param rowDownOffset  构建期固定下移档；第四行字形顶在基线下
-         *                       {@code rowDownOffset - cellHeight} 处，前端据此换算竖直位置
-         * @param maxCells       满格格数（8 个道具格 + 1 个语音格）
-         * @param textures       各层真实 PNG 的 {@code /api/resource/} 键，按 base/select/egg/water/tomato/speech 命名
-         */
-        public record GadgetBarGeometry(
-            String font, int cellWidth, int cellHeight, int cellAdvance,
-            int rowDownOffset, int maxCells, Map<String, String> textures) {
-            public GadgetBarGeometry {
-                textures = Map.copyOf(textures);
-            }
-        }
+        // 退役：只读道具栏预览图层的几何记录 `GadgetBarGeometry` 已随该图层移除，
+        // 页面不再消费道具栏几何（见本文件 gadgetBarGeometry 处的退役说明）。
 
         public record CardGeometry(int tier, int height, int width, int advance) {}
 

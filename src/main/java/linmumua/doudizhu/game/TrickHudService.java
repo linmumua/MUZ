@@ -734,10 +734,16 @@ final class TrickHudService {
             && (visibleRows & 4) != 0;
         List<UUID> tableBotIds = botIdsOf(previous, current, next);
         int avatarRowDownTier = current0.avatarRowDownTier();
-        // 第四行：桌内九格道具栏。只在【正式牌桌路由】且【道具功能开着】时渲染；
-        // 调试棒预览（forceCounterWithoutItem）与「只显示指定行」共用本入口，但九格栏只跟正式对局，
-        // 所以这里读的是插入的只读栏快照，快照为 null 表示该行不渲染，其余三行照旧。
-        TrickHudView.GadgetBarRow gadgetBarRow = gadgetBarRowOf(viewerId);
+        // 【历史兼容说明：BossBar 第四行道具栏已退役】本入口此前在这里读 TableGadgetBarHudService
+        // 的只读渲染快照（hudBarSnapshot），把「桌内九格道具栏」拼成 BossBar 第四行；
+        // 调试棒预览（forceCounterWithoutItem）与「只显示指定行」共用本入口，但九格栏只跟正式对局。
+        // 该栏现已改由 MuMenu 悬浮道具面板承载，所以这里【不再接线】：既不查询栏快照，也不再向 View
+        // 传道具栏参数。即便 TrickHudView 仍保留带 GadgetBarRow 的旧重载以兼容签名，本入口也只走三行版，
+        // 第四行永远不产出；前三行的宽度与居中闭合算式完全不变。
+        //
+        // 退役前的宽度语义（保留备查）：栏按「N 个非空道具格 + 1 个语音格」变长，宽度【直接取快照
+        // 自带的真实值】，绝不由调用方按「满格 9 格」的常量推算——自己推算会与数据源的实际字形长度
+        // 脱节，容器宽一算错整条 HUD 的水平居中就跟着漂。退役后这一行整条不再参与容器宽。
         String line = TrickHudView.buildMiniMessage(
             showAvatars ? avatarSlot(previous, SIDE_AVATAR_SCALE, tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
             showAvatars ? avatarSlot(current, settings.avatarScale(), tableBotIds, avatarRowDownTier, continuousFont) : TrickHudView.Avatar.EMPTY,
@@ -754,30 +760,9 @@ final class TrickHudService {
             showCounter ? counterCells(playedCounts, remainingCounts, settings.counterHideExhausted(),
                 settings.counterScale(), settings.counterDownOffsetTier(), continuousFont) : List.of(),
             settings.counterGap(),
-            continuousFont,
-            gadgetBarRow,
-            0
+            continuousFont
         );
         apply(viewer, line);
-    }
-
-    /**
-     * 取该玩家当前桌内道具栏的只读快照，包成第四行片段；没有就返回空行。
-     *
-     * <p>宽度【直接取快照自带的真实宽度】，不再由这里按「满格 9 格」的常量推算：
-     * 栏现在按「N 个非空道具格 + 1 个语音格」变长，自己推算就会与 Service 的实际字形长度脱节，
-     * 容器宽 {@code W} 一算错整条 HUD 的水平居中就跟着漂。字体标签由字形片段自带。
-     */
-    private TrickHudView.GadgetBarRow gadgetBarRowOf(UUID viewerId) {
-        TableGadgetBarHudService gadgetBar = plugin.getTableGadgetBarHudService();
-        if (gadgetBar == null) {
-            return TrickHudView.GadgetBarRow.EMPTY;
-        }
-        TableGadgetBarHudService.HudBarSnapshot snapshot = gadgetBar.hudBarSnapshot(viewerId);
-        if (snapshot == null || snapshot.glyphText().isEmpty() || snapshot.advancePixels() <= 0) {
-            return TrickHudView.GadgetBarRow.EMPTY;
-        }
-        return new TrickHudView.GadgetBarRow(snapshot.glyphText(), snapshot.advancePixels());
     }
 
     /**

@@ -73,6 +73,17 @@ public record RoundOpeningSettings(
         throw new IllegalArgumentException(key + " 必须为整数 tick");
     }
 
+    /**
+     * 开局文案模板。
+     *
+     * <p>占位符：{@code %seconds%} 换成剩余秒数裸数字、{@code %player%} 换成玩家名、
+     * {@code %multiplier%} 换成明牌倍率裸数字（如 {@code 3}，模板自己带 ×）。
+     *
+     * <p>{@code revealing} / {@code revealed} / {@code reveal-button} 三条现在都支持
+     * {@code %multiplier%}：明牌倍率不再是固定的 ×2，而是按已完成发牌批数递减的阶梯
+     * （{@link RevealMultiplierLadder}），写死倍率的文案会和实际结算对不上。
+     * 模板里不含该占位符时原样输出，不做追加——文案归配置与 UI 所有。
+     */
     public record Messages(
         String dealing,
         String flipping,
@@ -87,9 +98,9 @@ public record RoundOpeningSettings(
         public Messages {
             dealing = nonBlank(dealing, "正在发牌，请稍候。");
             flipping = nonBlank(flipping, "手牌翻转中，请稍候。");
-            revealing = nonBlank(revealing, "明牌窗口：还剩 %seconds% 秒，可自愿明牌（整局最多 ×2）。");
-            revealed = nonBlank(revealed, "%player% 已明牌，本局公共倍率变为 ×2。");
-            revealButton = nonBlank(revealButton, "明牌 ×2");
+            revealing = nonBlank(revealing, "明牌窗口：还剩 %seconds% 秒，可自愿明牌（当前 ×%multiplier%）。");
+            revealed = nonBlank(revealed, "%player% 已明牌，本局公共倍率变为 ×%multiplier%。");
+            revealButton = nonBlank(revealButton, "明牌 ×%multiplier%");
             revealClosed = nonBlank(revealClosed, "明牌窗口已结束，开始叫地主。");
             alreadyRevealed = nonBlank(alreadyRevealed, "你这一局已经明牌了。");
             botCannotReveal = nonBlank(botCannotReveal, "机器人默认不明牌。");
@@ -100,9 +111,9 @@ public record RoundOpeningSettings(
             return new Messages(
                 config.getString("round-opening.messages.dealing", "正在发牌，请稍候。"),
                 config.getString("round-opening.messages.flipping", "手牌翻转中，请稍候。"),
-                config.getString("round-opening.messages.revealing", "明牌窗口：还剩 %seconds% 秒，可自愿明牌（整局最多 ×2）。"),
-                config.getString("round-opening.messages.revealed", "%player% 已明牌，本局公共倍率变为 ×2。"),
-                config.getString("round-opening.messages.reveal-button", "明牌 ×2"),
+                config.getString("round-opening.messages.revealing", "明牌窗口：还剩 %seconds% 秒，可自愿明牌（当前 ×%multiplier%）。"),
+                config.getString("round-opening.messages.revealed", "%player% 已明牌，本局公共倍率变为 ×%multiplier%。"),
+                config.getString("round-opening.messages.reveal-button", "明牌 ×%multiplier%"),
                 config.getString("round-opening.messages.reveal-closed", "明牌窗口已结束，开始叫地主。"),
                 config.getString("round-opening.messages.already-revealed", "你这一局已经明牌了。"),
                 config.getString("round-opening.messages.bot-cannot-reveal", "机器人默认不明牌。"),

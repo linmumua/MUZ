@@ -209,22 +209,16 @@ public class DebugHudConfigControllerTest {
         assertEquals(PackAssets.COUNTER_LABEL_ASCENT, geometry.counterLabelAscent());
         assertEquals(PackAssets.COUNTER_FRAME_TOP_DELTA, geometry.counterFrameTopDelta());
         assertEquals(PackAssets.COUNTER_DIGIT_INSET, geometry.counterDigitInset());
-        // 只读道具栏图层（第四行）几何：竖直位置靠构建期固定下移档换算，页面不复算码位/宽度。
-        DebugHudConfigController.PreviewGeometry.GadgetBarGeometry bar = geometry.gadgetBar();
-        assertEquals(PackAssets.GADGET_BAR_FONT, bar.font());
-        assertEquals(PackAssets.GADGET_BAR_CELL_WIDTH, bar.cellWidth());
-        assertEquals(PackAssets.GADGET_BAR_CELL_HEIGHT, bar.cellHeight());
-        assertEquals(PackAssets.GADGET_BAR_CELL_ADVANCE, bar.cellAdvance());
-        assertEquals(PackAssets.GADGET_BAR_ROW_DOWN_OFFSET, bar.rowDownOffset());
-        assertEquals(PackAssets.GADGET_BAR_SLOT_COUNT, bar.maxCells());
-        assertEquals(PackAssets.GADGET_BAR_TEXTURE_BASE, bar.textures().get("base").substring("muz:".length()));
-        assertEquals(PackAssets.GADGET_BAR_TEXTURE_SELECT, bar.textures().get("select").substring("muz:".length()));
-        for (int kind = PackAssets.GADGET_BAR_EGG; kind <= PackAssets.GADGET_BAR_SPEECH; kind++) {
-            assertEquals("muz:" + PackAssets.gadgetBarIconTexturePath(kind),
-                bar.textures().get(PackAssets.gadgetBarIconName(kind)),
-                "图标种类与纹理名必须与 build.gradle.kts 同源：" + kind);
+        // 退役：只读道具栏预览图层（原出牌 HUD BossBar 第四行）已随该行移除，
+        // PreviewGeometry 不再向页面下发道具栏几何。这里用反射把该机制钉住：
+        // 一旦有人把 gadgetBar 组件或 GadgetBarGeometry 记录加回来，这条断言立刻变红。
+        for (var component : DebugHudConfigController.PreviewGeometry.class.getRecordComponents()) {
+            assertFalse("gadgetBar".equals(component.getName()),
+                "PreviewGeometry 不得再下发退役的道具栏几何组件：" + component.getName());
         }
-        assertEquals(6, bar.textures().size(), "底图、选框与四个图标：不允许悄悄多出或少掉条目");
+        assertFalse(java.util.Arrays.stream(DebugHudConfigController.PreviewGeometry.class.getDeclaredClasses())
+                .anyMatch(type -> "GadgetBarGeometry".equals(type.getSimpleName())),
+            "PreviewGeometry 不得再包含退役的 GadgetBarGeometry 记录");
 
         TrickHudPreview.CounterSnapshot fixture = TrickHudPreview.counterSnapshot();
         assertEquals(CardRank.values().length, geometry.counters().size());

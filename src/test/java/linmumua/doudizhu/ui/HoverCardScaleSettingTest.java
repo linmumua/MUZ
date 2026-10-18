@@ -8,23 +8,24 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import linmumua.doudizhu.DoudizhuPlugin.AdminSetting;
+import linmumua.doudizhu.ui.HandInventoryHolder.AdminPage;
+import linmumua.doudizhu.ui.dialog.AdminMenuModel;
 import org.junit.jupiter.api.Test;
 
 /**
  * 锁住「悬停放大倍数」这一项的数值语义与菜单接线。
  *
- * 为什么值得单独一条：悬停突出效果一度被改成「沿法向向后平移」，
+ * <p>为什么值得单独一条：悬停突出效果一度被改成「沿法向向后平移」，
  * 平移会让射线与牌平面的交点跟着悬停漂移，形成抖动闭环，因此那一项已被删除，
  * 突出效果重新由这一项独家承担。它的上下限、步长归属、以及它在菜单里到底
  * 调不调得到，都是玩家能直接感知、而编译器完全管不到的东西。
  */
 class HoverCardScaleSettingTest {
-    private static final Path GUI = Path.of("src/main/java/linmumua/doudizhu/ui/HandGuiService.java");
-    private static final Path LISTENER = Path.of("src/main/java/linmumua/doudizhu/listener/HandGuiListener.java");
+    private static final Path DIALOG_SCREEN = Path.of(
+        "src/main/java/linmumua/doudizhu/ui/dialog/AdminDialogScreen.java");
 
     /**
      * 下限必须是 1.0：小于 1 等于悬停时牌反而缩小，
@@ -44,7 +45,7 @@ class HoverCardScaleSettingTest {
     /**
      * 这一项跟随 GUI 的全局微调精度，不钉死自己的步长。
      *
-     * 可用区间 [1.0, 2.5] 只有 1.5 宽，全局最小档 0.01 就能给出 150 个档位，
+     * <p>可用区间 [1.0, 2.5] 只有 1.5 宽，全局最小档 0.01 就能给出 150 个档位，
      * 够细了；额外钉一个固定步长只会让它和同页其它缩放项手感不一致。
      */
     @Test
@@ -60,57 +61,60 @@ class HoverCardScaleSettingTest {
     }
 
     /**
-     * 手牌页每个槽位在 GUI 里画的设置，必须和 Listener 里同一槽位调整的设置一致。
+     * 卡牌页每个槽位声明的设置，必须与旧箱子版完全一致，且悬停放大倍数仍在槽位 25。
      *
-     * 这条守的是真实踩过的坑：槽位与 case 分开写在两个文件里，
-     * 加新项时很容易只补一边，或者两边编号错位一格——
-     * 结果是点了「悬停放大倍数」实际在改「悬停上移高度」，
-     * 而 AdminSettingGuiCoverageTest 只查「这一项有没有出现过」，查不出错位。
+     * <p>【迁移说明：断言对象从「旧箱子绘制/分派源码」改为「AdminMenuModel 纯数据」】
+     * 旧版本从 {@code HandGuiService} 的 {@code case DDZ_CARDS} 块里抠 {@code setItem(N, adminSettingItem(...))}，
+     * 再从 {@code HandGuiListener.handleAdminCardsPage} 抠 {@code case N -> adjust(...)}，两边逐槽对齐，
+     * 专门守「槽位与分派写死在两个文件里、加新项只补一边导致点错设置」这个坑。
+     * 管理菜单迁到 Dialog 后，绘制与分派合并成一份 {@link AdminMenuModel}（页 → 槽位 → 动作），
+     * 槽位错位这个坑在结构上被消除：按钮由 {@code AdminDialogScreen} 遍历 {@code AdminMenuModel} 生成。
+     * 因此这里改为核对 AdminMenuModel 声明的卡牌页槽位→设置映射，并顺带钉住这个「单一来源」结构本身。
      */
     @Test
-    void everyCardPageSlotAdjustsTheSettingItDraws() throws IOException {
-        Map<Integer, String> drawn = drawnCardPageSlots();
-        Map<Integer, String> handled = handledCardPageSlots();
+    void everyCardPageSlotDeclaresTheSettingItAdjusts() throws IOException {
+        Map<Integer, AdminSetting> declared = settingSlotsOf(AdminPage.DDZ_CARDS);
 
-        assertEquals(drawn, handled, "手牌页的槽位与 adjust 分派对不上，点击会改错设置");
-        assertEquals(
-            "HOVER_CARD_SCALE",
-            drawn.get(25),
-            "悬停放大倍数应当占手牌页槽位 25"
-        );
+        Map<Integer, AdminSetting> expected = new LinkedHashMap<>();
+        expected.put(10, AdminSetting.PRIVATE_CARD_SCALE);
+        expected.put(12, AdminSetting.PRIVATE_CARD_WIDTH_SCALE);
+        expected.put(13, AdminSetting.PRIVATE_CARD_HEIGHT_SCALE);
+        expected.put(14, AdminSetting.PRIVATE_CARD_DEPTH_SCALE);
+        expected.put(19, AdminSetting.HAND_SPACING);
+        expected.put(22, AdminSetting.CARD_DEPTH_OFFSET);
+        expected.put(24, AdminSetting.HOVER_CARD_LIFT);
+        expected.put(25, AdminSetting.HOVER_CARD_SCALE);
+        expected.put(28, AdminSetting.GLOBAL_HAND_LATERAL);
+        expected.put(29, AdminSetting.GLOBAL_HAND_VERTICAL);
+        expected.put(30, AdminSetting.GLOBAL_HAND_DEPTH);
+
+        assertEquals(expected, declared, "卡牌页声明的槽位与旧箱子版不一致，玩家会点不到或点到别处");
+        assertEquals(AdminSetting.HOVER_CARD_SCALE, declared.get(25), "悬停放大倍数应当占卡牌页槽位 25");
+
+        // 单一来源结构：绘制屏必须遍历 AdminMenuModel，而不是自己再写一份槽位表。
+        String screen = Files.readString(DIALOG_SCREEN);
+        assertTrue(screen.contains("AdminMenuModel.page(page)") || screen.contains("AdminMenuModel.page("),
+            "管理 Dialog 屏必须从 AdminMenuModel 取页内容，否则槽位又会散成两份");
+        assertTrue(screen.contains("model.entries()"),
+            "管理 Dialog 屏必须遍历 AdminMenuModel 的按钮列表来生成动作");
     }
 
-    private static Map<Integer, String> drawnCardPageSlots() throws IOException {
-        String block = section(Files.readString(GUI), "case DDZ_CARDS -> {", "\n            }");
-        Pattern pattern = Pattern.compile(
-            "setItem\\((\\d+), adminSettingItem\\(Material\\.\\w+, DoudizhuPlugin\\.AdminSetting\\.(\\w+)\\)\\)"
-        );
-        return collect(pattern, block);
-    }
-
-    private static Map<Integer, String> handledCardPageSlots() throws IOException {
-        String block = section(Files.readString(LISTENER), "private void handleAdminCardsPage", "\n    }");
-        Pattern pattern = Pattern.compile(
-            "case (\\d+) -> adjust\\(player, DoudizhuPlugin\\.AdminSetting\\.(\\w+),"
-        );
-        return collect(pattern, block);
-    }
-
-    private static Map<Integer, String> collect(Pattern pattern, String block) {
-        Map<Integer, String> found = new LinkedHashMap<>();
-        Matcher matcher = pattern.matcher(block);
-        while (matcher.find()) {
-            found.put(Integer.parseInt(matcher.group(1)), matcher.group(2));
+    /** 某一管理页里所有 SETTING 按钮的「旧槽位 → 设置项」映射。 */
+    private static Map<Integer, AdminSetting> settingSlotsOf(AdminPage page) {
+        Map<Integer, AdminSetting> slots = new LinkedHashMap<>();
+        for (AdminMenuModel.Entry entry : AdminMenuModel.page(page).entries()) {
+            if (entry.kind() == AdminMenuModel.Kind.SETTING) {
+                slots.put(entry.slot(), (AdminSetting) entry.target());
+            }
         }
-        assertFalse(found.isEmpty(), "没有从源码里解析出任何槽位，说明这条测试的正则已经跟代码脱节");
-        return found;
+        assertFalse(slots.isEmpty(), "从 AdminMenuModel 里没解析出任何槽位，这条测试的锚点已失效");
+        return slots;
     }
 
-    private static String section(String source, String from, String to) {
-        int start = source.indexOf(from);
-        assertTrue(start >= 0, "源码里找不到 " + from + "，这条测试的锚点已失效");
-        int end = source.indexOf(to, start);
-        assertTrue(end > start, "源码里找不到 " + from + " 之后的结束锚点");
-        return source.substring(start, end);
+    /** 这张表本身不能烂掉：卡牌页必须仍存在且仍是非空的真实页。 */
+    @Test
+    void cardPageIsStillDeclared() {
+        List<AdminSetting> settings = AdminMenuModel.settingsOf(AdminPage.DDZ_CARDS);
+        assertTrue(settings.contains(AdminSetting.HOVER_CARD_SCALE), "卡牌页必须包含悬停放大倍数");
     }
 }

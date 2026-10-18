@@ -14,3 +14,9 @@ tools/
 模型/
 .narrafork/
 
+
+# 本地临时调试产物
+.tmp-*
+dist-test/
+hs_err_pid*.log
+replay_pid*.log

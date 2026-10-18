@@ -202,7 +202,7 @@ public final class DoudizhuCommand implements TabExecutor {
                         targetName = player.getName();
                     }
                     if (sender instanceof Player player) {
-                        plugin.getHandGuiService().openHistory(player, targetId, targetName, page);
+                        plugin.openHistoryDialog(player, targetId, targetName, page);
                     } else {
                         plugin.buildHistoryComponents(targetId, targetName, page, 5).forEach(sender::sendMessage);
                     }
@@ -241,7 +241,7 @@ public final class DoudizhuCommand implements TabExecutor {
                 }
                 case "labels", "settings" -> {
                     Player player = requirePlayer(sender);
-                    plugin.getHandGuiService().openSettings(player);
+                    plugin.openPlayerSettings(player);
                 }
                 case "status" -> {
                     Player player = requirePlayer(sender);
@@ -302,7 +302,30 @@ public final class DoudizhuCommand implements TabExecutor {
                         return true;
                     }
                     Player player = requirePlayer(sender);
-                    plugin.getHandGuiService().openAdminModels(player);
+                    plugin.openAdminMenu(player);
+                }
+                case "gadget" -> {
+                    // 桌内道具的三个入口：panel（MuMenu 悬浮面板）、select（真实槽 0..7）、voice（私有语音面板）、
+                    // edit（原生 Dialog 编辑八槽）。真实投掷与语音业务仍由既有服务负责，这里只做路由与提示。
+                    Player player = requirePlayer(sender);
+                    String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+                    switch (action) {
+                        case "panel" -> plugin.openGadgetPanel(player);
+                        case "edit" -> plugin.openGadgetEditor(player);
+                        case "voice" -> plugin.openGadgetVoice(player);
+                        case "select" -> {
+                            requireArgs(args, 3, "/muz gadget select <1-8>");
+                            int oneBased;
+                            try {
+                                oneBased = Integer.parseInt(args[2]);
+                            } catch (NumberFormatException failure) {
+                                throw new IllegalArgumentException("槽位必须是 1-8 的数字。");
+                            }
+                            plugin.selectGadgetSlot(player, oneBased);
+                        }
+                        default -> throw new IllegalArgumentException(
+                            "用法: /muz gadget <panel|edit|select <1-8>|voice>");
+                    }
                 }
                 case "debug" -> {
                     if (!sender.hasPermission("muz.admin")) {
@@ -365,7 +388,7 @@ public final class DoudizhuCommand implements TabExecutor {
             return List.of();
         }
         if (args.length == 1) {
-            List<String> options = new ArrayList<>(List.of("help", "create", "set", "give", "history", "chip", "remove", "bot", "list", "settings", "labels", "status"));
+            List<String> options = new ArrayList<>(List.of("help", "create", "set", "give", "history", "chip", "remove", "bot", "list", "settings", "labels", "status", "gadget"));
             if (sender.hasPermission("muz.admin")) {
                 options.addAll(List.of("reload", "admin", "forceend", "debug"));
             }
@@ -393,6 +416,12 @@ public final class DoudizhuCommand implements TabExecutor {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("admin")) {
             return filter(List.of("remove"), args[1]);
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("gadget")) {
+            return filter(List.of("panel", "edit", "select", "voice"), args[1]);
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("gadget") && args[1].equalsIgnoreCase("select")) {
+            return filter(List.of("1", "2", "3", "4", "5", "6", "7", "8"), args[2]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("debug")) {
             return filter(List.of("add", "remove", "bot", "hitbox", "web"), args[1]);
@@ -477,6 +506,7 @@ public final class DoudizhuCommand implements TabExecutor {
         lines.add("/muz settings - 随时打开你的个人偏移微调菜单");
         lines.add("/muz labels - 兼容旧命令，效果同 /muz settings");
         lines.add("/muz status - 查看当前牌桌状态");
+        lines.add("/muz gadget <panel|edit|select <1-8>|voice> - 桌内道具：悬浮面板 / 编辑八槽 / 选择槽位 / 语音面板");
         if (sender.hasPermission("muz.admin")) {
             lines.add("/muz reload - 动态重载配置、资源导出与已放置牌桌");
             lines.add("/muz admin - 打开管理员全局配置菜单");

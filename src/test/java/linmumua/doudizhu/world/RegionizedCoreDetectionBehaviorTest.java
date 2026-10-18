@@ -60,6 +60,30 @@ class RegionizedCoreDetectionBehaviorTest {
             "Paper 品牌对 papermc:folia 不兼容，必须判为非区域化核心");
     }
 
+    /**
+     * 品牌不是 {@code papermc:folia} 但存在 {@code RegionizedServer} ⇒ 仍是区域化核心。
+     *
+     * <p>【这是 1.10.65 修掉的真实缺陷，必须有用例钉住】现场 mucore-26.3 是 Folia 派生核心：
+     * {@code isBrandCompatible(papermc:folia)} 正常返回 {@code false}（它不是官方 Folia），
+     * 而它有完整的 {@code RegionizedServer}。旧实现在品牌返回 false 时**直接短路**，
+     * 永不执行类回退，于是把 mucore 判成 Paper/Leaf —— 恢复存档牌桌时在 global lane 同步
+     * {@code getChunkAt}，真实抛 {@code Async chunk retrieval} 并每 5 秒刷屏。
+     */
+    @Test
+    void forkedFoliaCoreWithoutFoliaBrandIsStillRegionized() {
+        assertTrue(RegionizedCoreDetector.isRegionized(() -> false, REAL_FOLIA, warnings::add),
+            "品牌不是 Folia 但有 RegionizedServer 的派生核心必须判为区域化，否则会走同步拉区块分支");
+        assertTrue(warnings.isEmpty(), "这条判定是正常路径，不应产生告警");
+    }
+
+    /** 反证：同一条品牌为 false 的输入，若没有 RegionizedServer（Paper/Leaf），仍必须是非区域化。 */
+    @Test
+    void nonFoliaBrandWithoutMarkerClassStaysSingleThreaded() {
+        assertFalse(RegionizedCoreDetector.isRegionized(() -> false, REAL_PAPER, warnings::add));
+        assertFalse(RegionizedCoreDetector.isRegionized(() -> false, REAL_LEAF, warnings::add),
+            "Leaf 只有 TickRegions 兼容桩，仍必须判为非区域化");
+    }
+
     // --- 类加载回退：品牌 provider 缺失（单测环境）时只认 RegionizedServer ---
 
     @Test

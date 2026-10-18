@@ -832,9 +832,18 @@ public final class PhysicalTableManager {
         ensureWorldVisualsReady("恢复牌桌");
         if (!REGIONIZED) {
             // 非区域化核心（Paper/Leaf）：同步执行，恢复旧版「onEnable 内即完成恢复」的时序。
-            ensureChunkReady(anchor);
-            GameTable table = restoreTableOnLoadedChunk(key, name, roomLevel, anchor, yaw, ownerId, ownerName);
-            return CompletableFuture.completedFuture(table);
+            //
+            // 【双保险：核心判定错向时不许刷屏】同步拉区块在区域化核心上会抛
+            // IllegalArgumentException("Async chunk retrieval")。判定本身已按品牌 + 类存在性收紧
+            // （见 RegionizedCoreDetector），但第三方派生核心的组合无法穷举，因此这里兜住：
+            // 一旦同步路径失败，就改走异步 + region 投递的那条路，并且只告警一次。
+            try {
+                ensureChunkReady(anchor);
+                GameTable table = restoreTableOnLoadedChunk(key, name, roomLevel, anchor, yaw, ownerId, ownerName);
+                return CompletableFuture.completedFuture(table);
+            } catch (RuntimeException | LinkageError synchronousFailure) {
+                reportSyncRestoreFallback(synchronousFailure);
+            }
         }
         // 区域化核心（Folia）：先异步加载锚点区块，再经 thenCompose 把世界体投到锚点 region；
         // 绝不能在 global lane 上直接动世界（Folia 会抛 No currently ticking region / Async chunk retrieval）。
@@ -842,6 +851,26 @@ public final class PhysicalTableManager {
             runRegionStageValue(anchor, () ->
                 restoreTableOnLoadedChunk(key, name, roomLevel, anchor, yaw, ownerId, ownerName)));
     }
+
+    /**
+     * 同步恢复路径失败时的告警出口（每个进程只报一次）。
+     *
+     * <p>【为什么要这条】同步分支本身是「非区域化核心」的优化路径，一旦某第三方派生核心被误判，
+     * 就会在 global lane 上反复抛 {@code Async chunk retrieval} 并每 5 秒刷一次日志。
+     * 这里把失败降为**一次**可读告警，并让调用方继续走异步 + region 投递的正确路径；
+     * 不吞异常、也不刷屏。
+     */
+    private void reportSyncRestoreFallback(Throwable failure) {
+        if (syncRestoreFallbackReported) {
+            return;
+        }
+        syncRestoreFallbackReported = true;
+        plugin.getLogger().warning("同步恢复牌桌失败，已回退到异步区块加载 + region 投递路径（"
+            + failure + "）。若持续出现，说明服务端核心类型判定有误，请反馈核心品牌与版本。");
+    }
+
+    /** 同步恢复兜底只告警一次。 */
+    private volatile boolean syncRestoreFallbackReported;
 
     /**
      * 恢复流程中真正动世界的部分，只能在锚点 region 内部调用。
@@ -2802,6 +2831,77 @@ public final class PhysicalTableManager {
         return placed == null ? 0.0f : placed.yaw();
     }
 
+    /**
+     * 该桌的座位姿态快照（椅子锚定）：纯坐标/朝向/UUID，**不解析任何 Bukkit 实体**。
+     *
+     * <p>【谁需要它】椅侧双面板由 MuMenu 在**玩家 lane** 打开，那条 lane 上碰
+     * {@code PlacedTable} 里的实体（{@code Bukkit.getEntity} / {@code Entity#getLocation}）
+     * 会直接踩 Folia 的 owner region 门禁。面板层要的只是「椅子在哪、朝哪、谁坐在上面」，
+     * 这些都是纯几何数据，因此在这里（牌桌侧）一次算清并冻结成不可变快照。
+     *
+     * <p>【为什么不是又一套布局服务】几何来源只有这一处：复用牌桌已有的
+     * {@link #chairLocation(PlacedTable, int)}（含椅子视觉偏移与基准高度）与
+     * {@link #handCardYaw(float, int)}（就座者朝向），横向轴复用按钮判定框那套
+     * {@code actionStep} + {@code rotateVector}。面板尺寸与左右偏移**不在**这里定义：
+     * 那是面板层（MuMenu 画布 + 配置）的事，本方法只给一条已归一化的横向轴。
+     *
+     * <p>【访问级别】与 {@link #tableAnchor(String)} / {@link #tableYaw(String)} 相同：
+     * 只读 {@code placedTables} 的内存快照，不碰实体、不读方块、不加载区块，因此可在任意 lane 调用。
+     * 重建在飞期间返回的是**旧锚点**（与 {@code tableAnchor} 完全一致），未放置返回 {@code null}——
+     * 面板层据此不显示，绝不允许回退成「读不到快照就去读实体」。
+     *
+     * @param tableName 牌桌名（内部按既有的 normalize 规则归一化）
+     * @return 姿态快照；该桌未放置时返回 {@code null}
+     */
+    public TableSeatPose tableSeatPose(String tableName) {
+        PlacedTable placed = placedTable(tableName);
+        if (placed == null || placed.anchor() == null || placed.anchor().getWorld() == null) {
+            return null;
+        }
+        Location anchor = placed.anchor();
+        UUID worldId = anchor.getWorld().getUID();
+        TableSeatPose.Pose anchorPose = new TableSeatPose.Pose(
+            anchor.getX(),
+            anchor.getY(),
+            anchor.getZ(),
+            placed.yaw(),
+            anchor.getPitch()
+        );
+        List<TableSeatPose.Seat> seats = new ArrayList<>(3);
+        for (int seatIndex = 0; seatIndex < 3; seatIndex++) {
+            Location chair = chairLocation(placed, seatIndex);
+            float seatYaw = handCardYaw(placed.yaw(), seatIndex);
+            // 横向轴与按钮判定框同源：左/右对称面板由此取 ±，不会各自换算角度。
+            // 注意这里的 Vector 是类内自有的纯 record（见文件末尾），不是 org.bukkit.util.Vector：
+            // 本文件绝大多数几何都不持有 Bukkit 对象，新增代码沿用同一套。
+            Vector lateral = rotateVector(normalizeHorizontal(actionStep(seatIndex)), placed.yaw());
+            seats.add(new TableSeatPose.Seat(
+                seatIndex,
+                placed.seatAssignments().get(seatIndex),
+                new TableSeatPose.Pose(chair.getX(), chair.getY(), chair.getZ(), seatYaw, 0.0f),
+                lateral.x(),
+                lateral.z()
+            ));
+        }
+        return new TableSeatPose(placed.tableName(), worldId, anchorPose, List.copyOf(seats));
+    }
+
+    /**
+     * 按玩家取其所坐牌桌的座位姿态快照；不在任何已放置牌桌上时返回 {@code null}。
+     *
+     * <p>面板入口（MuMenu/命令）手上只有玩家，这个方法把「查牌桌 → 取快照」合成一步。
+     * 与 {@link #tableSeatPose(String)} 一样不碰实体，但**不**代表可以在任意 lane 调
+     * {@code TableManager}：查表本身要走牌桌管理器既有的线程约定。
+     */
+    public TableSeatPose tableSeatPoseOf(UUID playerId) {
+        if (playerId == null) {
+            return null;
+        }
+        TableManager manager = plugin.getTableManager();
+        GameTable table = manager == null ? null : manager.getTableOf(playerId);
+        return table == null ? null : tableSeatPose(table.getName());
+    }
+
     public boolean canRemoveTable(Player player, String tableName) {
         if (player == null) {
             return false;
@@ -3040,7 +3140,9 @@ public final class PhysicalTableManager {
                     case DOUBLE_NO -> table.chooseDouble(player, false);
                     case DOUBLE_YES -> table.chooseDouble(player, true);
                     case OPEN_SETTINGS -> {
-                        plugin.getHandGuiService().openSettings(player);
+                        // 个人设置已从旧箱子 Inventory 迁移到原生 Dialog：这里走插件门面打开新面板，
+                        // 不再经 HandGuiService 创建箱子（旧箱子个人设置路径因此不可达）。
+                        plugin.openPlayerSettings(player);
                         hint(player.getUniqueId(), "你的个人设置菜单开好了。", NamedTextColor.GREEN);
                     }
                     // 道具栏已改为牌桌内屏幕额外栏；这里仅刷新数据，不再打开九格 Inventory GUI。
@@ -7319,12 +7421,22 @@ public final class PhysicalTableManager {
             }
             return phaseStates;
         }
-        if (table.getPhase() == GamePhase.REVEALING) {
+        // 明牌按钮的判据是「窗口」而不是「阶段」：窗口在首批（每人 3 张）发完就打开，
+        // 而阶段切换仍由翻转结束负责，所以窗口已开的事实会出现在 DEALING 期。
+        // 若这里继续按 phase == REVEALING 判断，玩家在发牌期就看不到按钮，变成
+        // 「状态机允许明牌、UI 根本点不到」。倍率 3→2→1 由 GameTable 的快照给出，
+        // 按钮只透传 openingRevealButtonLabel()：该文案刻意只含倍率、不含剩余秒数，
+        // 因为按钮重建由 actionSignature（逐字包含 label）驱动，带秒会让发牌期每秒销毁重建整排按钮。
+        if (table.isRevealWindowOpen()) {
             if (owner == null || table.isBot(owner) || !table.canRevealHand(owner)) {
                 return List.of();
             }
             return List.of(new ActionButtonState(
                 "inspect", table.openingRevealButtonLabel(), ButtonAction.REVEAL_HAND, 0.0));
+        }
+        if (table.getPhase() == GamePhase.REVEALING) {
+            // 窗口已关闭但还没切到 BIDDING 的短暂窗口：不发按钮，避免给玩家一个点了必然报错的入口。
+            return List.of();
         }
         if (table.getPhase() == GamePhase.DEALING) {
             return List.of();
@@ -7704,8 +7816,14 @@ public final class PhysicalTableManager {
         playerOutput.playSound(playerId, sound.key(), sound.volume(), pitch);
     }
 
-    /** 只读取连接生命周期提供的不可变 UUID 快照；后续玩家 API 一律交给 PlayerOutputDispatcher。 */
-    private List<UUID> onlinePlayerIdsSnapshot() {
+    /**
+     * 只读取连接生命周期提供的不可变 UUID 快照；后续玩家 API 一律交给 PlayerOutputDispatcher。
+     *
+     * <p>提升为 public 供插件门面 {@code DoudizhuPlugin.onlinePlayerIdsSnapshot()} 转发：
+     * 原生 Dialog 的管理页需要在 player lane 里安全取得「在线玩家」列表，不能用
+     * {@code Bukkit.getOnlinePlayers()}（区域化核上有 lane 语义问题）。
+     */
+    public List<UUID> onlinePlayerIdsSnapshot() {
         return playerPresence.snapshot();
     }
 

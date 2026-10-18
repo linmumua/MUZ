@@ -23,13 +23,16 @@ final class TableStatusViews {
         int boostedFarmerCount,
         int farmerSeatCount,
         Integer landlordBoostFactor,
-        String pairMultiplierSummary
+        String pairMultiplierSummary,
+        GameTable.RevealWindowSnapshot revealWindow
     ) {
         if (phase == GamePhase.DEALING) {
-            return "发牌中 · 请稍候";
+            String revealLine = revealWindowText(revealWindow);
+            return revealLine != null ? revealLine : "发牌中 · 请稍候";
         }
         if (phase == GamePhase.REVEALING) {
-            return "明牌窗口 · 自愿明牌（整局最多 ×2）";
+            String revealLine = revealWindowText(revealWindow);
+            return revealLine != null ? revealLine : "明牌窗口已结束 · 等待叫分";
         }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? "等待本局开局" : "等待叫分结果";
@@ -55,13 +58,16 @@ final class TableStatusViews {
         int boostedFarmerCount,
         int farmerSeatCount,
         Integer landlordBoostFactor,
-        String pairMultiplierSummary
+        String pairMultiplierSummary,
+        GameTable.RevealWindowSnapshot revealWindow
     ) {
         if (phase == GamePhase.DEALING) {
-            return MuzTheme.muted("发牌中 · 请稍候");
+            Component revealLine = revealWindowComponent(revealWindow);
+            return revealLine != null ? revealLine : MuzTheme.muted("发牌中 · 请稍候");
         }
         if (phase == GamePhase.REVEALING) {
-            return MuzTheme.accent("明牌窗口 · 自愿明牌（整局最多 ×2）");
+            Component revealLine = revealWindowComponent(revealWindow);
+            return revealLine != null ? revealLine : MuzTheme.muted("明牌窗口已结束 · 等待叫分");
         }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? MuzTheme.muted("等待本局开局") : MuzTheme.muted("等待叫分结果");
@@ -79,6 +85,45 @@ final class TableStatusViews {
         }
         return line.append(MuzTheme.divider(" · "))
             .append(MuzTheme.hotValue(pairMultiplierSummary));
+    }
+
+    /**
+     * 明牌窗口的一行纯文本；窗口未开时返回 {@code null}，由调用方按阶段给保底文案。
+     *
+     * <p>【唯一数据源】倍率与剩余秒都来自 {@link GameTable.RevealWindowSnapshot}（服务端已算好），
+     * 这里只负责措辞。明牌倍率自 1.10.63 起是「首批发完 ×3、第二批 ×2、之后固定 ×1」的递减阶梯
+     * （见 {@code RevealMultiplierLadder}），因此**不允许**再在视图里写死一个固定的整局上限：
+     * 那会让每一次明牌提示都在误导玩家。
+     *
+     * <p>【为什么 DEALING 也要看它】明牌窗口不再只在 REVEALING 打开：首批（每人 3 张）发完窗口就开，
+     * 而阶段切换仍由翻转结束负责，所以「窗口已开」的事实会出现在 DEALING 期。
+     */
+    private static String revealWindowText(GameTable.RevealWindowSnapshot revealWindow) {
+        if (revealWindow == null || !revealWindow.open()) {
+            return null;
+        }
+        if (revealWindow.youRevealed()) {
+            return "已明牌 · 本局明牌 x" + Math.max(1, revealWindow.appliedMultiplier());
+        }
+        return "明牌窗口 · 现在明牌 x" + revealWindow.currentMultiplier()
+            + " · 剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒";
+    }
+
+    /** @see #revealWindowText(GameTable.RevealWindowSnapshot) 同一份事实的富文本版本 */
+    private static Component revealWindowComponent(GameTable.RevealWindowSnapshot revealWindow) {
+        if (revealWindow == null || !revealWindow.open()) {
+            return null;
+        }
+        if (revealWindow.youRevealed()) {
+            return MuzTheme.accent("已明牌")
+                .append(MuzTheme.divider(" · "))
+                .append(MuzTheme.hotMetric("本局明牌", "x" + Math.max(1, revealWindow.appliedMultiplier())));
+        }
+        return MuzTheme.accent("明牌窗口")
+            .append(MuzTheme.divider(" · "))
+            .append(MuzTheme.hotMetric("现在明牌", "x" + revealWindow.currentMultiplier()))
+            .append(MuzTheme.divider(" · "))
+            .append(MuzTheme.warning("剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒"));
     }
 
     static String currentTrickPreviewText(
@@ -148,16 +193,19 @@ final class TableStatusViews {
         Function<UUID, Component> identity,
         Function<UUID, Component> currentPlayIdentity,
         Component lobbyActionBar,
-        int currentTurnTimeoutSeconds
+        int currentTurnTimeoutSeconds,
+        GameTable.RevealWindowSnapshot revealWindow
     ) {
         if (phase == GamePhase.LOBBY) {
             return lobbyActionBar;
         }
         if (phase == GamePhase.DEALING) {
-            return Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
+            Component revealLine = revealWindowComponent(revealWindow);
+            return revealLine != null ? revealLine : Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
         }
         if (phase == GamePhase.REVEALING) {
-            return Component.text("明牌窗口：自愿明牌（整局最多 ×2）。", NamedTextColor.AQUA);
+            Component revealLine = revealWindowComponent(revealWindow);
+            return revealLine != null ? revealLine : Component.text("明牌窗口已结束 · 等待叫分。", NamedTextColor.GRAY);
         }
         if (currentTurn == null) {
             return Component.text("牌桌正在整理下一轮。", NamedTextColor.GRAY);
@@ -169,8 +217,16 @@ final class TableStatusViews {
         }
         String countdown = currentTurnTimeoutSeconds > 0 ? " | " + remainingSeconds + " 秒" : "";
         return switch (phase) {
-            case DEALING -> Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
-            case REVEALING -> Component.text("明牌窗口：自愿明牌（整局最多 ×2）。", NamedTextColor.AQUA);
+            // DEALING / REVEALING 已在上面按快照早退；这里保留同样口径的实现，
+            // 是为了万一将来早退被改动也不会退化回写死文案（不写死 ×2、不只认阶段）。
+            case DEALING -> {
+                Component revealLine = revealWindowComponent(revealWindow);
+                yield revealLine != null ? revealLine : Component.text("正在发牌，请稍候。", NamedTextColor.GRAY);
+            }
+            case REVEALING -> {
+                Component revealLine = revealWindowComponent(revealWindow);
+                yield revealLine != null ? revealLine : Component.text("明牌窗口已结束 · 等待叫分。", NamedTextColor.GRAY);
+            }
             case BIDDING -> viewerId.equals(currentTurn)
                 ? Component.text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主") + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
                 : Component.text("当前由 ", NamedTextColor.GRAY)

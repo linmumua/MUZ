@@ -46,13 +46,21 @@ plugins {
 }
 
 group = "linmumua"
-version = "1.10.59"
+version = "1.10.65"
 
 data class MuzTarget(
     val id: String,
     val paperApiDependency: String,
     val pluginApiVersion: String,
     val javaVersion: Int,
+    // resourcePackFormat 是资源包版本的 major；resourcePackFormatMinor 是它的 minor。
+    // Minecraft 26.3 起 pack 版本变成「major.minor」两段（官方 26.3 server.jar 内
+    // version.json 的 pack_version = {resource_major: 97, resource_minor: 1}），
+    // 而 1.21.11/26.1.2/26.2 的 minor 都是 0，所以旧目标保持默认 0、产出字节不变。
+    // 为什么 minor 不能省：客户端 net.minecraft.server.packs.metadata.pack.PackFormat
+    // 的 compareTo 按 (major, minor) 字典序比较，PackCompatibility.forVersion 用
+    // 「range.max < client → TOO_OLD」判定；26.3 客户端是 (97,1)，若包仍声明 max=(97,0)
+    // 就会被判成 TOO_OLD（提示为旧版本制作、需玩家手动确认）。因此 26.3 必须落到 97.1。
 
 
 
@@ -65,13 +73,23 @@ data class MuzTarget(
 
 
 
-    val resourcePackFormat: Int
+
+    val resourcePackFormat: Int,
+    val resourcePackFormatMinor: Int = 0
 )
 
 val supportedMuzTargets = listOf(
     MuzTarget("paper-1.21.11", "1.21.11-R0.1-SNAPSHOT", "1.21.11", 21, 75),
     MuzTarget("paper-26.1.2", "26.1.2.build.74-stable", "26.1.2", 25, 84),
-    MuzTarget("paper-26.2", "26.2.build.84-stable", "26.2", 25, 88)
+    MuzTarget("paper-26.2", "26.2.build.84-stable", "26.2", 25, 88),
+    // paper-26.3：坐标取官方 Paper Maven 的 26.3 STABLE 通道最新件
+    // （io.papermc.paper:paper-api:26.3.build.200-stable，2026-10-16 发布）。
+    // 资源包版本 97.1 取证自官方 26.3 server.jar 的 version.json
+    // （pack_version.resource_major=97 / resource_minor=1）。
+    // 注意：dev.folia:folia-api 的 26.3 目前只有 26.3.build.3-alpha，没有 stable，
+    // 因此本目标以 Paper 26.3 API 编译、沿用既有 MuzScheduler 的四条 owner lane 与
+    // folia-supported: true 声明；产物名为 paper-26.3，不代表官方已发行 Folia 26.3。
+    MuzTarget("paper-26.3", "26.3.build.200-stable", "26.3", 25, 97, 1)
 ).associateBy(MuzTarget::id)
 val muzTargetId = providers.gradleProperty("muzTarget").orElse("paper-26.2").get()
 val muzTarget = supportedMuzTargets[muzTargetId]
@@ -1309,6 +1327,11 @@ dependencies {
     compileOnly("io.izzel.taboolib:common-reflex:$taboolibReflexVersion")
     compileOnly("com.mysql:mysql-connector-j:8.4.0")
     testImplementation("io.papermc.paper:paper-api:${muzTarget.paperApiDependency}")
+    // PlaceholderAPI 与 paper-api 同理：它只声明 compileOnly（运行期由服务端提供），但测试要直接
+    // 引用 MuzPlaceholderExpansion（继承 PlaceholderExpansion），编译测试就需要这个类文件，否则
+    // 报「无法访问 PlaceholderExpansion」。因此与 paper-api 一样补一条 testImplementation。
+    // 这条不改产物：testImplementation 不进 jar，也不影响 MuzPluginLoader 的下载坐标清单。
+    testImplementation("me.clip:placeholderapi:2.12.2")
     // 【测试依赖单独保留】compileOnly 不进 testRuntimeClasspath，而测试要真实加载与运行期
     // 同一套库（SnakeYAML 解析、sqlite 驱动、gson 序列化、TabooLib 反射），所以逐条显式声明。
     // 坐标必须与 MuzPluginLoader.DEPENDENCY_COORDINATES 完全一致，否则「测试通过」就不再代表
@@ -1938,14 +1961,20 @@ val generateResourcePack = tasks.register("generateResourcePack") {
 
 
         val packFormat = muzTarget.resourcePackFormat
+        // min_format/max_format 是 [major, minor] 两段；26.3 的 minor 是 1，旧目标是 0。
+        // 必须原样写出目标客户端的版本：客户端 PackCompatibility.forVersion 用
+        // (major, minor) 字典序比较，包声明 max 低一个 minor 就会被判 TOO_OLD。
+        // 旧字段 pack_format 仍然只写 major——客户端 validatePackFormatForRange 要求它
+        // 落在 [minMajor, maxMajor] 内，major 正好满足。
+        val packFormatMinor = muzTarget.resourcePackFormatMinor
         writeText(
             outputRoot.resolve("pack.mcmeta"),
             """
             {
               "pack": {
                 "pack_format": $packFormat,
-                "min_format": [$packFormat, 0],
-                "max_format": [$packFormat, 0],
+                "min_format": [$packFormat, $packFormatMinor],
+                "max_format": [$packFormat, $packFormatMinor],
                 "description": "✦ MUMU ✦\n作者 linmumua · QQ 356013496\n加载正常成功"
               }
             }
@@ -2770,6 +2799,7 @@ tasks {
         systemProperty("muz.expectedPluginVersion", project.version.toString())
         systemProperty("muz.expectedApiVersion", muzTarget.pluginApiVersion)
         systemProperty("muz.expectedResourcePackFormat", muzTarget.resourcePackFormat.toString())
+        systemProperty("muz.expectedResourcePackFormatMinor", muzTarget.resourcePackFormatMinor.toString())
     }
 
     build {

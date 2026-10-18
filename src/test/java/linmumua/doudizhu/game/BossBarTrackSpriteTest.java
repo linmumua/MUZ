@@ -123,22 +123,32 @@ class BossBarTrackSpriteTest {
      * 轨道照旧露着。而这个数字之前是**硬编码 94**（那是 1.21.11 的数据包格式号，
      * 不是任何版本的资源包格式号），三个目标版本还共用它。
      *
-     * <p>三个目标的正确值：1.21.11 → 75、26.1.2 → 84、26.2 → 88。
-     * 期望值由构建脚本按 muzTarget 注入，所以这条断言会跟着目标版本自动切换，
-     * 不会再出现"改了目标版本忘了改格式号"。
+     * <p>各目标的正确值（取证自 Mojang 官方对应版本 server.jar 的 version.json）：
+     * 1.21.11 → 75.0、26.1.2 → 84.0、26.2 → 88.0、26.3 → 97.1。期望值由构建脚本按
+     * muzTarget 注入，所以这条断言会跟着目标版本自动切换，不会再出现"改了目标版本忘了改格式号"。
+     *
+     * <p>minor 必须一起断言：官方客户端按 (major, minor) 字典序比较
+     * `PackFormat`，`PackCompatibility.forVersion` 在 `max < 客户端版本` 时判 TOO_OLD。
+     * 只锁 major 的话，26.3 目标写成 97.0 也能通过本测试，但那会让 26.3 客户端
+     * 把资源包判成「为旧版本制作」。
      */
     @Test
     void packFormatMatchesTheBuildTarget() throws IOException {
         String expected = System.getProperty("muz.expectedResourcePackFormat");
         assertNotNull(expected, "构建脚本必须注入 muz.expectedResourcePackFormat");
+        String expectedMinor = System.getProperty("muz.expectedResourcePackFormatMinor");
+        assertNotNull(expectedMinor, "构建脚本必须注入 muz.expectedResourcePackFormatMinor");
 
         String mcmeta = read("craftengine/muz/resourcepack/pack.mcmeta");
         assertTrue(
                 mcmeta.contains("\"pack_format\": " + expected),
                 "pack.mcmeta 的 pack_format 必须是 " + expected + "（当前构建目标的资源包格式号），实际内容：" + mcmeta);
         assertTrue(
-                mcmeta.contains("\"min_format\": [" + expected + ", 0]"),
-                "min_format 也要跟着目标版本走，实际内容：" + mcmeta);
+                mcmeta.contains("\"min_format\": [" + expected + ", " + expectedMinor + "]"),
+                "min_format 也要跟着目标版本走（major, minor），实际内容：" + mcmeta);
+        assertTrue(
+                mcmeta.contains("\"max_format\": [" + expected + ", " + expectedMinor + "]"),
+                "max_format 也要跟着目标版本走（major, minor），实际内容：" + mcmeta);
         // 1.21.9 起 supported_formats 已被 min_format/max_format 取代，留着它反而可能被新客户端判为过时声明
         assertFalse(
                 mcmeta.contains("supported_formats"),

@@ -124,6 +124,19 @@ public final class HandGuiListener implements Listener {
         }
     }
 
+    /**
+     * 玩家退出时清理 Dialog 会话与导航栈。
+     *
+     * <p>原生 Dialog 的按钮回调可能在玩家离线后才到达；清掉会话后 {@code MuzDialogService} 的代次
+     * 与会话判据立即失效，迟到回调被丢弃，不会在一个已离线的 UUID 上继续执行业务。
+     */
+    @EventHandler
+    public void onQuit(org.bukkit.event.player.PlayerQuitEvent event) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().clearPlayer(event.getPlayer().getUniqueId());
+        }
+    }
+
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onAsyncChat(AsyncPlayerChatEvent event) {
         boolean pendingSound = plugin.getHandGuiService().hasPendingSoundInput(event.getPlayer().getUniqueId());

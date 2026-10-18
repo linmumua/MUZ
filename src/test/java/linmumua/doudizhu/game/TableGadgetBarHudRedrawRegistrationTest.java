@@ -199,6 +199,9 @@ class TableGadgetBarHudRedrawRegistrationTest {
         setField(service, "actionBarOverlay", overlay);
         setField(service, "bars", new java.util.concurrent.ConcurrentHashMap<>());
         setField(service, "selectedSlots", new java.util.concurrent.ConcurrentHashMap<>());
+        // gadget-bridge 为 MuMenu/PAPI 快照新增了 snapshots（GadgetSlotSnapshot）字段，
+        // clearTable 现在会清它；空心实例必须一并补上，否则 clearTable 会 NPE（测试夹具问题，不是生产缺陷）。
+        setField(service, "snapshots", new java.util.concurrent.ConcurrentHashMap<>());
         setField(service, "loading", new java.util.concurrent.ConcurrentHashMap<>());
         setField(service, "refreshStates", new java.util.concurrent.ConcurrentHashMap<>());
         // 跳过告警在真实构造器里初始化；这里是空心实例，必须显式补上，否则 reportRedrawSkipped 会 NPE。

@@ -2,6 +2,7 @@ package linmumua.doudizhu.listener;
 
 import java.util.UUID;
 import linmumua.doudizhu.DoudizhuPlugin;
+import linmumua.doudizhu.game.GadgetPanelService;
 import linmumua.doudizhu.game.TableGadgetService;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -59,6 +60,15 @@ public final class TableGadgetLifecycleListener implements Listener {
         if (service != null) {
             UUID playerId = player.getUniqueId();
             service.clearPlayer(playerId);
+        }
+        GadgetPanelService panels = plugin.getGadgetPanelService();
+        if (panels != null) {
+            // 玩家生命周期事件已在 player lane；退出时不能再依赖在线解析器排队，否则会丢掉关闭。
+            try {
+                panels.closeChairPanels(player);
+            } finally {
+                panels.discardPlayer(player.getUniqueId());
+            }
         }
     }
 }

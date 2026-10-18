@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test;
  * 2. 复制粘贴新增一项后忘了改文字，两项提示一模一样；
  * 3. 提示里写死的数字和枚举真实值不一致——文案在骗玩家。
  *
- * adminSettingHint 是 private 且不碰 plugin 字段，但这个项目跑不起 Bukkit，
+ * adminSettingHint 不碰 plugin 字段（迁移后由 private 提升为 public），这个项目跑不起 Bukkit，
  * 实例化 HandGuiService 去调它不现实。所以这里走源码文本解析：
  * 零侵入，不需要为测试放宽生产代码的可见性。解析方式与同目录
  * HoverCardScaleSettingTest 的 section() 保持一致。
@@ -63,7 +63,9 @@ class AdminSettingHintQualityTest {
     private static Map<String, String> hints() throws IOException {
         String block = section(
             Files.readString(GUI),
-            "private String adminSettingHint(",
+            // 只锚方法名，不锁修饰符：管理菜单迁 Dialog 后 adminSettingHint 由 private 提升为
+            // public（供新的 AdminSettingDialogScreen 生成提示），可见性变化不该让这条文案测试失效。
+            "String adminSettingHint(",
             "\n    }"
         );
         Matcher matcher = Pattern.compile("case ([A-Z_]+) -> \"([^\"]*)\";").matcher(block);

@@ -21,7 +21,9 @@ import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.DuplicateKeyException;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.error.YAMLException;
+import org.yaml.snakeyaml.representer.Representer;
 
 public final class MuzYamlConfig {
     private final Path file;
@@ -65,7 +67,45 @@ public final class MuzYamlConfig {
         dumperOptions.setIndicatorIndent(0);
         dumperOptions.setWidth(120);
         dumperOptions.setSplitLines(false);
-        return new Yaml(loaderOptions, dumperOptions);
+        return createYaml(loaderOptions, dumperOptions);
+    }
+
+    /**
+     * 用「四个显式参数」的构造器组装 {@link Yaml}，刻意避开
+     * {@code Yaml(LoaderOptions, DumperOptions)} 这个便捷构造器。
+     *
+     * <p>运行期存在两类 SnakeYAML：{@code MuzPluginLoader} 登记的 2.6，以及服务端类路径上的旧版。
+     * 本机以 2.2 夹具复现了「缺该构造器」的报错，但实服实际解析到哪一份、是哪个版本号，
+     * 尚无运行期回执；
+     * 而 {@code Yaml(LoaderOptions, DumperOptions)} 是 <b>2.5 才新增</b>的构造器
+     * （javap 实测：2.0/2.2 没有、2.5/2.6 才有），2.2 上直接抛
+     * {@code NoSuchMethodError: org.yaml.snakeyaml.Yaml.<init>(LoaderOptions, DumperOptions)}，
+     * 插件在 {@code MuzYamlConfig} 构造阶段就崩，config.yml 都读不出来。
+     *
+     * <p>下面这个四参构造器在 2.0 / 2.2 / 2.5 / 2.6 上都存在
+     * （{@code (BaseConstructor, Representer, DumperOptions, LoaderOptions)}），
+     * 且 2.2 与 2.6 的字节码完全一致（都转调五参构造器、Resolver 用默认实现），
+     * 因此新旧类路径行为一致。
+     *
+     * <p>注意这里换了构造方式：便捷构造器内部用的是不受限的 {@code Constructor}，
+     * 而本方法显式传 {@link SafeConstructor}。这是有意的收紧——SafeConstructor 不做
+     * {@code !任意类名} 的反射实例化，与 {@code HudResourcePackVerifier} 的读法一致。
+     * 对既有数据两者行为一致（已在 2.2 与 2.6 两条类路径上用真实 YAML 实测：本插件
+     * 落盘的 {@code "==": "org.bukkit.inventory.ItemStack"} 映射标记两边都解成普通映射，
+     * 全局 tag 两边都被 2.x 默认 TagInspector 拒绝），因此收紧不影响既有配置与玩家数据的读法。
+     * 本插件的配置/玩家数据只含映射、序列与标量，没有自定义 tag。
+     * {@code allowDuplicateKeys=false} 的重复键报错由 BaseConstructor 负责，
+     * 与是否 SafeConstructor 无关（回归测试已锁定）。
+     *
+     * @param loaderOptions 加载配置（重复键、码点上限），不得替换成默认值
+     * @param dumperOptions 输出配置（BLOCK、缩进、宽度），不得替换成默认值
+     */
+    static Yaml createYaml(LoaderOptions loaderOptions, DumperOptions dumperOptions) {
+        return new Yaml(
+            new SafeConstructor(loaderOptions),
+            new Representer(dumperOptions),
+            dumperOptions,
+            loaderOptions);
     }
 
     /**

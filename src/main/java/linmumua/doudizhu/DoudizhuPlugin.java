@@ -7,9 +7,14 @@ import linmumua.doudizhu.assets.PlayerHeadRenderer;
 import linmumua.doudizhu.compat.CraftEngineBundleExporter;
 import linmumua.doudizhu.compat.CraftEngineFurnitureService;
 import linmumua.doudizhu.compat.CraftEngineOffsetService;
+import linmumua.doudizhu.compat.MuMenuGadgetBridge;
 import linmumua.doudizhu.compat.VaultEconomyBridge;
 import linmumua.doudizhu.command.DoudizhuCommand;
 import linmumua.doudizhu.config.MuzYamlConfig;
+import linmumua.doudizhu.config.ChairSidePanelLayoutStore;
+import linmumua.doudizhu.config.ChairSidePanelSettings;
+import linmumua.doudizhu.ui.dialog.ChairPanelLayoutPort;
+import linmumua.doudizhu.ui.dialog.ChairPanelLayoutStoreAdapter;
 import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.GamePhase;
 import linmumua.doudizhu.game.PhysicalChipService;
@@ -29,6 +34,7 @@ import linmumua.doudizhu.game.TableGadgetBarHudService;
 import linmumua.doudizhu.game.TableSpeechPanelService;
 import linmumua.doudizhu.ui.GadgetBoxGuiService;
 import linmumua.doudizhu.ui.TableGadgetGuiService;
+import linmumua.doudizhu.ui.VirtualGadgetBar;
 import linmumua.doudizhu.ui.VirtualGadgetBarStore;
 import linmumua.doudizhu.game.TrickHudPreview;
 import linmumua.doudizhu.game.TableManager;
@@ -50,6 +56,14 @@ import linmumua.doudizhu.storage.PersistedTableRecord;
 import linmumua.doudizhu.storage.PlayerHistoryEntry;
 import linmumua.doudizhu.ui.HandGuiService;
 import linmumua.doudizhu.ui.MuzTheme;
+import linmumua.doudizhu.ui.dialog.DialogSessionRegistry;
+import linmumua.doudizhu.ui.dialog.MuzDialogService;
+import linmumua.doudizhu.ui.dialog.AdminDialogScreen;
+import linmumua.doudizhu.ui.dialog.PlayerSettingsDialogScreen;
+import linmumua.doudizhu.ui.dialog.HistoryDialogScreen;
+import linmumua.doudizhu.ui.dialog.GadgetBoxDialogWiring;
+import linmumua.doudizhu.game.ChairPanelDisplayService;
+import linmumua.doudizhu.game.GadgetPanelService;
 import linmumua.doudizhu.world.PhysicalTableManager;
 import java.util.ArrayList;
 import java.io.File;
@@ -188,6 +202,36 @@ public final class DoudizhuPlugin extends JavaPlugin {
     private ActionBarOverlayService actionBarOverlayService;
     /** 玩家输出统一门面；生产构造先经 global UUID 查找再进入 player owner lane。 */
     private PlayerOutputDispatcher playerOutputDispatcher;
+    /**
+     * 原生 Dialog 会话代次注册表。
+     *
+     * <p>新版箱子/管理/个人设置面板从 Bukkit 箱子 Inventory 迁移到原生 Dialog。原生 Dialog 的
+     * 按钮回调是异步到达的，玩家在回调落地前可能已关面板、换页或退出，因此需要代次来丢弃陈旧回调。
+     */
+    private DialogSessionRegistry dialogSessionRegistry;
+    /** Dialog 展示、导航与生命周期的唯一入口（所有 showDialog/closeDialog 都经它、且只在 player lane）。 */
+    private MuzDialogService muzDialogService;
+    /** 战绩 Dialog 编排（承载 playerId/页状态、异步读库后经 service 展示）；首次打开时惰性构造。 */
+    private HistoryDialogScreen historyDialogScreen;
+    /** 道具箱编辑 Dialog 的装配（读取快照 / 异步持久化 / 选择 / 语音四个接缝收口于此）。 */
+    private GadgetBoxDialogWiring gadgetBoxDialogWiring;
+    /** MuMenu 悬浮道具面板服务；MuMenu 桥未装配时为 null（命令侧据此给 MENU_UNAVAILABLE）。 */
+    private GadgetPanelService gadgetPanelService;
+    /**
+     * 椅侧左右双面板的**内置渲染器**（不依赖 MuMenu）。
+     *
+     * <p>与 {@link #gadgetPanelService} 分开持有：道具栏面板是「可选外部菜单」，
+     * 椅侧双面板是「内置世界体」，两者的可用性判定与失败原因互不牵连。
+     */
+    private ChairPanelDisplayService chairPanelDisplayService;
+    /**
+     * 椅侧左右面板的布局存储；未装配时为 null。
+     *
+     * <p>与 {@code yamlConfig()} 同源同锁，供 Dialog 布局编辑与配置层下发共用一份快照。
+     */
+    private ChairSidePanelLayoutStore chairSidePanelLayoutStore;
+    /** 椅侧面板布局的串行写盘执行器；关闭时必须 shutdown，避免残留线程。 */
+    private java.util.concurrent.ExecutorService chairIoExecutor;
     /** 桌内道具状态与效果由专用服务管理，入口仅负责装配。 */
     private TableGadgetService tableGadgetService;
     private TableGadgetSettings tableGadgetSettings;
@@ -490,6 +534,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         // 否则 onEnable 直接建出的实例会用默认 () -> false 谓词覆盖工厂语义。
         scheduler = new MuzScheduler(this, this::isShuttingDown);
         playerOutputDispatcher = new PlayerOutputDispatcher(this);
+        // Dialog 核心：注册表与展示服务都只依赖 playerOutputDispatcher，放在它后面即可。
+        // 展示服务自身不注册任何周期任务，会话过期由既有 SpeechPanel 定时器顺带推进（见 onEnable 尾部）。
+        dialogSessionRegistry = new DialogSessionRegistry();
+        muzDialogService = new MuzDialogService(this, playerOutputDispatcher, dialogSessionRegistry);
         saveDefaultYamlConfig();
         ensureConfigIntegrity();
         optionProfilesFile = new File(getDataFolder(), "option-profiles.yml");
@@ -587,6 +635,33 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 }
             }
         );
+        // 道具箱编辑 Dialog：把「读快照 / 异步持久化 / 选择 / 语音」四个接缝收口到一个装配类，
+        // 并把打开接缝注入旧箱子 GUI——旧箱子 open 只做委托，不再 createInventory。
+        gadgetBoxDialogWiring = new GadgetBoxDialogWiring(
+            this, tableGadgetLoadoutStore, gadgetPreviewSnapshotService, tableGadgetBarHudService, playerOutputDispatcher
+        );
+        if (tableGadgetGuiService != null) {
+            tableGadgetGuiService.setDialogOpener(gadgetBoxDialogWiring.opener());
+        }
+        // MuMenu 悬浮道具面板：经运行期窄桥读取 MuMenu 公开 API；缺 MuMenu 时服务仍创建但返回 MENU_UNAVAILABLE。
+        gadgetPanelService = new GadgetPanelService(
+            this,
+            tableGadgetBarHudService,
+            tableGadgetService,
+            player -> {
+                GameTable table = tableManager.getTableOf(player);
+                if (table != null && tableSpeechPanelService != null) {
+                    tableSpeechPanelService.open(table, player.getUniqueId());
+                }
+            }
+        );
+        // MuMenu 窄桥在装配后解析一次：MuMenu 可能晚于 MUZ 加载，缓存留空会在首次查会话时再解析。
+        MuMenuGadgetBridge.refresh();
+        // 椅侧双面板内置渲染：MUZ 自己用 Display + Interaction 画，安装与否都不影响可用性。
+        chairPanelDisplayService = new ChairPanelDisplayService(this);
+        gadgetPanelService.applyChairPanelDisplay(chairPanelDisplayService);
+        // 椅侧左右面板：布局存储与「保存后重绘」接缝都在这里接线（缺重绘则面板不会跟着动）。
+        wireChairSidePanels();
         // Debug Web 调试面板：仅在 debug.web-ui.enabled=true 时启动，生产环境默认关闭。
         // 面板只负责 HUD 配置与资源恢复，不再接管已退役的正式 Hotbar 运行期服务。
         syncDebugWebServerRuntime();
@@ -620,6 +695,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         scheduler().runTimer(1L, 1L, () -> {
             if (tableSpeechPanelService != null) {
                 tableSpeechPanelService.tick();
+            }
+            // 顺带推进 Dialog 会话过期清理：不与任何世界/实体交互，放在 global lane 合法。
+            if (muzDialogService != null) {
+                muzDialogService.tick();
             }
         });
         HookSnapshot placeholderHook = ensurePlaceholderHookReadyInternal();
@@ -666,9 +745,21 @@ public final class DoudizhuPlugin extends JavaPlugin {
                 hudWebApplyCoordinator.close();
             }
         });
+        // Dialog 会话清理只清内存与栈、不提交任何任务，因此在关闭期（scheduler 已拒注册）也安全。
+        // 排在业务拆解之前：先把面板回调的准入关掉，避免关闭过程中迟到的按钮回调进入正在拆解的业务。
+        runShutdownStep("关闭 Dialog 会话", () -> {
+            if (muzDialogService != null) {
+                muzDialogService.shutdown();
+            }
+        });
         runShutdownStep("关闭桌内业务入口", () -> {
             if (tableSpeechPanelService != null) {
                 tableSpeechPanelService.shutdown();
+            }
+            // 椅侧双面板是 MUZ 自己的世界体：关闭期先把状态摘掉并尽最大努力删实体，
+            // 实体全部 non-persistent，即使删除被区域线程拒绝也不会跨重启残留。
+            if (chairPanelDisplayService != null) {
+                chairPanelDisplayService.shutdown();
             }
             if (tableGadgetBarHudService != null) {
                 tableGadgetBarHudService.shutdown();
@@ -724,6 +815,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
         runShutdownStep("关闭调度器", () -> {
             if (scheduler != null) {
                 scheduler.close();
+            }
+        });
+        runShutdownStep("关闭椅侧布局写盘线程", () -> {
+            if (chairIoExecutor != null) {
+                chairIoExecutor.shutdownNow();
+                chairIoExecutor = null;
             }
         });
     }
@@ -1365,6 +1462,290 @@ public final class DoudizhuPlugin extends JavaPlugin {
 
     public boolean isShuttingDown() {
         return shuttingDown;
+    }
+
+    /** Dialog 展示、导航与生命周期入口；所有 showDialog/closeDialog 都经它。 */
+    public MuzDialogService muzDialogService() {
+        return muzDialogService;
+    }
+
+    /** Dialog 会话代次注册表（供屏实现读取当前代次；一般不直接调用）。 */
+    public DialogSessionRegistry dialogSessionRegistry() {
+        return dialogSessionRegistry;
+    }
+
+    /**
+     * 打开个人设置 Dialog（{@code /muz settings|labels}）。
+     *
+     * <p>命令层只调这个门面，屏幕类的构造细节留在装配一侧，避免命令层耦合到各屏实现。
+     */
+    public void openPlayerSettings(Player player) {
+        if (player == null || muzDialogService == null) {
+            return;
+        }
+        muzDialogService.openRoot(player.getUniqueId(), new PlayerSettingsDialogScreen(this));
+    }
+
+    /**
+     * 打开管理菜单 Dialog（{@code /muz admin}）。
+     *
+     * <p>【为什么先收 MuMenu，再开 Dialog】悬浮菜单可能仍持有鼠标/滚轮输入，因此先关闭该玩家的
+     * MuMenu 会话与锚定面板，再打开原生管理菜单，避免跨插件界面争用。
+     * 这是防御性的输入互斥，并非已经证实此次实服「打不开」由它导致；具体失败点仍须依据
+     * Dialog 构建/展示的 SEVERE 堆栈定位，不能把风险推断写成现场根因。
+     *
+     * <p>【lane】MuMenu 的玩家级 API 与 Dialog 展示都必须在 player lane 上调用，而命令在
+     * 区域线程/主线程执行，因此统一经 {@code PlayerOutputDispatcher.enqueuePlayer} 投递一次，
+     * 关闭与开屏都在该 lane 内完成（顺序固定：先关面板，再 openRoot）。
+     *
+     * <p>【为什么不再静默 return】服务未装配时此前直接 return，玩家与日志两侧都没有任何痕迹，
+     * 与「命令没生效」无法区分。现在按 SEVERE 留痕（{@code MuzLogGate} 只过滤 WARNING）并明确提示玩家。
+     */
+    public void openAdminMenu(Player player) {
+        if (player == null) {
+            return;
+        }
+        MuzDialogService service = muzDialogService;
+        if (service == null) {
+            getLogger().severe("/muz admin 无法打开管理菜单：Dialog 服务未装配（muzDialogService == null）。");
+            if (playerOutputDispatcher != null) {
+                playerOutputDispatcher.sendMessage(player.getUniqueId(), Component.text(
+                    "管理菜单暂时不可用：面板服务尚未就绪（详情见服务端日志）。", NamedTextColor.RED));
+            }
+            return;
+        }
+        java.util.UUID playerId = player.getUniqueId();
+        if (playerOutputDispatcher == null) {
+            // 极端降级：没有 lane 门面时只能就地调用（命令本身已在玩家的 region 线程上）。
+            closeMuMenuSurfacesForAdmin(player);
+            muzDialogService.openRoot(player.getUniqueId(), AdminDialogScreen.home(this));
+            return;
+        }
+        playerOutputDispatcher.enqueuePlayer(playerId, viewer -> {
+            // 先收 MuMenu 再开 Dialog，防御性避免两套界面争用输入；不据此推断现场故障原因。
+            // 真正的构建/展示失败由 MuzDialogService 给玩家提示并记录完整堆栈。
+            closeMuMenuSurfacesForAdmin(viewer);
+            muzDialogService.openRoot(player.getUniqueId(), AdminDialogScreen.home(this));
+        });
+    }
+
+    /**
+     * 关掉该玩家所有 MuMenu 悬浮平面（会话 + 世界锚定双面板），把输入还给客户端。
+     *
+     * <p>必须在 player lane 调用；MuMenu 缺失/不兼容时桥接自身返回 false，不抛异常。
+     * 收起失败不应挡住建管理菜单，因此这里只留痕（SEVERE，不受 debug 门禁影响）并继续。
+     */
+    private void closeMuMenuSurfacesForAdmin(Player viewer) {
+        try {
+            MuMenuGadgetBridge bridge = new MuMenuGadgetBridge(this);
+            boolean sessionClosed = bridge.closeSession(viewer);
+            boolean panelsClosed = bridge.closePanels(viewer);
+            GadgetPanelService panelService = gadgetPanelService;
+            if (panelService != null) {
+                panelService.closeChairPanels(viewer);
+            }
+            if (!sessionClosed && !panelsClosed) {
+                // MuMenu 未安装/无面板时这属于正常结果，不算故障；只有确实存在会话却收不掉才需要看日志，
+                // 而那种情况桥接内部已经按失败留痕，这里不重复刷。
+                return;
+            }
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.SEVERE,
+                "/muz admin 前关闭 MuMenu 面板失败（不阻断管理菜单打开）", failure);
+        }
+    }
+
+    /** 打开战绩 Dialog（{@code /muz history [玩家] [页]}）。 */
+    public void openHistoryDialog(Player viewer, UUID targetPlayerId, String targetName, int page) {
+        if (viewer == null || muzDialogService == null) {
+            return;
+        }
+        // 战绩查询必须异步读库，屏对象因此承载 playerId/页状态并自带编排；
+        // build(ctx) 只渲染预取数据，不做 IO。这里只转发到编排入口。
+        if (historyDialogScreen == null) {
+            historyDialogScreen = new HistoryDialogScreen(this, muzDialogService);
+        }
+        historyDialogScreen.open(viewer, targetPlayerId, targetName, page);
+    }
+
+        /** 打开战绩详情 Dialog（{@code /muz history} 列表页点进某一局）。 */
+    public void openHistoryDetail(Player viewer, UUID targetPlayerId, String targetName, int page, long matchId) {
+        if (viewer == null || muzDialogService == null) {
+            return;
+        }
+        if (historyDialogScreen == null) {
+            historyDialogScreen = new HistoryDialogScreen(this, muzDialogService);
+        }
+        historyDialogScreen.openDetail(viewer.getUniqueId(), targetPlayerId, targetName, page, matchId);
+    }
+
+    /** 打开道具箱编辑 Dialog（{@code /muz gadget edit}）。 */
+    public void openGadgetEditor(Player player) {        if (player == null || gadgetBoxDialogWiring == null) {
+            return;
+        }
+        gadgetBoxDialogWiring.openEditor(player);
+    }
+
+    /**
+     * 打开 MuMenu 悬浮道具面板（{@code /muz gadget panel}）。
+     *
+     * <p>Lane：{@code GadgetPanelService} 的入口都要求在 player lane 调用（会触碰玩家/会话 API），
+     * 而命令执行在 global 线程，因此这里统一经 {@code PlayerOutputDispatcher} 投到玩家 owner lane，
+     * 结果提示也在 lane 内直接发给该玩家。
+     */
+    public void openGadgetPanel(Player player) {
+        if (player == null) {
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        playerOutputDispatcher.enqueuePlayer(playerId, target ->
+            hintGadgetStatus(target, gadgetPanelService == null
+                ? GadgetPanelService.Status.MENU_UNAVAILABLE
+                : gadgetPanelService.openPanel(target))
+        );
+    }
+
+    /** 选择桌内道具槽（用户 1-based，内部 0-based）；经 player owner lane 执行。 */
+    public void selectGadgetSlot(Player player, int oneBasedSlot) {
+        if (player == null) {
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        playerOutputDispatcher.enqueuePlayer(playerId, target -> {
+            if (gadgetPanelService == null) {
+                return;
+            }
+            if (oneBasedSlot < 1 || oneBasedSlot > VirtualGadgetBar.SLOT_COUNT) {
+                hintGadgetStatus(target, GadgetPanelService.Status.OUT_OF_RANGE);
+                return;
+            }
+            hintGadgetStatus(target, gadgetPanelService.selectSlot(target, oneBasedSlot));
+        });
+    }
+
+    /** 打开桌内私有语音面板（{@code /muz gadget voice}）；经 player owner lane 执行。 */
+    public void openGadgetVoice(Player player) {
+        if (player == null) {
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        playerOutputDispatcher.enqueuePlayer(playerId, target -> {
+            if (gadgetPanelService != null) {
+                hintGadgetStatus(target, gadgetPanelService.openVoice(target));
+            }
+        });
+    }
+
+    private void hintGadgetStatus(Player player, GadgetPanelService.Status status) {
+        if (player == null || status == null || status == GadgetPanelService.Status.OK) {
+            return;
+        }
+        String text = gadgetPanelService != null
+            ? gadgetPanelService.hint(status)
+            : "道具面板当前不可用。";
+        player.sendMessage(net.kyori.adventure.text.Component.text(
+            text, net.kyori.adventure.text.format.NamedTextColor.RED));
+    }
+
+    /** 桌内道具面板服务的门面；未装配 MuMenu 桥时为 null。 */
+    public GadgetPanelService getGadgetPanelService() {
+        return gadgetPanelService;
+    }
+
+    /**
+     * 椅侧左右面板的装配：布局存储（配置侧）+ 保存后重绘（渲染侧）+ 配置下发。
+     *
+     * <p>【为什么要单独三步】三件事属于不同 owner：
+     * <ul>
+     *   <li>布局存储归 config 侧，必须与 {@code yamlConfig()} 同源、与 {@code hudWebConfigLock()}
+     *       同锁，否则 Dialog 存进去的值与运行期读到的不一致；</li>
+     *   <li>「保存后重绘」必须在 player lane 上执行，因此把 {@code PlayerOutputDispatcher} 的
+     *       {@code runPlayer} 作为投递器注入面板服务——不注入时它只会记一条 WARNING，
+     *       表现为「改了布局但面板不动」；</li>
+     *   <li>配置层下发把 {@code chair-side-panels} 的当前快照推给面板服务，供打开时使用。</li>
+     * </ul>
+     *
+     * <p>任何一步缺失都只降级（面板仍可打开、布局仍可存），因此这里不抛异常，只留痕。
+     */
+    private void wireChairSidePanels() {
+        try {
+            // 单线程执行器：布局保存必须串行写同一个配置文件，避免并发写坏 YAML。
+            java.util.concurrent.ExecutorService layoutIo = java.util.concurrent.Executors.newSingleThreadExecutor(
+                runnable -> {
+                    Thread thread = new Thread(runnable, "MUZ-chair-panel-layout");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+            chairIoExecutor = layoutIo;
+            chairSidePanelLayoutStore = ChairSidePanelLayoutStore.production(
+                yamlConfig(), hudWebConfigLock(), this, layoutIo);
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.SEVERE, "椅侧面板布局存储装配失败（布局编辑将不可用）", failure);
+            chairSidePanelLayoutStore = null;
+        }
+        GadgetPanelService panels = gadgetPanelService;
+        if (panels == null) {
+            return;
+        }
+        try {
+            PlayerOutputDispatcher output = playerOutputDispatcher;
+            if (output != null) {
+                panels.applyLaneDispatcher(output::runPlayer);
+            }
+            if (chairSidePanelLayoutStore != null) {
+                panels.applyChairSettings(chairSidePanelLayoutStore.snapshot());
+            }
+        } catch (RuntimeException | Error failure) {
+            getLogger().log(java.util.logging.Level.SEVERE, "椅侧面板装配失败（面板可能不随布局刷新）", failure);
+        }
+    }
+
+    /**
+     * 椅侧左右双面板的内置渲染器（可能为 null：仅在启用前的极早窗口）。
+     *
+     * <p>该服务不依赖 MuMenu；Mesh 与命中都在 MUZ 自己实现。
+     */
+    public ChairPanelDisplayService getChairPanelDisplayService() {
+        return chairPanelDisplayService;
+    }
+
+    /**
+     * 玩家输出门面（UUID → player lane）的只读访问器。
+     *
+     * <p>若干 game 侧服务（如 {@code GadgetPanelService} 的面板刷新）需要把工作投回某个玩家的
+     * owner lane，但又不该自己去构造 dispatcher 或持有 Bukkit 调度器；统一从插件取这一份，
+     * 保证全仓只有一条 player lane 出口。未装配时返回 null，调用方必须判空。
+     */
+    public PlayerOutputDispatcher getPlayerOutputDispatcher() {
+        return playerOutputDispatcher;
+    }
+
+    /**
+     * 椅侧左右面板的布局存储（配置驱动，{@code chair-side-panels} 段）。
+     *
+     * <p>与 {@code yamlConfig()}、{@code hudWebConfigLock()} 共用同一份配置对象与同一把锁，
+     * 因此 Dialog 编辑、配置迁移与面板渲染读到的永远是一致快照；未装配时为 null。
+     */
+    public ChairSidePanelLayoutStore chairSidePanels() {
+        return chairSidePanelLayoutStore;
+    }
+
+    /**
+     * 椅侧面板布局编辑屏需要的端口：读写配置 + 保存后重绘已打开的面板。
+     *
+     * <p>每次取值都新建一个薄适配器（本身无状态），把两个 owner 的东西拼在一起：
+     * 布局存储归 config 侧，重绘入口归面板渲染侧。屏因此不需要反向依赖插件字段。
+     */
+    public ChairPanelLayoutPort chairPanelLayoutPort() {
+        ChairSidePanelLayoutStore store = chairSidePanelLayoutStore;
+        if (store == null) {
+            return null;
+        }
+        GadgetPanelService panels = gadgetPanelService;
+        java.util.function.Consumer<ChairSidePanelSettings> repaint = panels == null
+            ? settings -> { }
+            : panels::repaintAfterLayoutSaved;
+        return new ChairPanelLayoutStoreAdapter(store, repaint);
     }
 
     public boolean isVaultEconomyEnabled() {
@@ -3232,6 +3613,73 @@ public final class DoudizhuPlugin extends JavaPlugin {
         reloadVisualState(false, ReloadFeedback.silent());
     }
 
+    /**
+     * 把某项管理设置绝对设成给定值，并走与 {@link #adjustAdminSetting} 相同的保存副作用。
+     *
+     * <p>供原生 Dialog 的滑块 / 精确文本输入使用：它不是「加减一个步长」，而是「直接落到某个值」。
+     * 保存副作用与步进保持同源——写 config.yml 后调 {@code reloadVisualState}；{@code TABLE_SPAWN_OFFSET_Y}
+     * 仍走 {@code shiftAllAnchors}（位移量 = 新值 − 旧生效值）。
+     *
+     * <p>与步进一致：不按声明的 min/max 夹紧（调整范围已放开）。方块家具的整格 / 90 度吸附语义照旧保留。
+     * {@code zeroIsRealValue} 为假的项写 0 仍表示"用默认值"，这是既有 config 语义，调用方需知悉。
+     *
+     * @param setting 目标设置
+     * @param value 目标值
+     * @throws IllegalArgumentException value 非有限（NaN / 正负无穷）
+     */
+    public void setAdminSettingAbsolute(AdminSetting setting, double value) {
+        if (setting == null) {
+            throw new IllegalArgumentException("设置项不能为空");
+        }
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("数值必须是有限值：" + value);
+        }
+        if (setting.booleanSetting()) {
+            yamlConfig().set(setting.path(), value != 0.0);
+        } else if (setting.integerSetting()) {
+            yamlConfig().set(setting.path(), (int) Math.round(value));
+        } else {
+            // 先读旧生效值：TABLE_SPAWN_OFFSET_Y 的位移量要由"新 − 旧"算，必须在覆写前读。
+            double current = normalizeAdminCurrentValue(setting, adminSettingCurrentValue(setting));
+            double next = normalizeAdminStoredValue(setting, roundToStorePrecision(value));
+            yamlConfig().set(setting.path(), next);
+            if (setting == AdminSetting.TABLE_SPAWN_OFFSET_Y) {
+                saveYamlConfig();
+                loadRenderSettings();
+                double shift = next - current;
+                if (physicalTableManager != null) {
+                    physicalTableManager.shiftAllAnchors(shift).exceptionally(failure -> {
+                        getLogger().warning("牌桌锚点位移重建失败: deltaY=" + shift
+                            + "，原因=" + failure.getMessage());
+                        return null;
+                    });
+                }
+                return;
+            }
+        }
+        saveYamlConfig();
+        reloadVisualState(false, ReloadFeedback.silent());
+    }
+
+    /**
+     * 读取某项管理设置当前生效的数值（与 {@link #adminSettingValue} 的显示值同源）。
+     *
+     * <p>供原生 Dialog 数值滑块取初值：滑块需要 double，而 {@code adminSettingValue} 是显示字符串。
+     * 语义与步进路径一致——布尔项返回 0/1，整数项返回整数值，其余走方块家具归一化后的生效值。
+     *
+     * @param setting 设置项
+     * @return 当前生效数值
+     */
+    public double adminSettingCurrentDouble(AdminSetting setting) {
+        if (setting.booleanSetting()) {
+            return yamlConfig().getBoolean(setting.path(), setting.defaultBoolean()) ? 1.0 : 0.0;
+        }
+        if (setting.integerSetting()) {
+            return adminSettingCurrentInt(setting);
+        }
+        return normalizeAdminCurrentValue(setting, adminSettingCurrentValue(setting));
+    }
+
     public String adminSettingValue(AdminSetting setting) {
         if (setting == AdminSetting.HOVER_CARD_ANIMATION_TYPE) {
             return cardHoverAnimationCurve().label();
@@ -3319,7 +3767,12 @@ public final class DoudizhuPlugin extends JavaPlugin {
             .decoration(TextDecoration.ITALIC, false);
     }
 
-    private String resolvePlayerName(UUID playerId) {
+    /**
+     * 按 UUID 解析玩家名（在线优先，离线兜底）。
+     *
+     * <p>提升为 public 供原生 Dialog 的管理页使用：在线快照只带 UUID，按钮要显示名字。
+     */
+    public String resolvePlayerName(UUID playerId) {
         if (playerId == null) {
             return null;
         }
@@ -3329,6 +3782,19 @@ public final class DoudizhuPlugin extends JavaPlugin {
         }
         OfflinePlayer offline = Bukkit.getOfflinePlayer(playerId);
         return offline.getName();
+    }
+
+    /**
+     * 在线玩家的不可变 UUID 快照（连接生命周期维护）。
+     *
+     * <p>供原生 Dialog 在 player lane 里安全取在线列表，避免 {@code Bukkit.getOnlinePlayers()}
+     * 在区域化核上的 lane 语义问题。委托 {@link PhysicalTableManager#onlinePlayerIdsSnapshot()}。
+     */
+    public java.util.List<UUID> onlinePlayerIdsSnapshot() {
+        if (physicalTableManager == null) {
+            return java.util.List.of();
+        }
+        return physicalTableManager.onlinePlayerIdsSnapshot();
     }
 
     /**
@@ -3660,6 +4126,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
         changed |= ensurePlacementSoundConfig();
         changed |= ensureBotAiConfig();
         changed |= migrateChairHitboxConfig();
+        // 旧安装的明牌文案迁移：mergeMissingFrom 只补缺键，而这三个键老服都存在，
+        // 因此必须显式迁移，否则老服永远显示旧默认「整局最多 ×2」而读不到新模板。
+        // 仅当值逐字等于已知旧默认才替换，其它任何值视为自定义文案原样保留（见该类 javadoc）。
+        changed |= linmumua.doudizhu.config.RevealMessageMigration.migrate(yamlConfig(), getLogger());
         if (changed) {
             saveYamlConfig();
         }
@@ -3884,6 +4354,13 @@ public final class DoudizhuPlugin extends JavaPlugin {
         reloadHudRuntimeState();
         reloadTableGadgetRuntime();
         syncDebugWebServerRuntime();
+        // MuMenu 窄桥解析缓存随 reload 刷新：MuMenu 的启停可能在两次 reload 之间发生。
+        MuMenuGadgetBridge.refresh();
+        // Dialog 会话随 reload 作废：旧面板回调与进行中的异步请求（如战绩查询）必须失效，
+        // 但服务保持可用（invalidateAll 不置 closed），reload 后玩家仍能立刻重新打开面板。
+        if (muzDialogService != null) {
+            muzDialogService.invalidateAll();
+        }
         // 【偏移服务也要重解析】：它的 initialised 只置一次，解析失败后永不重试。
         // 若 CraftEngine 曾因资源包配置错误而没就绪，整条 HUD 会被 render 直接 hide；
         // 不在这里重置的话，服主修好配置执行 /muz reload 依然什么都看不到，只能重启。

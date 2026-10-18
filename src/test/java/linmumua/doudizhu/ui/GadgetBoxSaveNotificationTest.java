@@ -78,6 +78,30 @@ class GadgetBoxSaveNotificationTest {
         assertTrue(snapshot > listener && normalize > snapshot && render > normalize);
     }
 
+    /**
+     * 生产入口不再打开旧的 Inventory 箱子。
+     *
+     * <p>用户要求：道具箱从箱子 Inventory 迁到原生 Dialog 后，旧箱子入口的生产路径必须不可达——
+     * 「新建了 Dialog 但旧箱子入口仍可打开」正是要避免的迁移回归。判定去掉注释后再看：
+     * 退役说明会以注释方式保留「旧箱子 createInventory + GadgetBoxInventoryHolder」的因果链，
+     * 直接对原文 contains 会被注释误判。
+     */
+    @Test
+    void 生产入口不再创建Inventory箱子() throws Exception {
+        String code = stripComments(
+            Files.readString(Path.of("src/main/java/linmumua/doudizhu/ui/GadgetBoxGuiService.java")));
+
+        assertFalse(code.contains("createInventory"),
+            "open 路径不得再 createInventory：道具箱已迁 Dialog，旧箱子生产路径必须不可达");
+        assertTrue(code.contains("setDialogOpener"),
+            "必须保留 Dialog 委托注入点，装配方才能把编辑屏接上去");
+    }
+
+    /** 去掉块注释与行注释，只留可执行代码（退役说明会以注释保留被退役 API 的名字）。 */
+    private static String stripComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
+    }
+
     private static void assertMethodRequiresPrimaryThread(String source, String signature) {
         int start = source.indexOf(signature);
         assertTrue(start >= 0, "缺少方法：" + signature);

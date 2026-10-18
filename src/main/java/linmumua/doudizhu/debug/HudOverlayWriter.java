@@ -7,6 +7,8 @@ import org.bukkit.plugin.Plugin;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
+import org.yaml.snakeyaml.representer.Representer;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -361,7 +363,12 @@ public final class HudOverlayWriter {
         options.setIndicatorIndent(0);
         options.setWidth(120);
         options.setSplitLines(false);
-        return new Yaml(loader, options).dump(value);
+        // 与 MuzYamlConfig.createYaml 同口径：必须用「四参」构造器，不能用 2.5 才新增的
+        // Yaml(LoaderOptions, DumperOptions) 便捷构造器。服务端可能自带旧版 SnakeYAML
+        // （实测 Folia/Paper 26.1.2 的 libraries/org/yaml/snakeyaml/2.2/ 就是 2.2），
+        // 那时便捷构造器不存在，会抛 NoSuchMethodError，Debug Web 的「保存并应用」直接失败。
+        // 显式 SafeConstructor 也与此处只输出映射/序列/标量的用途一致（不解析外部 tag）。
+        return new Yaml(new SafeConstructor(loader), new Representer(options), options, loader).dump(value);
     }
 
     private void warn(String message) {

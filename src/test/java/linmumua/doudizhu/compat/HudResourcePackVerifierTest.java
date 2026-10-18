@@ -86,10 +86,12 @@ class HudResourcePackVerifierTest {
     }
 
     @Test
-    void packFormat75_84_88都通过() throws IOException {
-        // 三个目标格式（paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88）都必须被接受。
-        // 曾经硬编码只认 84/88，会把 1.21.11 的合法资源包误判为不受支持。
-        for (int format : new int[]{75, 84, 88}) {
+    void packFormat75_84_88_97都通过() throws IOException {
+        // 四个目标格式（paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88、paper-26.3=97）
+        // 都必须被接受。曾经硬编码只认 84/88，会把 1.21.11 的合法资源包误判为不受支持；
+        // 26.3 的官方资源包版本是 97.1，但只要 major 在允许集合内就放行（minor 由构建期
+        // 写进 min_format/max_format，见下一条用例）。
+        for (int format : new int[]{75, 84, 88, 97}) {
             Path pack = writePack(temporaryDirectory.resolve("pack-format-" + format + ".zip"), OFFSET_Y,
                 counterFontJson(OFFSET_Y, Mutation.NONE), Map.of(),
                 "{\"pack\":{\"pack_format\":" + format + "}}");
@@ -103,6 +105,18 @@ class HudResourcePackVerifierTest {
         Path pack = writePack(temporaryDirectory.resolve("modern-pack-format.zip"), OFFSET_Y,
             counterFontJson(OFFSET_Y, Mutation.NONE), Map.of(),
             "{\"pack\":{\"min_format\":[88,0],\"max_format\":[88,0]}}");
+
+        assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
+    }
+
+    @Test
+    void 非零minor的minMaxFormat声明通过() throws IOException {
+        // 26.3 起官方资源包版本是 97.1（Mojang 26.3 server.jar 的 version.json）。
+        // 构建期会写出 min_format/max_format = [97, 1]；校验器按 major 匹配允许集合，
+        // 因此非零 minor 不得被当成非法声明拒绝。
+        Path pack = writePack(temporaryDirectory.resolve("modern-pack-format-minor.zip"), OFFSET_Y,
+            counterFontJson(OFFSET_Y, Mutation.NONE), Map.of(),
+            "{\"pack\":{\"pack_format\":97,\"min_format\":[97,1],\"max_format\":[97,1]}}");
 
         assertDoesNotThrow(() -> verifier().verify(pack, OFFSET_Y));
     }

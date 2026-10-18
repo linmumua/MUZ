@@ -37,8 +37,6 @@ class TableGadgetBarHudServiceTest {
         assertTrue(source.contains("output.runPlayer(playerId"));
         assertTrue(source.contains("refreshResultAllowed(stopped, state, generation)"));
         assertFalse(source.contains("player.sendActionBar"), "生产额外栏不得绕过共享玩家输出门面");
-        assertTrue(source.contains("PlayerItemHeldEvent"));
-        assertTrue(source.contains("event.setCancelled(true)"));
         assertTrue(source.contains("PackAssets.gadgetBarBaseGlyphText"), "额外栏必须发送 MUZ 九格底图字形");
         assertTrue(source.contains("PackAssets.gadgetBarIconGlyphText"), "道具槽必须叠加客户端真实图标字形");
         assertTrue(source.contains("PackAssets.gadgetBarSelectGlyphText"), "选中槽必须叠加独立选框字形");
@@ -53,6 +51,45 @@ class TableGadgetBarHudServiceTest {
         assertFalse(source.contains("Component.text(\"道具 \")"), "额外栏不得继续输出文字标题");
         assertFalse(source.contains("itemLabel("), "额外栏不得继续使用文字道具标签");
         assertFalse(source.contains("openInventory"), "额外栏不得打开 Inventory GUI");
+    }
+
+    /**
+     * 热栏滚轮/数字键不再劫持原版快捷栏。
+     *
+     * <p>【机制升级，不是弱化】旧实现用 {@code @EventHandler PlayerItemHeldEvent onHeldChange(...)}
+     * 在玩家切快捷栏时取消事件、把 MUZ 选槽跟着滚轮/数字键走，代价是覆盖了原版快捷栏切换
+     * （玩家没法正常换主手物品）。用户要求改为：道具面板由 MuMenu 悬浮面板承载、点击选槽走
+     * {@code /muz gadget select <1..8>} 命令；MUZ 不再处理热栏事件，原版快捷栏恢复原状。
+     * 因此这里把旧断言（必须出现 PlayerItemHeldEvent / setCancelled）方向反转为「必须不出现」。
+     *
+     * <p>命令桥 {@code select(UUID,int)} 仍保留（面板点击与命令都走它），所以「选槽能力」没丢，
+     * 丢的只是「劫持热栏」这条副作用路径。
+     */
+    @Test
+    void 热栏滚轮数字键不再劫持原版快捷栏() throws IOException {
+        // 退役说明会以注释形式保留「旧实现监听 PlayerItemHeldEvent / event.setCancelled(true)」这段因果链，
+        // 所以判定必须去掉注释后再看，否则注释里的历史说明会被当成仍然存在的代码。
+        String source = stripComments(Files.readString(HUD));
+        assertFalse(source.contains("PlayerItemHeldEvent"),
+            "MUZ 不得再监听 PlayerItemHeldEvent（会覆盖原版快捷栏切换，妨碍玩家换主手物品）");
+        assertFalse(source.contains("onHeldChange"),
+            "热栏切换处理入口应当整体退役，不能留空壳");
+        assertFalse(source.contains("event.setCancelled(true)"),
+            "不得再取消原版快捷栏切换事件");
+        assertTrue(source.contains("public void select(UUID playerId, int slot)"),
+            "选槽能力必须保留：MuMenu 面板点击与 /muz gadget select 都经 select(UUID,int) 生效");
+    }
+
+    /**
+     * 去掉块注释与行注释，只留可执行代码。
+     *
+     * <p>退役路径的因果链会以注释形式留在源码里（项目规范要求保留「为什么退役」的记录），
+     * 这些注释里必然出现被退役 API 的名字。若直接对原文做 {@code contains} 断言，
+     * 一条正确退役的代码会因为注释而判红——所以这里的判定统一先剥注释。
+     */
+    private static String stripComments(String source) {
+        String withoutBlockComments = source.replaceAll("(?s)/\\*.*?\\*/", "");
+        return withoutBlockComments.replaceAll("(?m)//.*$", "");
     }
 
     /**

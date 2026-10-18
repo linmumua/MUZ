@@ -5,6 +5,8 @@ import linmumua.doudizhu.game.GameTable;
 import linmumua.doudizhu.game.PlayerOutputDispatcher;
 import linmumua.doudizhu.storage.MatchParticipantRecord;
 import linmumua.doudizhu.storage.PlayerHistoryEntry;
+import linmumua.doudizhu.ui.dialog.AdminDialogScreen;
+import linmumua.doudizhu.ui.dialog.SoundActionDialogScreen;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -103,11 +105,23 @@ public final class HandGuiService {
         return Math.floorMod(hitboxAdjustmentStepIndexes.getOrDefault(playerId, 0), HITBOX_ADJUSTMENT_STEPS.length);
     }
 
+    /**
+     * 打开个人设置。
+     *
+     * <p>迁移到原生 Dialog：本入口只做兼容委托，不再创建箱子 Inventory。
+     * 旧箱子实现见 {@link #openSettingsLegacy(Player)}（保留作历史参考，生产调用图不再经过它）。
+     */
     public void openSettings(Player player) {
-        openSettings(player, plugin.getTableManager().getTableOf(player));
+        plugin.openPlayerSettings(player);
     }
 
-    public void openSettings(Player player, GameTable table) {
+    /** 旧箱子实现的入口（已停用，仅保留历史参考）。 */
+    private void openSettingsLegacy(Player player) {
+        openSettingsLegacy(player, plugin.getTableManager().getTableOf(player));
+    }
+
+    /** 旧箱子实现（已停用）：生产路径改为 {@link #openSettings(Player)} 委托 Dialog。 */
+    private void openSettingsLegacy(Player player, GameTable table) {
         HandInventoryHolder holder = new HandInventoryHolder(table == null ? "" : table.getName(), player.getUniqueId(), HandInventoryHolder.ViewMode.SETTINGS);
         Inventory inventory = Bukkit.createInventory(holder, SETTINGS_SIZE, "MUMU | 个人设置");
         holder.setInventory(inventory);
@@ -130,6 +144,14 @@ public final class HandGuiService {
     }
 
     public void openSelectionSoundPicker(Player player) {
+        // 迁移到原生 Dialog：仅兼容委托，不再创建箱子 Inventory。
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.playerSelection(plugin));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openSelectionSoundPickerLegacy(Player player) {
         openPlayerProfilePicker(player, HandInventoryHolder.EditorTarget.PLAYER_SELECTION, "斗地主 | 选牌音效方案");
     }
 
@@ -137,7 +159,19 @@ public final class HandGuiService {
         openPlayActionKindMenu(player);
     }
 
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openPlayActionPickerLegacy(Player player) {
+        openPlayActionKindMenu(player);
+    }
+
     public void openPlayActionKindMenu(Player player) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.playerActionKindMenu(plugin));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openPlayActionKindMenuLegacy(Player player) {
         GameTable table = plugin.getTableManager().getTableOf(player);
         HandInventoryHolder holder = new HandInventoryHolder(table == null ? "" : table.getName(), player.getUniqueId(), HandInventoryHolder.ViewMode.SETTINGS_ACTION_KIND_MENU);
         Inventory inventory = Bukkit.createInventory(holder, PICKER_SIZE, "斗地主 | 动作设置");
@@ -153,6 +187,13 @@ public final class HandGuiService {
     }
 
     public void openPlayActionPicker(Player player, DoudizhuPlugin.PlayActionKind kind) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.playerActionPicker(plugin, kind));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openPlayActionPickerLegacy(Player player, DoudizhuPlugin.PlayActionKind kind) {
         GameTable table = plugin.getTableManager().getTableOf(player);
         HandInventoryHolder holder = new HandInventoryHolder(
             table == null ? "" : table.getName(),
@@ -215,10 +256,20 @@ public final class HandGuiService {
     }
 
     public void openAdminModels(Player player) {
+        plugin.openAdminMenu(player);
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminModelsLegacy(Player player) {
         openAdminModels(player, HandInventoryHolder.AdminPage.HOME);
     }
 
     public void openHistory(Player viewer, UUID targetPlayerId, String targetName, int page) {
+        plugin.openHistoryDialog(viewer, targetPlayerId, targetName, page);
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openHistoryLegacy(Player viewer, UUID targetPlayerId, String targetName, int page) {
         int normalizedPage = Math.max(1, page);
         HistoryInventoryHolder holder = new HistoryInventoryHolder(viewer.getUniqueId(), targetPlayerId, targetName, normalizedPage, HistoryInventoryHolder.Mode.LIST, -1L);
         Inventory inventory = Bukkit.createInventory(holder, HISTORY_SIZE, "MUMU | 历史战绩 | " + normalizeHistoryName(targetName));
@@ -247,6 +298,11 @@ public final class HandGuiService {
     }
 
     public void openHistoryDetail(Player viewer, UUID targetPlayerId, String targetName, int page, long matchId) {
+        plugin.openHistoryDetail(viewer, targetPlayerId, targetName, page, matchId);
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openHistoryDetailLegacy(Player viewer, UUID targetPlayerId, String targetName, int page, long matchId) {
         List<PlayerHistoryEntry> entries = plugin.loadPlayerHistory(targetPlayerId, 100, 0);
         PlayerHistoryEntry selected = entries.stream().filter(entry -> entry.matchId() == matchId).findFirst().orElse(null);
         if (selected == null) {
@@ -279,6 +335,13 @@ public final class HandGuiService {
     }
 
     public void openAdminModels(Player player, HandInventoryHolder.AdminPage page) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), new AdminDialogScreen(plugin, page));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminModelsLegacy(Player player, HandInventoryHolder.AdminPage page) {
         // 管理菜单改成“首页 -> 斗地主/通用 -> 具体分类页”的三级结构。
         adminMenuViewer = player.getUniqueId();
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_MODELS, page);
@@ -520,10 +583,24 @@ public final class HandGuiService {
     }
 
     public void openAdminSelectionSoundEditor(Player player) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.selectionSoundEditor(plugin, 0));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminSelectionSoundEditorLegacy(Player player) {
         openAdminSelectionSoundEditor(player, 0);
     }
 
     public void openAdminSelectionSoundEditor(Player player, int profileIndex) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.selectionSoundEditor(plugin, profileIndex));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminSelectionSoundEditorLegacy(Player player, int profileIndex) {
         int normalized = Math.clamp(profileIndex, 0, 3);
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_SELECTION_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_SELECTION_SOUND, normalized);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 选牌音效方案 " + (normalized + 1));
@@ -550,6 +627,13 @@ public final class HandGuiService {
     }
 
     public void openAdminPlayActionKindPicker(Player player, DoudizhuPlugin.PlayActionKind kind) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.playActionKind(plugin, kind));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminPlayActionKindPickerLegacy(Player player, DoudizhuPlugin.PlayActionKind kind) {
         HandInventoryHolder holder = new HandInventoryHolder(
             "",
             player.getUniqueId(),
@@ -576,6 +660,13 @@ public final class HandGuiService {
     }
 
     public void openAdminPlayActionEditor(Player player, DoudizhuPlugin.PlayActionKind kind, int profileIndex) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.actionEditor(plugin, kind, profileIndex));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openAdminPlayActionEditorLegacy(Player player, DoudizhuPlugin.PlayActionKind kind, int profileIndex) {
         int normalized = Math.clamp(profileIndex, 0, 3);
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_PLAY_ACTION_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_PLAY_ACTION, kind, normalized);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | " + kind.label() + " 动作 " + (normalized + 1));
@@ -602,6 +693,13 @@ public final class HandGuiService {
     }
 
     public void openCountdownSoundPicker(Player player) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.countdownSound(plugin));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openCountdownSoundPickerLegacy(Player player) {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_COUNTDOWN, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 倒计时音效");
         holder.setInventory(inventory);
@@ -623,6 +721,13 @@ public final class HandGuiService {
     }
 
     public void openUnreadyWarningSoundPicker(Player player) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.unreadyWarningSound(plugin));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openUnreadyWarningSoundPickerLegacy(Player player) {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_UNREADY_WARNING, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 未准备提醒音");
         holder.setInventory(inventory);
@@ -644,6 +749,13 @@ public final class HandGuiService {
     }
 
     public void openPlacementBlockedSoundPicker(Player player) {
+        if (plugin.muzDialogService() != null) {
+            plugin.muzDialogService().openRoot(player.getUniqueId(), SoundActionDialogScreen.placementBlockedSound(plugin));
+        }
+    }
+
+    /** 旧箱子实现（已停用，保留历史参考）。 */
+    private void openPlacementBlockedSoundPickerLegacy(Player player) {
         HandInventoryHolder holder = new HandInventoryHolder("", player.getUniqueId(), HandInventoryHolder.ViewMode.ADMIN_COUNTDOWN_SOUND_EDITOR, HandInventoryHolder.EditorTarget.ADMIN_PLACEMENT_BLOCKED_WARNING, -1);
         Inventory inventory = Bukkit.createInventory(holder, COUNTDOWN_EDITOR_SIZE, "斗地主 | 放置阻挡警告音");
         holder.setInventory(inventory);
@@ -1584,7 +1696,13 @@ public final class HandGuiService {
         return value ? "开启" : "关闭";
     }
 
-    private String adminSettingHint(DoudizhuPlugin.AdminSetting setting) {
+    /**
+     * 每项管理设置的提示文案。
+     *
+     * <p>由 private 提升为 public：原生 Dialog 的管理页（{@code AdminSettingDialogScreen}）需要同一条提示，
+     * 提升可见性以避免复制第二份文案导致两处漂移。实现保持不变。
+     */
+    public String adminSettingHint(DoudizhuPlugin.AdminSetting setting) {
         return switch (setting) {
             case TABLE_SPAWN_OFFSET_Y -> "整套桌椅一起升降；方块做的桌子只能一格一格动。";
             // 它只是增量源：增量系数为 0 或本项 ≤1.10 时调了不动，得提醒依赖关系。

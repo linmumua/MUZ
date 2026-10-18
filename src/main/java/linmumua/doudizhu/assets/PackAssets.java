@@ -265,10 +265,15 @@ public final class PackAssets {
      */
     /**
      * 允许的资源包 {@code pack_format} 集合，与 build.gradle.kts 的 {@code MuzTarget}
-     * 表逐项对应：paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88。
+     * 表逐项对应：paper-1.21.11=75、paper-26.1.2=84、paper-26.2=88、paper-26.3=97。
+     *
+     * <p>这里存的是 major。26.3 的官方资源包版本是 97.1（major 97 / minor 1），本类只
+     * 按 major 放行，因为运行期无法从构建脚本得知当前 JAR 属于哪个目标；minor 由构建期
+     * 写进 {@code min_format}/{@code max_format}，客户端真正比较的是那一对数（
+     * {@code PackCompatibility.forVersion} 按 (major, minor) 字典序判定）。
      *
      * <p>【为什么放在插件侧枚举】：运行期 Java 读不到 Kotlin 构建脚本里的
-     * {@code muzTarget.resourcePackFormat}，而同一份 JAR 可能被部署到三种目标之一，
+     * {@code muzTarget.resourcePackFormat}，而同一份 JAR 可能被部署到多种目标之一，
      * {@link linmumua.doudizhu.compat.HudResourcePackVerifier} 校验 CraftEngine 实际
      * 生成的 {@code pack.mcmeta} 时无法预知当前目标，只能接受项目【可能】产出的全部格式。
      *
@@ -276,7 +281,7 @@ public final class PackAssets {
      * 一个目标的 {@code resourcePackFormat}，这里就要同步增删对应数字，否则合法资源包
      * 会被误判为「pack_format 不受支持」。反向新增未在构建表出现的格式也不允许。
      */
-    public static final int[] SUPPORTED_RESOURCE_PACK_FORMATS = {75, 84, 88};
+    public static final int[] SUPPORTED_RESOURCE_PACK_FORMATS = {75, 84, 88, 97};
 
     public static final int MIN_TRICK_OFFSET = -128;
     public static final int MAX_TRICK_OFFSET = 512;

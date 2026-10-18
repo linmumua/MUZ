@@ -79,15 +79,10 @@ public final class DebugWebServer {
         for (String name : previewTextureNames()) {
             map.put("muz:" + name, "craftengine/muz/resourcepack/assets/muz/textures/" + name);
         }
-        // 桌内道具栏（第四行）的只读预览也要真实 PNG：底图/选框/各图标都是构建期产物，
-        // 路径与 build.gradle.kts 的 textures/font/gadget_bar 同源，经 PackAssets 取，禁止前端拼路径。
-        String gadgetBase = "craftengine/muz/resourcepack/assets/muz/textures/";
-        map.put("muz:" + PackAssets.GADGET_BAR_TEXTURE_BASE, gadgetBase + PackAssets.GADGET_BAR_TEXTURE_BASE);
-        map.put("muz:" + PackAssets.GADGET_BAR_TEXTURE_SELECT, gadgetBase + PackAssets.GADGET_BAR_TEXTURE_SELECT);
-        for (int kind = PackAssets.GADGET_BAR_EGG; kind <= PackAssets.GADGET_BAR_SPEECH; kind++) {
-            String path = PackAssets.gadgetBarIconTexturePath(kind);
-            map.put("muz:" + path, gadgetBase + path);
-        }
+        // 退役：原先这里还把「只读道具栏预览图层」（原出牌 HUD BossBar 第四行）的底图/选框/图标 PNG
+        // 登记进同源白名单。该图层已随第四行移除，页面不再请求它们，故不再暴露这些字形贴图；
+        // 正式资源包里的构建期产物本身不在此处，属 build.gradle.kts 输出，未受影响。
+        // 道具箱预览仍需它自己的物品贴图（egg/water_bucket/tomato），由下面的 GADGET_PREVIEW_RESOURCE_WHITELIST 提供。
         map.putAll(GADGET_PREVIEW_RESOURCE_WHITELIST);
         return Map.copyOf(map);
     }
@@ -171,29 +166,9 @@ public final class DebugWebServer {
         addPreviewResource(map, "gadget:tomato", "gadget", "muz:item/table_gadget_tomato.png",
             "craftengine/muz/resourcepack/assets/muz/textures/item/table_gadget_tomato.png", 16, 16, 16, 1);
 
-        // 桌内道具栏第四行的只读预览图层：底图、选框与四个图标都要真实 PNG。
-        // 画布宽是 cellWidth-1（构建期把画布裁到 advance-1 并放 alpha=1 锚点），高为 cellHeight；
-        // 前端按 geometry.gadgetBar 的格宽/格高摆放，这里只提供图片与像素尺寸。
-        int gadgetCellVisualWidth = PackAssets.GADGET_BAR_CELL_WIDTH - 1;
-        addPreviewResource(map, "gadgetbar:base", "gadget-bar",
-            "muz:" + PackAssets.GADGET_BAR_TEXTURE_BASE,
-            "craftengine/muz/resourcepack/assets/muz/textures/" + PackAssets.GADGET_BAR_TEXTURE_BASE,
-            gadgetCellVisualWidth, PackAssets.GADGET_BAR_CELL_HEIGHT,
-            PackAssets.GADGET_BAR_CELL_ADVANCE, PackAssets.DEFAULT_HUD_SCALE);
-        addPreviewResource(map, "gadgetbar:select", "gadget-bar",
-            "muz:" + PackAssets.GADGET_BAR_TEXTURE_SELECT,
-            "craftengine/muz/resourcepack/assets/muz/textures/" + PackAssets.GADGET_BAR_TEXTURE_SELECT,
-            gadgetCellVisualWidth, PackAssets.GADGET_BAR_CELL_HEIGHT,
-            PackAssets.GADGET_BAR_CELL_ADVANCE, PackAssets.DEFAULT_HUD_SCALE);
-        for (int kind = PackAssets.GADGET_BAR_EGG; kind <= PackAssets.GADGET_BAR_SPEECH; kind++) {
-            String path = PackAssets.gadgetBarIconTexturePath(kind);
-            addPreviewResource(map, "gadgetbar:" + PackAssets.gadgetBarIconName(kind), "gadget-bar",
-                "muz:" + path,
-                "craftengine/muz/resourcepack/assets/muz/textures/" + path,
-                gadgetCellVisualWidth, PackAssets.GADGET_BAR_CELL_HEIGHT,
-                PackAssets.GADGET_BAR_CELL_ADVANCE, PackAssets.DEFAULT_HUD_SCALE);
-        }
-
+        // 退役：原先这里还给「只读道具栏预览图层」（原出牌 HUD BossBar 第四行）登记底图/选框/图标，
+        // 并新增一个专属 family 的预览清单条目。该图层与其专属 geometry 已移除，
+        // 预览清单不再下发该 family；道具箱面板的 gadget 系列（egg/water_bucket/tomato）保留在上面。
         return Map.copyOf(map);
     }
 

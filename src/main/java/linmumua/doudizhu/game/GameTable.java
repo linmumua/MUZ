@@ -100,7 +100,7 @@ public final class GameTable {
     private final Map<UUID, Integer> farmerBoostChoices = new LinkedHashMap<>();
     private Integer landlordBoostFactor;
     private int bombMultiplier = 1;
-    // 明牌是整局公共倍率，最多为 2；与炸弹倍率分开存储，结算时统一进入核心倍率。
+    // 明牌是整局公共倍率，按 RevealMultiplierLadder 的阶梯最高 3；与炸弹倍率分开存储，结算时统一进入核心倍率。
     private int revealMultiplier = 1;
     private CardPattern currentPattern;
     private List<DoudizhuCard> currentTrickCards = List.of();
@@ -492,6 +492,11 @@ public final class GameTable {
             }
 
             @Override
+            public void onOpeningRevealBecameAvailable(int multiplier) {
+                GameTable.this.onOpeningRevealBecameAvailable(multiplier);
+            }
+
+            @Override
             public void onOpeningRevealWindowStarted() {
                 GameTable.this.onOpeningRevealWindowStarted();
             }
@@ -695,6 +700,9 @@ public final class GameTable {
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearPlayer(playerId);
         }
+        if (plugin.getGadgetPanelService() != null) {
+            plugin.getGadgetPanelService().clearPlayer(playerId);
+        }
         // 全局世界 tick 已拆成按桌 owner 刷新；主动离桌时由状态变更路径显式清理玩家缓存。
         plugin.getPhysicalTableManager().clearPlayerCaches(playerId);
         Component leaveMessage = MuzTheme.field("离桌", MuzTheme.danger(reason));
@@ -845,7 +853,11 @@ public final class GameTable {
     }
 
     /**
-     * 明牌窗口内自愿公开手牌；不再绑定叫分回合，整局公共倍率最多只提升一次。
+     * 明牌窗口内自愿公开手牌；不再绑定叫分回合。
+     *
+     * <p>【倍率不再是常量】：以前这里是 {@code revealMultiplier = 2;}，即「一局最多 ×2」。
+     * 现在明牌窗口从首批发完就开始，倍率随已完成批数递减（3 → 2 → 1，见
+     * {@link RevealMultiplierLadder}），所以**点击当刻冻结**阶梯给出的倍率。
      */
     public void revealHand(Player player) {
         requireAtTable(player);
@@ -865,9 +877,19 @@ public final class GameTable {
             }
             throw new IllegalStateException(openingSettings().messages().revealUnavailable());
         }
+        // 复核一次当刻倍率：资格判定与冻结之间窗口可能刚关闭（迟到回调 / 旧局队列），
+        // 那种情况下倍率是 0，绝不能把 0 写进整局公共倍率。
+        int frozenMultiplier = currentRevealMultiplier();
+        if (frozenMultiplier < RevealMultiplierLadder.MIN_MULTIPLIER) {
+            throw new IllegalStateException(openingSettings().messages().revealUnavailable());
+        }
         revealedHandPlayers.add(playerId);
-        revealMultiplier = 2;
-        String announcement = openingSettings().messages().revealed().replace("%player%", displayName(playerId));
+        // 表级明牌倍率是「本局已生效的最高明牌倍率」：单调不减。
+        // 先前有人 3x 明牌后，后来者只有 1x 也不能把整局倍率写回 1——那等于把已生效的倍率改小。
+        revealMultiplier = Math.max(revealMultiplier, frozenMultiplier);
+        String announcement = RevealMultiplierLadder.withMultiplier(
+            openingSettings().messages().revealed(), revealMultiplier
+        ).replace("%player%", displayName(playerId));
         announceAction(announcement, MuzTheme.accent(announcement));
         playEffectAll(PackSounds.mingPai());
         refreshPhysicalTable();
@@ -900,9 +922,19 @@ public final class GameTable {
         return phase == GamePhase.DEALING;
     }
 
+    /**
+     * 明牌窗口是否开着。
+     *
+     * <p>【判据变化】：以前要求 {@code phase == REVEALING}，因为窗口本来就只在翻转结束时才开。
+     * 现在窗口从首批发完就打开（此时 phase 仍是 DEALING），所以阶段判据必须同时接受 DEALING 与
+     * REVEALING；否则 {@link #canRevealHand} 在发牌期恒为 false，第一批的 ×3 永远点不到。
+     * 真正的「开没开」由协调器决定，这里的阶段判断只用于挡掉 BIDDING 之后的迟到查询。
+     */
     public boolean isOpeningRevealWindow() {
-        return phase == GamePhase.REVEALING && roundOpeningCoordinator != null
-            && roundOpeningCoordinator.isRevealWindowOpen();
+        if (roundOpeningCoordinator == null || !roundOpeningCoordinator.isRevealWindowOpen()) {
+            return false;
+        }
+        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
     }
 
     public boolean isRevealWindowOpen() {
@@ -921,6 +953,20 @@ public final class GameTable {
         return isHandRevealed(playerId) ? 1 : 0;
     }
 
+    /**
+     * 此刻点明牌会冻结到的倍率；窗口未开时返回 0（不可明牌）。
+     *
+     * <p>UI/面板应据此决定是否显示、显示多少；不要自己按剩余秒数推算批次。
+     */
+    public int currentRevealMultiplier() {
+        return roundOpeningCoordinator == null ? 0 : roundOpeningCoordinator.currentRevealMultiplier();
+    }
+
+    /** 已完整发完的批次数（0..6），用于展示「第 N 批」这类信息。 */
+    public int openingCompletedDealBatches() {
+        return roundOpeningCoordinator == null ? 0 : roundOpeningCoordinator.completedDealBatches();
+    }
+
     public int openingRemainingSeconds() {
         return roundOpeningCoordinator == null ? 0 : roundOpeningCoordinator.openingRemainingSeconds();
     }
@@ -929,12 +975,55 @@ public final class GameTable {
         return roundOpeningCoordinator == null ? "" : roundOpeningCoordinator.openingRevealLabel();
     }
 
+    /**
+     * 明牌按钮文案：模板来自配置，{@code %multiplier%} 换成**当刻**可冻结倍率。
+     *
+     * <p>窗口关闭时按下限 1 替换，避免出现「明牌 ×0」这种既不可点又难看的文案。
+     */
     public String openingRevealButtonLabel() {
-        return openingSettings().messages().revealButton();
+        int multiplier = Math.max(
+            RevealMultiplierLadder.MIN_MULTIPLIER,
+            currentRevealMultiplier()
+        );
+        return RevealMultiplierLadder.withMultiplier(openingSettings().messages().revealButton(), multiplier);
     }
 
     public int publicRevealMultiplier() {
         return revealMultiplier;
+    }
+
+    /**
+     * 明牌窗口的只读快照：面板、占位符与按钮统一消费这一份事实，不允许各处自己算秒数或倍率。
+     *
+     * @param playerId 视角玩家，可为 null（此时 {@code youRevealed} 恒为 false）
+     */
+    public RevealWindowSnapshot getRevealWindowSnapshot(UUID playerId) {
+        return new RevealWindowSnapshot(
+            isRevealWindowOpen(),
+            openingRemainingSeconds(),
+            currentRevealMultiplier(),
+            revealMultiplier,
+            openingCompletedDealBatches(),
+            isHandRevealed(playerId)
+        );
+    }
+
+    /**
+     * @param open            窗口是否开着
+     * @param remainingSeconds 整个合法窗口的剩余秒数（已含发牌期预测，不是只看尾部）
+     * @param currentMultiplier 此刻点击会冻结的倍率；0 表示不可明牌
+     * @param appliedMultiplier 本局已生效的表级明牌倍率（单调不减）
+     * @param completedDealBatches 已完整发完的批次数
+     * @param youRevealed     该玩家这一局是否已经明牌
+     */
+    public record RevealWindowSnapshot(
+        boolean open,
+        int remainingSeconds,
+        int currentMultiplier,
+        int appliedMultiplier,
+        int completedDealBatches,
+        boolean youRevealed
+    ) {
     }
 
     public OpeningPresentationSnapshot getOpeningPresentationSnapshot() {
@@ -1272,7 +1361,9 @@ public final class GameTable {
             boostedFarmerCount(),
             farmerSeatCount(),
             landlordBoostFactor,
-            pairMultiplierSummary(false, false)
+            pairMultiplierSummary(false, false),
+            // 桌面状态牌是全桌事实，刻意传 null viewer：个人视角的「你已明牌」由 ActionBar 那一路承载。
+            getRevealWindowSnapshot(null)
         );
     }
 
@@ -1286,7 +1377,8 @@ public final class GameTable {
             boostedFarmerCount(),
             farmerSeatCount(),
             landlordBoostFactor,
-            pairMultiplierSummary(false, false)
+            pairMultiplierSummary(false, false),
+            getRevealWindowSnapshot(null)
         );
     }
 
@@ -1317,6 +1409,9 @@ public final class GameTable {
         }
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
+        }
+        if (plugin.getGadgetPanelService() != null) {
+            plugin.getGadgetPanelService().clearTable(this);
         }
         if (plugin.getTableSpeechPanelService() != null) {
             // 语音面板实体和同桌其它显示实体一样，只属于桌子 owner lane；此前关桌从不清理它，
@@ -1402,9 +1497,21 @@ public final class GameTable {
         confirmLandlord(playerId, bid, null);
     }
 
+    /**
+     * 首批发完、明牌窗口刚打开：此刻 phase 仍是 DEALING，所以这里只做提示，<b>不改阶段</b>。
+     *
+     * <p>阶段切换仍然由翻转结束的 {@link #onOpeningRevealWindowStarted()} 负责——把 DEALING 提前切走
+     * 会连带改坏发牌期的手牌锁、发牌文案与渲染分支。
+     */
+    private void onOpeningRevealBecameAvailable(int multiplier) {
+        String label = openingRevealLabel();
+        announceAction("明牌窗口", MuzTheme.field("明牌窗口", MuzTheme.accent(label)));
+        tickActionBar();
+    }
+
     private void onOpeningRevealWindowStarted() {
         phase = GamePhase.REVEALING;
-        announceAction("明牌窗口", MuzTheme.field("明牌窗口", MuzTheme.accent(openingRevealLabel())));
+        // 窗口开启的公告已在首批完成时发过；这里只做阶段切换，避免同一件事提示两遍。
         tickActionBar();
     }
 
@@ -1566,6 +1673,9 @@ public final class GameTable {
         }
         if (plugin.tableGadgets() != null) {
             plugin.tableGadgets().clearTable(this);
+        }
+        if (plugin.getGadgetPanelService() != null) {
+            plugin.getGadgetPanelService().clearTable(this);
         }
         if (plugin.getTableSpeechPanelService() != null) {
             // 回 LOBBY 时语音面板必须一起收掉：阶段门只允许 PLAYING，留着就是孤儿实体。
@@ -1877,8 +1987,10 @@ public final class GameTable {
     }
 
     private void broadcastOpeningActionBar() {
+        // 标题按「窗口开没开」而不是按 phase 取值：发牌期窗口已经开着，此时报「开局」会让玩家
+        // 以为还不能明牌，和按钮已经出现的事实打架。
         Component actionBar = MuzTheme.field(
-            phase == GamePhase.REVEALING ? "明牌窗口" : "开局",
+            isRevealWindowOpen() ? "明牌窗口" : "开局",
             MuzTheme.accent(openingRevealLabel())
         ).decoration(TextDecoration.ITALIC, false);
         actionBarOverlay.sendActionBar(seats, actionBar);
@@ -2213,7 +2325,9 @@ public final class GameTable {
             playerId -> identity(playerId, NamedTextColor.YELLOW),
             this::currentPlayActionBarIdentity,
             buildLobbyActionBar(viewerId),
-            currentTurnTimeoutSeconds()
+            currentTurnTimeoutSeconds(),
+            // 个人视角：这里的 youRevealed 要反映该 viewer 自己是否已明牌。
+            getRevealWindowSnapshot(viewerId)
         );
     }
 
@@ -2440,7 +2554,8 @@ public final class GameTable {
     }
 
     static int coreScoreFor(int highestBid, int revealMultiplier, int bombMultiplier, int springMultiplier) {
-        int publicFactor = Math.clamp(revealMultiplier, 1, 2);
+        int publicFactor = Math.clamp(revealMultiplier, RevealMultiplierLadder.MIN_MULTIPLIER,
+            RevealMultiplierLadder.MAX_MULTIPLIER);
         int bid = Math.max(1, highestBid);
         int bombs = Math.max(1, bombMultiplier);
         int spring = Math.max(1, springMultiplier);
@@ -2451,7 +2566,8 @@ public final class GameTable {
     }
 
     private int liveCoreScore() {
-        // 明牌是整局公共倍率，最多乘 2；炸弹倍率仍独立保存并单独展示。
+        // 明牌是整局公共倍率，可能因分批明牌达到 RevealMultiplierLadder.MAX_MULTIPLIER(3)；
+        // 炸弹倍率仍独立保存并单独展示。
         return coreScoreFor(highestBid, revealMultiplier, bombMultiplier, 1);
     }
 

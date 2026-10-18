@@ -84,14 +84,25 @@ final class RegionizedCoreDetector {
      * @return 是否为区域化核心
      */
     static boolean isRegionized(BrandProbe brandProbe, ClassProbe classProbe, Consumer<String> warn) {
+        boolean foliaBrand = false;
         try {
-            return brandProbe.isFolia();
+            foliaBrand = brandProbe.isFolia();
         } catch (NoSuchElementException providerMissing) {
             // 单测环境没有 ServerBuildInfo 的 ServiceLoader provider：预期内的降级点，静默回退到类探测。
         } catch (RuntimeException | LinkageError unexpected) {
             // 运行期品牌接口异常属非预期：记录后仍回退，不静默吞掉。
             warn.accept("读取服务端品牌失败（" + unexpected + "），回退到类存在性判定");
         }
+        if (foliaBrand) {
+            return true;
+        }
+        // 【1.10.65 修复的真实缺陷：不能在这里直接返回 false】
+        // 品牌不是 papermc:folia 只说明「不是官方 Folia」，并不等于「不是区域化核心」。
+        // 现场 mucore-26.3（Folia 派生核心）的品牌不是 papermc:folia，isBrandCompatible 正常返回
+        // false（不抛异常），旧实现在此短路成「非区域化」，于是存档恢复走了同步拉区块分支，
+        // 在 global lane 抛 `Async chunk retrieval` 并每 5 秒刷屏。
+        // 因此品牌为 false 时**必须继续**做类探测：只有「品牌不是 Folia 且没有 RegionizedServer」
+        // 才是真正的 Paper/Leaf（Leaf 的 TickRegions 只是兼容桩，不能作为判据）。
         try {
             return classProbe.present(REGIONIZED_FALLBACK_CLASS);
         } catch (ClassNotFoundException absent) {

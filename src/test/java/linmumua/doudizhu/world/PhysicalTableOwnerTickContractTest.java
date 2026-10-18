@@ -89,7 +89,10 @@ class PhysicalTableOwnerTickContractTest {
             "牌桌管理器必须持有玩家输出门面");
         assertTrue(source.contains("private final PlayerPresenceRegistry playerPresence;"),
             "在线玩家来源必须是连接生命周期维护的 UUID registry");
-        int snapshotStart = source.indexOf("private List<UUID> onlinePlayerIdsSnapshot()");
+        // 只锚方法名+签名，不锁可见性：1.10.60 dialog-core 把 onlinePlayerIdsSnapshot() 由 private
+        // 提升为 public（供 DoudizhuPlugin 转发给原生 Dialog 管理页在 player lane 安全取在线名单），
+        // 可见性变化不改「在线玩家遍历只能读 UUID 快照」这条契约，故断言不含 private/public。
+        int snapshotStart = source.indexOf("List<UUID> onlinePlayerIdsSnapshot()");
         assertTrue(snapshotStart >= 0, "在线玩家遍历只能读取 UUID 快照");
         int snapshotEnd = source.indexOf("\n    }", snapshotStart);
         assertTrue(snapshotEnd > snapshotStart, "UUID 快照入口必须有完整方法体");
