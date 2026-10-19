@@ -73,7 +73,7 @@ public class ChairPanelDisplayService {
     private static final float BACKDROP_THICKNESS = 0.02f;
 
     /** 图标/文字相对底板的正面偏移（格），避免与底板共面闪烁。 */
-    private static final double CONTENT_LIFT = 0.035;
+    private static final double CONTENT_LIFT = 0.06;
 
     /** 空槽的占位图标：浅灰玻璃板，读起来像「这个格子是空的」。 */
     private static final Material EMPTY_ICON = Material.LIGHT_GRAY_STAINED_GLASS_PANE;
@@ -313,8 +313,10 @@ public class ChairPanelDisplayService {
         try {
             // 【先铺底板：这是「面板」的视觉主体】只有图标时玩家看到的是几块漂浮物品，
             // 不像菜单。这里按面板真实尺寸铺一块 1.5 x 1.0 的板，内容再贴到它正面上。
-            Location backdropSpot = center.clone()
-                .add(axes.normal().clone().multiply(-BACKDROP_THICKNESS * 0.5));
+            // BlockDisplay 的方块模型原点在**角上**而不是中心：不补 -0.5 的 translation，
+            // 整块板会偏出去半个方块（实服截图就是板子错位、内容落在板外）。
+            // 这里让实体位置就是面板中心，靠 translation 把方块中心挪回原点。
+            Location backdropSpot = center.clone();
             backdropSpot.setYaw(anchor.yawDegrees());
             backdropSpot.setPitch(anchor.pitchDegrees());
             BlockDisplay backdrop = VersionCompat.spawnEntity(world, backdropSpot, BlockDisplay.class, spawned -> {
@@ -326,7 +328,8 @@ public class ChairPanelDisplayService {
                 spawned.setBrightness(new Display.Brightness(15, 15));
                 // 1 格材质缩放到面板世界尺寸；厚度单独压薄。
                 spawned.setTransformation(new Transformation(
-                    new Vector3f(),
+                    // translation 在 scale 之后的坐标系里：取 -0.5 让方块中心与实体位置重合。
+                    new Vector3f(-0.5f, -0.5f, -0.5f),
                     new AxisAngle4f((float) Math.toRadians(anchor.rollDegrees()), 0.0f, 0.0f, 1.0f),
                     new Vector3f((float) anchor.widthBlocks(), (float) anchor.heightBlocks(), BACKDROP_THICKNESS),
                     new AxisAngle4f()));
@@ -344,11 +347,16 @@ public class ChairPanelDisplayService {
                     spawned.setSeeThrough(false);
                     spawned.setShadowed(false);
                     spawned.setAlignment(TextDisplay.TextAlignment.CENTER);
+                    spawned.setDefaultBackground(false);
+                    spawned.setTextOpacity((byte) 255);
                     spawned.text(panelGuideText(slots));
+                    // 字号按面板高度缩：4 行默认字号会超出 1 格高，实服表现为文字溢出板外。
+                    float textScale = (float) Math.max(0.35, Math.min(0.7, anchor.heightBlocks() / 5.0));
+                    spawned.setLineWidth((int) Math.max(40, anchor.widthBlocks() * 90));
                     spawned.setTransformation(new Transformation(
                         new Vector3f(),
                         new AxisAngle4f((float) Math.toRadians(anchor.rollDegrees()), 0.0f, 0.0f, 1.0f),
-                        new Vector3f(1.0f, 1.0f, 1.0f),
+                        new Vector3f(textScale, textScale, 1.0f),
                         new AxisAngle4f()));
                     spawned.addScoreboardTag(ENTITY_TAG);
                 });
