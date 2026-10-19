@@ -45,7 +45,15 @@ public record ChairSidePanelSettings(
      * 取 1.2 让两块面板分别贴住椅子两侧、彼此留出约 1 厘米级间隙而不重叠。
      */
     public static final double DEFAULT_LATERAL = 1.2;
-    public static final double DEFAULT_DEPTH = 0.0;
+    /**
+     * 默认前后偏移：正值朝桌心（也就是坐者的正前方）。
+     *
+     * <p>【为什么不再是 0】0 表示面板贴在椅子正侧面，玩家平视时几乎在视野边缘。
+     * 实服反馈要求「两个菜单靠前，再旋转对准玩家」，因此默认前移到椅子前方两侧；
+     * 朝向仍由 {@code ChairPanelGeometry} 按「面板→坐者」实时算出，前移不会让人斜看，
+     * 只会让面板进入视野。
+     */
+    public static final double DEFAULT_DEPTH = 0.45;
     /** 默认竖直偏移取 0.55，让 1.0 高的面板以椅子挂载点上方为中心、不压到座位。 */
     public static final double DEFAULT_VERTICAL = 0.55;
     public static final double DEFAULT_PITCH = 0.0;

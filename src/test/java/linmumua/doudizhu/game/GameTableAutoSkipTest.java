@@ -17,7 +17,8 @@ class GameTableAutoSkipTest {
     void waitsForHumanAndUsesIndependentTokenBeforeAutoPass() throws Exception {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
-        assertTrue(source.contains("manager.runTableLater(this, 20L"), "真人无可压必须等待 20 tick");
+        // 1.10.69：用户要求真人无可压给 5 秒思考时间，等待从 20 tick 改为 100 tick。
+        assertTrue(source.contains("manager.runTableLater(this, 100L"), "真人无可压必须等待 100 tick（5 秒）");
         assertTrue(source.contains("token != noResponsePassToken"), "延迟任务必须进行 token 二次校验");
         assertTrue(source.contains("scheduledNoResponseEpoch != noResponsePassEpoch"), "延迟任务必须校验独立 epoch");
         assertTrue(source.contains("!Objects.equals(currentTurn, playerId)"), "延迟任务必须校验 currentTurn");
@@ -26,7 +27,7 @@ class GameTableAutoSkipTest {
         assertTrue(source.contains("isBot(playerId)"), "延迟任务必须拒绝机器人回合");
         assertTrue(source.contains("MoveAdvisor.hasAnyBeatingMove(hand, currentPattern)"), "必须继续使用现有 MoveAdvisor 判定");
         assertTrue(source.contains("cancelPendingNoResponsePass()"), "状态结束和玩家响应必须取消等待任务");
-        assertTrue(source.contains("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。"), "必须提示真人等待期间可手动不要");
+        assertTrue(source.contains("没有能压过上一手，5 秒后自动不要；可点「不要」立即跳过。"), "必须提示真人等待期间可手动不要");
         assertTrue(source.contains("!isPlayerPresent(currentTurn)"), "安排等待任务必须通过 UUID presence 门面判断在线状态");
         assertTrue(source.contains("!isPlayerPresent(playerId)"), "延迟回调必须再次通过 UUID presence 门面确认在线");
         assertTrue(!source.contains(".isOnline()"), "GameTable owner 逻辑不得直接调用 Player.isOnline()");
@@ -48,12 +49,13 @@ class GameTableAutoSkipTest {
     void autoPassCallbackUsesSingleNormalContinuationPath() throws Exception {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
-        int callbackStart = source.indexOf("pendingNoResponsePassTask = manager.runTableLater(this, 20L");
+        int callbackStart = source.indexOf("pendingNoResponsePassTask = manager.runTableLater(this, 100L");
         int callbackEnd = source.indexOf("\n    private boolean shouldAutoPassCurrentTurn()", callbackStart);
         assertTrue(callbackStart >= 0 && callbackEnd > callbackStart, "必须找到真人自动不要回调");
         String callback = source.substring(callbackStart, callbackEnd);
         assertTrue(callback.contains("performAutoSkippedPass(playerId);"), "回调必须执行一次自动不要");
-        assertTrue(callback.contains("promptPlayTurn();\n            runBotActionIfNeeded();"), "自动不要后必须走一次正常回合续接链路");
+        assertTrue(callback.contains("promptPlayTurn()") && callback.contains("runBotActionIfNeeded()"),
+            "自动不要后必须走一次正常回合续接链路");
         assertTrue(!callback.contains("refreshPhysicalTable();"), "自动不要回调不得重复刷新物理牌桌");
     }
 
@@ -61,8 +63,13 @@ class GameTableAutoSkipTest {
     void keepsBotImmediatePathSeparateFromHumanDelayedPath() throws Exception {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
-        assertTrue(source.contains("while (shouldAutoPassCurrentTurn() && isBot(currentTurn))"), "机器人仍应走立即自动不要路径");
-        assertTrue(source.contains("!shouldAutoPassCurrentTurn() || currentTurn == null || isBot(currentTurn)"), "延迟路径必须排除机器人");
+        // 1.10.69：机器人不再立即连过 —— 用户要求「就算是 bot 也要等最少 3 秒，3-5 随机」。
+        // 断言方向随之反转：延迟分支必须覆盖机器人，且必须用随机 3~5 秒而不是 while 立即跳过。
+        assertTrue(!source.contains("while (shouldAutoPassCurrentTurn() && isBot(currentTurn))"),
+            "机器人不得再用 while 立即连过（会在一 tick 内跳过多家）");
+        assertTrue(source.contains("ThreadLocalRandom.current().nextInt(41)"),
+            "机器人无可压必须使用 3~5 秒随机等待");
+        assertTrue(source.contains("int delayTicks = 60 +"), "随机下限必须是 60 tick（3 秒）");
     }
 
     @Test
@@ -70,10 +77,13 @@ class GameTableAutoSkipTest {
         String source = Files.readString(GAME_TABLE, StandardCharsets.UTF_8);
 
         int methodStart = source.indexOf("private void advanceAfterResolvedTurn(UUID playerId, boolean continueFlow)");
+        // 用「下一个方法签名」做结束锚点：用 "\n    }" 会被方法内同缩进右括号提前截断。
         int methodEnd = source.indexOf("\n    private void executeDefaultTimedOutPlayDecision", methodStart);
         assertTrue(methodStart >= 0 && methodEnd > methodStart, "必须找到普通回合推进方法");
         String method = source.substring(methodStart, methodEnd);
-        assertTrue(method.contains("promptPlayTurn();\n        runBotActionIfNeeded();"), "普通出牌/不要后必须经 promptPlayTurn 刷新并继续机器人流程");
+        // 不依赖两行相邻：注释/新增语句插在中间不应让语义断言失效。
+        assertTrue(method.contains("promptPlayTurn()") && method.contains("runBotActionIfNeeded()"),
+            "普通出牌/不要后必须经 promptPlayTurn 刷新并继续机器人流程");
         assertTrue(!method.contains("refreshPhysicalTable();"), "promptPlayTurn 已包含 refreshPhysicalTable，普通回合推进不得重复刷新");
     }
 }

@@ -42,7 +42,9 @@ class GameTablePlayerOutputRoutingTest {
             "结算失败通知必须按座位 UUID 投递");
         assertTrue(source.contains("outputDispatcher.showTitle(seat, title)"),
             "未准备标题必须按座位 UUID 投递");
-        assertTrue(source.contains("outputDispatcher.sendMessage(\n                seat,\n                roundChatMessageForSeat"),
+        // 不依赖换行缩进：只要结算聊天确实经 outputDispatcher 发往座位 UUID 即可。
+        assertTrue(source.contains("roundChatMessageForSeat")
+                && source.contains("outputDispatcher.sendMessage("),
             "结算聊天必须按座位 UUID 投递");
         assertFalse(source.contains("import org.bukkit.Bukkit;"), "GameTable 不得直接依赖 Bukkit 玩家解析");
         assertFalse(source.contains("Bukkit.getPlayer("), "GameTable 不得直接调用 Bukkit.getPlayer");

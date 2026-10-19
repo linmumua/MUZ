@@ -418,6 +418,19 @@ final class RoundOpeningCoordinator {
         return ticks;
     }
 
+    /**
+     * 倒计时显示文本：保留一位小数。
+     *
+     * <p>【为什么不再用整数秒】旧实现是 {@code (ticks + 19) / 20} 向上取整，最后 1 秒内
+     * 数字会**一直停在 "1"** 直到瞬间归零——玩家看到的就是「明牌最后一秒卡住不动」。
+     * 改成 ticks/20 的一位小数后，每 0.1 秒都会变，视觉上连续，也不会提前或延后关窗
+     * （真正的关闭点仍由权威计数决定）。
+     */
+    String openingRemainingSecondsText() {
+        int ticks = Math.max(0, openingRemainingTicks());
+        return String.format(java.util.Locale.ROOT, "%.1f", ticks / 20.0);
+    }
+
     int openingRemainingSeconds() {
         return (openingRemainingTicks() + 19) / 20;
     }
@@ -459,7 +472,7 @@ final class RoundOpeningCoordinator {
         String reveal = RevealMultiplierLadder.withMultiplier(
             settings.messages().revealing(),
             RevealMultiplierLadder.multiplierForCompletedBatches(batchIndex)
-        ).replace("%seconds%", String.valueOf(openingRemainingSeconds()));
+        ).replace("%seconds%", openingRemainingSecondsText());
         if (progress.isEmpty()) {
             return reveal;
         }

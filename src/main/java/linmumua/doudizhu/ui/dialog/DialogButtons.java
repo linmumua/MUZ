@@ -67,6 +67,7 @@ public final class DialogButtons {
         Component label,
         Runnable handler
     ) {
-        return callback(plugin, service, playerId, generation, permission, label, null, 1, view -> handler.run());
+        return callback(plugin, service, playerId, generation, permission, label, null,
+            MuzDialogFactory.DEFAULT_BUTTON_WIDTH, view -> handler.run());
     }
 }

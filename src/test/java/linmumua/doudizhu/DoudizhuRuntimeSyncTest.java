@@ -40,11 +40,12 @@ class DoudizhuRuntimeSyncTest {
         String plugin = Files.readString(PLUGIN);
         assertFalse(config.contains("\nhotbar-hud:\n"),
             "默认配置不得继续发布已退役的三道具 Hotbar 段");
-        assertTrue(config.contains("\ntable-gadgets:\n")
-                && config.contains("  interaction:\n")
-                && config.contains("  panel:\n")
-                && config.contains("  voices:\n"),
-            "新桌内道具、私有语音面板和语音条目必须提供完整默认配置");
+        // 拆成四条独立断言：合并成一条时失败只知道「某个键缺了」，排查要手工复刻四个 contains；
+        // 拆开后失败消息直接点名缺哪个键。
+        assertTrue(config.contains("\ntable-gadgets:\n"), "默认配置必须保留 table-gadgets 段");
+        assertTrue(config.contains("  interaction:\n"), "必须提供 table-gadgets.interaction");
+        assertTrue(config.contains("  panel:\n"), "必须提供 table-gadgets.panel");
+        assertTrue(config.contains("  voices:\n"), "必须提供 table-gadgets.voices");
         assertFalse(profile.contains("hotbar:\n"),
             "当前资源 profile 不再生成正式 Hotbar 档位");
         assertTrue(plugin.contains("changed |= migrateRetiredHotbarConfig()"),

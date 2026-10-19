@@ -629,8 +629,17 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
                 manager = invokeQuietly(packManagerMethod, engine);
             }
             if (manager != null) {
-                generate = findInHierarchy(manager.getClass(), "generateResourcePack");
-                path = findInHierarchy(manager.getClass(), "resourcePackPath");
+                // 【为什么按候选名探测】CE 的 PackManager 形状随版本变化：
+                //   0.0.67 / 26.8.x 有 generateResourcePack() + resourcePackPath()；
+                //   26.9.1 这两个方法不存在；
+                //   现场 26.10-SNAPSHOT 同样没有，方法名显然又被改过。
+                // 与其写死一个名字、每次升级都「资源包生成失败」，这里按候选名依次探测，
+                // 命中任意一个即可工作；全部落空时把该类实际方法表打进日志（见下面 unsupported 文本），
+                // 让下一次适配有据可依，而不是继续猜。
+                generate = findAnyInHierarchy(manager.getClass(),
+                    "generateResourcePack", "buildResourcePack", "generate", "build");
+                path = findAnyInHierarchy(manager.getClass(),
+                    "resourcePackPath", "packPath", "resourcePackFile", "packFile", "path");
             }
             this.generateResourcePackMethod = generate;
             this.resourcePackPathMethod = path;
@@ -648,7 +657,9 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
                     + (generate == null ? "generateResourcePack()" : "")
                     + (generate == null && path == null ? " 与 " : "")
                     + (path == null ? "resourcePackPath()" : "")
-                    + "，当前只支持 0.0.67 / 26.8.x 的 PackManager 形状（26.9.1 需另行适配）。";
+                    + "（已尝试候选名 " + GENERATE_CANDIDATES + " / " + PATH_CANDIDATES
+                    + "；当前支持的形状为 0.0.67 / 26.8.x，26.9.1 及更新版本需按实际方法表适配），"
+                    + "该 PackManager 实际零参方法：" + describeZeroArgMethods(manager) + "。";
             } else {
                 this.unsupportedPackManagerReason = null;
             }
@@ -741,6 +752,48 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
      * 不是签名全等。本方法只取【零参】方法，宽松与否不会改变结果；但若将来要按参数类型取
      * 有参 CE 方法，必须显式比较签名，不能依赖这里「精确」的旧措辞。
      */
+    /** 资源包生成方法的候选名；顺序即优先级。 */
+    private static final String GENERATE_CANDIDATES = "[generateResourcePack, buildResourcePack, generate, build]";
+
+    /** 资源包路径方法的候选名；顺序即优先级。 */
+    private static final String PATH_CANDIDATES =
+        "[resourcePackPath, packPath, resourcePackFile, packFile, path]";
+
+    /**
+     * 按候选名逐个沿继承链查找零参方法，命中第一个即返回。
+     *
+     * <p>与 {@link #findInHierarchy} 的区别只是「一次试多个名字」：CraftEngine 升级时改过
+     * PackManager 的方法名，写死一个名字会让资源包生成整条链失效，而 UI 上只表现为
+     * 「资源同步失败」。探测不到时由调用方把实际方法表写进日志，便于精确适配。
+     */
+    private static ClassMethod findAnyInHierarchy(Class<?> type, String... names) {
+        for (String name : names) {
+            ClassMethod found = findInHierarchy(type, name);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    /** 列出某个对象类型上所有零参方法名，仅用于「形状不匹配」时的诊断文本。 */
+    private static String describeZeroArgMethods(Object target) {
+        if (target == null) {
+            return "(PackManager 为空)";
+        }
+        java.util.TreeSet<String> names = new java.util.TreeSet<>();
+        Class<?> current = target.getClass();
+        while (current != null && current != Object.class) {
+            for (java.lang.reflect.Method method : current.getDeclaredMethods()) {
+                if (method.getParameterCount() == 0) {
+                    names.add(method.getName() + "()");
+                }
+            }
+            current = current.getSuperclass();
+        }
+        return names.isEmpty() ? "(无零参方法)" : names.toString();
+    }
+
     private static ClassMethod findInHierarchy(Class<?> type, String name) {
         Class<?> current = type;
         while (current != null && current != Object.class) {

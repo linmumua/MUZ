@@ -723,8 +723,8 @@ public final class WorldTableInteractionListener implements Listener {
         consumedChairPanelClicks.put(playerId, now);
         GadgetPanelService gadgetPanels = plugin.getGadgetPanelService();
         linmumua.doudizhu.game.ChairPanelDisplayService.Click click = panels.click(player);
-        // 命中后立刻关板：Interaction 会一直拦右键，留着玩家就投不出道具。
-        panels.close(playerId);
+        // 【1.10.70：面板常驻，命中后不关闭】用户要求「一直显示」。
+        // 重绘由 GadgetPanelService.selectSlot 负责（更新选中高亮），这里只消费这次点击。
         if (click == null || gadgetPanels == null) {
             return true;
         }

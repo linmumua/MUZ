@@ -16,8 +16,10 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.BlockDisplay;
 import org.bukkit.entity.Interaction;
 import org.bukkit.entity.ItemDisplay;
+import org.bukkit.entity.TextDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -64,6 +66,15 @@ public class ChairPanelDisplayService {
     /** 语音格的图标。用铃铛表示「说话」，不引入额外资源。 */
     private static final Material VOICE_ICON = Material.BELL;
 
+    /** 面板底板：深灰混凝土，整块铺满面板尺寸，让两块板看起来是「面板」而不是漂浮的图标。 */
+    private static final Material PANEL_BACKDROP = Material.GRAY_CONCRETE;
+
+    /** 底板厚度（格）。太厚会看到边缘，太薄会与图标 z-fighting。 */
+    private static final float BACKDROP_THICKNESS = 0.02f;
+
+    /** 图标/文字相对底板的正面偏移（格），避免与底板共面闪烁。 */
+    private static final double CONTENT_LIFT = 0.035;
+
     /** 空槽的占位图标：浅灰玻璃板，读起来像「这个格子是空的」。 */
     private static final Material EMPTY_ICON = Material.LIGHT_GRAY_STAINED_GLASS_PANE;
 
@@ -85,6 +96,11 @@ public class ChairPanelDisplayService {
     }
 
     /** 一块已经渲染出来的面板。 */
+    /**
+     * 一块已经渲染出来的面板。
+     *
+     * @param visuals 该面板的显示实体（左板是 8 个物品图标，右板是一个文字块）
+     */
     private record PanelView(
         String panelId,
         Location center,
@@ -92,7 +108,7 @@ public class ChairPanelDisplayService {
         double halfWidth,
         double halfHeight,
         Interaction hitbox,
-        List<ItemDisplay> icons
+        List<org.bukkit.entity.Display> visuals
     ) {
     }
 
@@ -290,13 +306,60 @@ public class ChairPanelDisplayService {
             return null;
         }
         float iconScale = ChairPanelSurface.iconScale(anchor.widthBlocks(), anchor.heightBlocks());
-        List<ItemDisplay> icons = new ArrayList<>(ChairPanelSurface.CELL_COUNT);
+        List<org.bukkit.entity.Display> visuals = new ArrayList<>(ChairPanelSurface.CELL_COUNT);
+        // 【左板放物品、右板放文字】用户明确要求：左侧全是物品、右侧全是语言文字。
+        // 两块板仍然是各自独立的世界体与判定盒，只是内容分工不同。
+        boolean textPanel = ChairPanelGeometry.PANEL_ID_RIGHT.equals(anchor.panelId());
         try {
-            for (int cell = 0; cell < ChairPanelSurface.CELL_COUNT; cell++) {
+            // 【先铺底板：这是「面板」的视觉主体】只有图标时玩家看到的是几块漂浮物品，
+            // 不像菜单。这里按面板真实尺寸铺一块 1.5 x 1.0 的板，内容再贴到它正面上。
+            Location backdropSpot = center.clone()
+                .add(axes.normal().clone().multiply(-BACKDROP_THICKNESS * 0.5));
+            backdropSpot.setYaw(anchor.yawDegrees());
+            backdropSpot.setPitch(anchor.pitchDegrees());
+            BlockDisplay backdrop = VersionCompat.spawnEntity(world, backdropSpot, BlockDisplay.class, spawned -> {
+                spawned.setVisibleByDefault(false);
+                spawned.setPersistent(false);
+                spawned.setBlock(PANEL_BACKDROP.createBlockData());
+                spawned.setBillboard(Display.Billboard.FIXED);
+                spawned.setViewRange(VIEW_RANGE);
+                spawned.setBrightness(new Display.Brightness(15, 15));
+                // 1 格材质缩放到面板世界尺寸；厚度单独压薄。
+                spawned.setTransformation(new Transformation(
+                    new Vector3f(),
+                    new AxisAngle4f((float) Math.toRadians(anchor.rollDegrees()), 0.0f, 0.0f, 1.0f),
+                    new Vector3f((float) anchor.widthBlocks(), (float) anchor.heightBlocks(), BACKDROP_THICKNESS),
+                    new AxisAngle4f()));
+                spawned.addScoreboardTag(ENTITY_TAG);
+            });
+            backdrop.setRotation(anchor.yawDegrees(), anchor.pitchDegrees());
+            visuals.add(backdrop);
+            if (textPanel) {
+                TextDisplay text = VersionCompat.spawnEntity(world, center.clone()
+                    .add(axes.normal().clone().multiply(CONTENT_LIFT)), TextDisplay.class, spawned -> {
+                    spawned.setVisibleByDefault(false);
+                    spawned.setPersistent(false);
+                    spawned.setBillboard(Display.Billboard.FIXED);
+                    spawned.setViewRange(VIEW_RANGE);
+                    spawned.setSeeThrough(false);
+                    spawned.setShadowed(false);
+                    spawned.setAlignment(TextDisplay.TextAlignment.CENTER);
+                    spawned.text(panelGuideText(slots));
+                    spawned.setTransformation(new Transformation(
+                        new Vector3f(),
+                        new AxisAngle4f((float) Math.toRadians(anchor.rollDegrees()), 0.0f, 0.0f, 1.0f),
+                        new Vector3f(1.0f, 1.0f, 1.0f),
+                        new AxisAngle4f()));
+                    spawned.addScoreboardTag(ENTITY_TAG);
+                });
+                visuals.add(text);
+            }
+            for (int cell = 0; !textPanel && cell < ChairPanelSurface.CELL_COUNT; cell++) {
                 double[] local = ChairPanelSurface.cellCenter(cell, anchor.widthBlocks(), anchor.heightBlocks());
                 Location spot = center.clone()
                     .add(axes.right().clone().multiply(local[0]))
-                    .add(axes.up().clone().multiply(local[1]));
+                    .add(axes.up().clone().multiply(local[1]))
+                    .add(axes.normal().clone().multiply(CONTENT_LIFT));
                 spot.setYaw(anchor.yawDegrees());
                 spot.setPitch(anchor.pitchDegrees());
                 ItemStack stack = iconFor(cell, slots);
@@ -319,7 +382,7 @@ public class ChairPanelDisplayService {
                         spawned.setGlowing(true);
                     }
                 });
-                icons.add(display);
+                visuals.add(display);
             }
             Interaction hitbox = VersionCompat.spawnEntity(world, center, Interaction.class, spawned -> {
                 spawned.setInteractionWidth((float) anchor.widthBlocks());
@@ -331,21 +394,44 @@ public class ChairPanelDisplayService {
             hitbox.setRotation(anchor.yawDegrees(), anchor.pitchDegrees());
             // 私有可见 + 逐个 showEntity：面板只对该玩家可见，不会影响同桌其它人的画面。
             player.showEntity(plugin, hitbox);
-            for (ItemDisplay icon : icons) {
-                player.showEntity(plugin, icon);
+            for (org.bukkit.entity.Display visual : visuals) {
+                player.showEntity(plugin, visual);
             }
             entityOwners.put(hitbox.getUniqueId(), player.getUniqueId());
-            for (ItemDisplay icon : icons) {
-                entityOwners.put(icon.getUniqueId(), player.getUniqueId());
+            for (org.bukkit.entity.Display visual : visuals) {
+                entityOwners.put(visual.getUniqueId(), player.getUniqueId());
             }
-            return new PanelView(anchor.panelId(), center.clone(), axes, halfWidth, halfHeight, hitbox, icons);
+            return new PanelView(anchor.panelId(), center.clone(), axes, halfWidth, halfHeight, hitbox, visuals);
         } catch (RuntimeException | Error failure) {
-            for (ItemDisplay icon : icons) {
-                removeQuietly(icon);
+            for (org.bukkit.entity.Display visual : visuals) {
+                removeQuietly(visual);
             }
             plugin.getLogger().severe("渲染椅侧面板失败（" + anchor.panelId() + "）：" + failure);
             return null;
         }
+    }
+
+    /**
+     * 右板的引导文字。
+     *
+     * <p>左板是纯图标，玩家看不出「点了会发生什么」，所以右板只放说明与当前选中，
+     * 不再重复列 8 个道具名——两板分工清楚，也不会让文字面板挤成一片。
+     */
+    private static Component panelGuideText(List<ItemStack> slots) {
+        int filled = 0;
+        if (slots != null) {
+            for (ItemStack stack : slots) {
+                if (stack != null && !stack.getType().isAir()) {
+                    filled++;
+                }
+            }
+        }
+        return Component.text()
+            .append(Component.text("道具栏\n", net.kyori.adventure.text.format.NamedTextColor.GOLD))
+            .append(Component.text("点击左侧图标选中\n", net.kyori.adventure.text.format.NamedTextColor.GRAY))
+            .append(Component.text("选好后瞄准右键投掷\n", net.kyori.adventure.text.format.NamedTextColor.GRAY))
+            .append(Component.text("已装填 " + filled + " / 8", net.kyori.adventure.text.format.NamedTextColor.WHITE))
+            .build();
     }
 
     private ItemStack iconFor(int cell, List<ItemStack> slots) {
@@ -374,15 +460,15 @@ public class ChairPanelDisplayService {
         }
         runOnAnchorRegion(panel.center(), () -> {
             removeQuietly(panel.hitbox());
-            for (ItemDisplay icon : panel.icons()) {
-                removeQuietly(icon);
+            for (org.bukkit.entity.Display visual : panel.visuals()) {
+                removeQuietly(visual);
             }
         });
         if (panel.hitbox() != null) {
             entityOwners.remove(panel.hitbox().getUniqueId());
         }
-        for (ItemDisplay icon : panel.icons()) {
-            entityOwners.remove(icon.getUniqueId());
+        for (org.bukkit.entity.Display visual : panel.visuals()) {
+            entityOwners.remove(visual.getUniqueId());
         }
     }
 

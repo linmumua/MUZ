@@ -107,6 +107,18 @@ public final class GameTable {
     private int botActionEpoch = 0;
     // 真人无可压等待任务使用独立 token，不能只依赖 Bukkit 任务取消。
     private MuzScheduler.TaskHandle pendingNoResponsePassTask;
+
+    /**
+     * 机器人「要不起」时的等待任务。
+     *
+     * <p>以前机器人在 {@link #skipIfNoResponse()} 里用 while 循环**立即**跳过，
+     * 一轮里连着几个 bot 都无牌可压时会瞬间连过三家，玩家只看到牌桌闪一下、
+     * 完全看不出发生了什么。现在改成每个 bot 各自等 3~5 秒（随机），节奏接近真人。
+     */
+    private MuzScheduler.TaskHandle pendingBotPassTask;
+
+    /** 机器人等待代次：任何新回合都使旧等待失效，避免迟到的任务把新局跳过。 */
+    private long botPassToken;
     private long noResponsePassToken;
     private int noResponsePassEpoch;
     private long roundStartedAtMillis = -1L;
@@ -1440,6 +1452,7 @@ public final class GameTable {
             return;
         }
         updateCountdownSoundState(remaining);
+        ensureChairPanelsVisible();
         broadcastPersistentActionBar(remaining);
         if (noResponsePassPending) {
             // 当前真人额外显示无可压提示；其他玩家仍沿用正常 ActionBar 与倒计时。
@@ -1806,6 +1819,7 @@ public final class GameTable {
     private void promptPlayTurn() {
         // 新的出牌提示会使旧的真人无可压等待失效，避免旧任务在新回合误触发。
         cancelPendingNoResponsePass();
+        cancelPendingBotPass();
         botActionEpoch++;
         // 机器人仍沿用原有立即不要流程；真人无可压则只安排一次 20 tick 延迟。
         skipIfNoResponse();
@@ -1853,19 +1867,114 @@ public final class GameTable {
                 .append(identity(landlord, NamedTextColor.WHITE))
         ));
         promptPlayTurn();
+        openChairPanelsForHumans();
+    }
+
+    /**
+     * 开局给每位真人座位打开椅侧左右双面板。
+     *
+     * <p>【为什么需要在开局主动开一次】面板是 MUZ 自己渲染的世界体，不会被任何 GUI 自动打开；
+     * 之前只提供 {@code /muz gadget panel}，玩家坐下后完全看不到它。这里在对局开始时统一打开，
+     * 让「左右各一块」在坐下后就能看见。选中道具后面板会关闭（把右键还给投掷），
+     * 之后可再用命令重开——刻意不做每 tick 自动重开，否则会一直吃掉右键。
+     */
+    /** 面板守护的节流时间戳（纳秒）；避免每次 ActionBar tick 都尝试重开。 */
+    private volatile long lastChairPanelEnsureNanos;
+
+    /**
+     * 低频守护：出牌阶段里若某位真人的椅侧面板不在了，就补开一次。
+     *
+     * <p>【为什么需要它】用户要求面板「一直显示」。面板会因离桌/断线/关桌/换桌被清理，
+     * 也可能因为某次渲染失败而缺失；只在开局开一次的话，一旦掉了就再也看不到。
+     * 这里每 2 秒最多补一次，既不做每 tick 重开（那会一直吃右键），也不会让面板长期缺失。
+     */
+    private void ensureChairPanelsVisible() {
+        GadgetPanelService panels = plugin.getGadgetPanelService();
+        PlayerOutputDispatcher output = plugin.getPlayerOutputDispatcher();
+        if (panels == null || output == null || phase != GamePhase.PLAYING) {
+            return;
+        }
+        long now = System.nanoTime();
+        long previous = lastChairPanelEnsureNanos;
+        if (previous != 0L && now - previous < 2_000_000_000L) {
+            return;
+        }
+        lastChairPanelEnsureNanos = now;
+        for (UUID seat : List.copyOf(seats)) {
+            if (isBot(seat) || panels.chairPanelsVisible(seat)) {
+                continue;
+            }
+            output.runPlayer(seat, player -> panels.openChairPanels(player));
+        }
+    }
+
+    private void openChairPanelsForHumans() {
+        GadgetPanelService panels = plugin.getGadgetPanelService();
+        PlayerOutputDispatcher output = plugin.getPlayerOutputDispatcher();
+        if (panels == null || output == null) {
+            return;
+        }
+        for (UUID seat : List.copyOf(seats)) {
+            if (isBot(seat)) {
+                continue;
+            }
+            // 面板入口要求 player lane；桌 owner lane 不能直接调玩家级 API。
+            output.runPlayer(seat, player -> panels.openChairPanels(player));
+        }
     }
 
     // openHandsForAll() / refreshHands() 已删除：它们做的事就是逐个座位直接调
     // refreshPrivateHand，绕开签名闸门无条件整手重建（闪烁根因）。四个调用点后面本来就都紧跟
     // refreshPhysicalTable()，删掉后手牌照旧会刷新，只是变成一次而不是两次。
 
+    /**
+     * 机器人「要不起」时的处理：等待 3~5 秒后再自动不要。
+     *
+     * <p>【为什么不再立即跳过】旧实现用 while 连过，机器人一多就会在同一 tick 内
+     * 连过三家，玩家只看到牌桌闪一下。用户明确要求「就算是 bot 也要等待最少 3 秒，
+     * 3-5 秒取随机」，因此这里只安排**一次**延迟任务，后续由正常回合链路继续。
+     */
     private void skipIfNoResponse() {
-        while (shouldAutoPassCurrentTurn() && isBot(currentTurn)) {
-            UUID stuckPlayer = currentTurn;
-            performAutoSkippedPass(stuckPlayer);
-            if (Objects.equals(currentTurn, leadPlayer)) {
+        if (!shouldAutoPassCurrentTurn() || !isBot(currentTurn)) {
+            return;
+        }
+        UUID botId = currentTurn;
+        UUID scheduledLeadPlayer = leadPlayer;
+        CardPattern scheduledPattern = currentPattern;
+        int scheduledEpoch = botActionEpoch;
+        long token = ++botPassToken;
+        // 60~100 tick = 3.0~5.0 秒（含两端），与用户要求的「最少 3s、3-5 随机」一致。
+        int delayTicks = 60 + java.util.concurrent.ThreadLocalRandom.current().nextInt(41);
+        pendingBotPassTask = manager.runTableLater(this, delayTicks, () -> {
+            if (token == botPassToken) {
+                pendingBotPassTask = null;
+            }
+            if (
+                token != botPassToken
+                    || !canScheduleTasks()
+                    || scheduledEpoch != botActionEpoch
+                    || phase != GamePhase.PLAYING
+                    || !Objects.equals(currentTurn, botId)
+                    || !Objects.equals(leadPlayer, scheduledLeadPlayer)
+                    || !Objects.equals(currentPattern, scheduledPattern)
+                    || !isBot(botId)
+                    || !shouldAutoPassCurrentTurn()
+            ) {
                 return;
             }
+            botPassToken++;
+            performAutoSkippedPass(botId);
+            promptPlayTurn();
+            runBotActionIfNeeded();
+        });
+    }
+
+    /** 取消机器人「要不起」的等待（新回合/关桌/重开时调用）。 */
+    private void cancelPendingBotPass() {
+        botPassToken++;
+        if (pendingBotPassTask != null) {
+            pendingBotPassTask.cancel();
+            pendingBotPassTask = null;
         }
     }
 
@@ -1880,7 +1989,8 @@ public final class GameTable {
         int scheduledEpoch = botActionEpoch;
         int scheduledNoResponseEpoch = noResponsePassEpoch;
         long token = ++noResponsePassToken;
-        pendingNoResponsePassTask = manager.runTableLater(this, 20L, () -> {
+        // 用户要求：真人没有能压过上一手时不要直接跳过，给 5 秒思考时间再自动过。
+        pendingNoResponsePassTask = manager.runTableLater(this, 100L, () -> {
             if (token == noResponsePassToken) {
                 pendingNoResponsePassTask = null;
             }
@@ -1926,7 +2036,7 @@ public final class GameTable {
         if (currentTurn == null || isBot(currentTurn) || !shouldAutoPassCurrentTurn()) {
             return;
         }
-        Component hint = MuzTheme.warning("没有能压过上一手，1 秒后自动不要；可点「不要」立即跳过。");
+        Component hint = MuzTheme.warning("没有能压过上一手，5 秒后自动不要；可点「不要」立即跳过。");
         dispatchActionBar(currentTurn, hint, 60);
     }
 

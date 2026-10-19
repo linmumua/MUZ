@@ -76,7 +76,7 @@ public final class MuzDialogContext {
     // —— 按钮 ——
 
     public ActionButton action(Component label, Consumer<DialogResponseView> handler) {
-        return action(label, null, 1, handler);
+        return action(label, null, MuzDialogFactory.DEFAULT_BUTTON_WIDTH, handler);
     }
 
     public ActionButton action(Component label, Component tooltip, int width, Consumer<DialogResponseView> handler) {
@@ -86,7 +86,7 @@ public final class MuzDialogContext {
     }
 
     public ActionButton action(Component label, Runnable handler) {
-        return action(label, null, 1, view -> handler.run());
+        return action(label, null, MuzDialogFactory.DEFAULT_BUTTON_WIDTH, view -> handler.run());
     }
 
     /** 退出按钮（无动作，仅关闭）。 */

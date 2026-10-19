@@ -1490,9 +1490,10 @@ public final class DoudizhuPlugin extends JavaPlugin {
      * 打开管理菜单 Dialog（{@code /muz admin}）。
      *
      * <p>【为什么先收 MuMenu，再开 Dialog】悬浮菜单可能仍持有鼠标/滚轮输入，因此先关闭该玩家的
-     * MuMenu 会话与锚定面板，再打开原生管理菜单，避免跨插件界面争用。
-     * 这是防御性的输入互斥，并非已经证实此次实服「打不开」由它导致；具体失败点仍须依据
-     * Dialog 构建/展示的 SEVERE 堆栈定位，不能把风险推断写成现场根因。
+     * MuMenu 会话与锚定面板，再打开原生管理菜单，避免跨插件界面争用。这是**防御性**互斥加固。
+     * 现场「打不开」的真实根因已在 1.10.66 由堆栈证实：`DialogBase` 默认 `pause=true` 与
+     * `afterAction(NONE)` 冲突，Paper 直接拒绝构建（见 `MuzDialogFactory.screen` 的 `pause(false)`）。
+     * 不要把这里的输入互斥再写成已证根因。
      *
      * <p>【lane】MuMenu 的玩家级 API 与 Dialog 展示都必须在 player lane 上调用，而命令在
      * 区域线程/主线程执行，因此统一经 {@code PlayerOutputDispatcher.enqueuePlayer} 投递一次，

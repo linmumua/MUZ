@@ -417,52 +417,112 @@ public final class SoundActionDialogScreen implements MuzDialogScreen {
     // ------------------------------------------------------------------
 
     private Dialog buildAdminSound(MuzDialogContext ctx, String title, String currentSpec) {
+        SoundSpec current = SoundSpec.parse(currentSpec);
         List<DialogBody> body = new ArrayList<>();
         body.add(line(MuzTheme.accent(title)));
         body.add(line(MuzTheme.muted("当前 · " + currentSpec)));
-        body.add(line(MuzTheme.muted("格式：音效名 [音量] [音高]。")));
+        body.add(line(MuzTheme.muted("点预设会立刻试听并保存；音量与音高也能用下面的滑块微调后再应用。")));
 
         List<DialogInput> inputs = new ArrayList<>();
         inputs.add(MuzDialogFactory.textInput("value",
-            PlayerSettingsDialogScreen.noItalic(MuzTheme.accent("自定义音效")), "", 128));
+            PlayerSettingsDialogScreen.noItalic(MuzTheme.accent("自定义音效（留空则沿用当前音效）")), "", 128));
+        // 音量/音高用滑块而不是让人手写：既避免记格式，也能边拖边听（配合「试听当前」）。
+        inputs.add(MuzDialogFactory.numberRange("volume",
+            PlayerSettingsDialogScreen.noItalic(MuzTheme.accent("音量")), 0.0f, 1.0f, 0.1f, current.volume()));
+        inputs.add(MuzDialogFactory.numberRange("pitch",
+            PlayerSettingsDialogScreen.noItalic(MuzTheme.accent("音高")), 0.5f, 2.0f, 0.1f, current.pitch()));
 
         List<ActionButton> actions = new ArrayList<>();
         for (Preset preset : countdownPresets()) {
+            SoundSpec presetSound = SoundSpec.parse(preset.spec());
             actions.add(ctx.action(
                 PlayerSettingsDialogScreen.noItalic(MuzTheme.accent(preset.title())),
-                () -> applySound(ctx, preset.spec())
+                // 预设自带调好的音量/音高：点一下既保存也立刻发声，管理员能直接听到效果。
+                () -> applyAndPreviewSound(ctx, presetSound)
             ));
         }
+        actions.add(ctx.action(
+            PlayerSettingsDialogScreen.noItalic(MuzTheme.accent("试听当前")),
+            view -> previewSound(ctx, soundFromView(ctx, view, current))
+        ));
         actions.add(ctx.action(
             PlayerSettingsDialogScreen.noItalic(MuzTheme.success("应用自定义")),
             view -> {
                 String raw = ctx.text(view, "value");
-                if (DialogInputParsers.isCancel(raw)) {
+                SoundSpec typed = soundFromView(ctx, view, current);
+                if (DialogInputParsers.isCancel(raw) && typed.key().isBlank()) {
                     ctx.error("输入为空，没有改动。");
                     return;
                 }
-                applySound(ctx, raw);
+                applyAndPreviewSound(ctx, typed);
             }
         ));
         return screen(title, body, inputs, actions, ctx);
     }
 
-    private void applySound(MuzDialogContext ctx, String spec) {
+    /**
+     * 读取「文本框里的音效名 + 滑块的音量音高」。
+     *
+     * <p>文本框只负责**音效名**：让它同时承担音量音高，会与滑块形成两个真值来源，
+     * 玩家改了滑块又被文本覆盖。因此这里只用文本里解析出的 key，音量与音高一律取滑块。
+     */
+    private SoundSpec soundFromView(MuzDialogContext ctx, io.papermc.paper.dialog.DialogResponseView view,
+        SoundSpec fallback) {
+        SoundSpec typed = SoundSpec.parse(ctx.text(view, "value"));
+        String key = typed.key().isBlank() ? fallback.key() : typed.key();
+        Float volume = ctx.number(view, "volume");
+        Float pitch = ctx.number(view, "pitch");
+        return new SoundSpec(
+            key,
+            volume == null ? fallback.volume() : volume,
+            pitch == null ? fallback.pitch() : pitch);
+    }
+
+    /** 保存并立刻试听；保存失败时只报错、不出声（避免「听着像成功、其实没存下」）。 */
+    private void applyAndPreviewSound(MuzDialogContext ctx, SoundSpec sound) {
+        if (!applySound(ctx, SoundSpec.spec(sound.key(), sound.volume(), sound.pitch()))) {
+            return;
+        }
+        previewSound(ctx, sound);
+    }
+
+    private void previewSound(MuzDialogContext ctx, SoundSpec sound) {
+        if (sound.key() == null || sound.key().isBlank()) {
+            ctx.error("还没填音效名。");
+            return;
+        }
+        if (sound.volume() <= 0.0f) {
+            ctx.message(MuzTheme.warning("音量是 0，这次等同静音，不会出声。"));
+            return;
+        }
+        playSound(ctx.playerId(), sound.key(), sound.volume(), sound.pitch());
+        ctx.message(MuzTheme.accent("正在试听 · " + sound.key()
+            + "  音量 " + SoundSpec.format(sound.volume())
+            + "  音高 " + SoundSpec.format(sound.pitch())));
+    }
+
+    /**
+     * 保存音效规格。
+     *
+     * @return 是否真的保存成功；调用方据此决定要不要试听——失败还出声会让人以为已经生效
+     */
+    private boolean applySound(MuzDialogContext ctx, String spec) {
         try {
             switch (kind) {
                 case ADMIN_COUNTDOWN -> plugin.setCountdownSoundSpec(spec);
                 case ADMIN_UNREADY -> plugin.setUnreadyWarningSoundSpec(spec);
                 case ADMIN_PLACEMENT -> plugin.setPlacementBlockedSoundSpec(spec);
                 default -> {
-                    return;
+                    return false;
                 }
             }
         } catch (IllegalArgumentException exception) {
             ctx.error(exception.getMessage() == null ? "这个音效没能记下。" : exception.getMessage());
-            return;
+            return false;
         }
         ctx.message(MuzTheme.success(labelOf(kind) + "已更新"));
         ctx.service().refresh(ctx.playerId());
+        return true;
     }
 
     private static String labelOf(Kind kind) {
@@ -571,6 +631,52 @@ public final class SoundActionDialogScreen implements MuzDialogScreen {
     }
 
     /** 一个可选预设（标题 / 规格 / 说明）。 */
+    /**
+     * 一条音效规格：{@code 音效名 音量 音高}。
+     *
+     * <p>只用一位小数格式化，与配置层 `normalizeSoundSpec` 的存储精度一致；
+     * 解析时容错（缺音量/音高按默认值补），因为它只用于**预填滑块初值**，
+     * 真正写入前仍会经过插件侧校验。
+     */
+    public record SoundSpec(String key, float volume, float pitch) {
+        /** 默认音量：与旧预设的常见量级一致。 */
+        public static final float DEFAULT_VOLUME = 0.4f;
+        /** 默认音高：原版音高。 */
+        public static final float DEFAULT_PITCH = 1.0f;
+
+        /** 容错解析；空串得到「无音效名 + 默认音量音高」。 */
+        public static SoundSpec parse(String raw) {
+            String value = raw == null ? "" : raw.trim();
+            if (value.isEmpty()) {
+                return new SoundSpec("", DEFAULT_VOLUME, DEFAULT_PITCH);
+            }
+            String[] parts = value.split("[ \\t]+");
+            String key = parts.length == 0 ? "" : parts[0];
+            float volume = parts.length >= 2 ? numberOr(parts[1], DEFAULT_VOLUME) : DEFAULT_VOLUME;
+            float pitch = parts.length >= 3 ? numberOr(parts[2], DEFAULT_PITCH) : DEFAULT_PITCH;
+            return new SoundSpec(key, volume, pitch);
+        }
+
+        /** 组装成配置层接受的规格字符串。 */
+        public static String spec(String key, float volume, float pitch) {
+            return (key == null ? "" : key.trim()) + " " + format(volume) + " " + format(pitch);
+        }
+
+        /** 一位小数格式化（与存储精度一致）。 */
+        public static String format(float value) {
+            return String.format(java.util.Locale.ROOT, "%.1f", value);
+        }
+
+        private static float numberOr(String text, float fallback) {
+            try {
+                float parsed = Float.parseFloat(text);
+                return Float.isFinite(parsed) ? parsed : fallback;
+            } catch (NumberFormatException exception) {
+                return fallback;
+            }
+        }
+    }
+
     public record Preset(String title, String spec, String description) {
     }
 

@@ -201,10 +201,12 @@ public class GadgetPanelService {
             return Status.EMPTY_SLOT;
         }
         bar.select(playerId, realSlot);
-        // 选择成功先关面板：面板点完即关，随后用准星右键投掷（避免面板继续吃掉右键）。
+        // 【1.10.70：选中后不再关闭椅侧面板】用户要求面板「一直显示」，
+        // 关掉会让玩家以为道具栏消失了。这里只重绘一次以更新选中高亮；
+        // 面板位于玩家前方两侧，正常瞄准桌心投掷不会命中它。
         bridge.closeSession(player);
         if (chairPanelDisplay != null) {
-            chairPanelDisplay.close(playerId);
+            chairPanelDisplay.open(player, chairAnchors.frozen(playerId), chairSlots(playerId), chairSelected(playerId));
         }
         return Status.OK;
     }
@@ -227,9 +229,7 @@ public class GadgetPanelService {
         }
         // 语音面板是独立实体面板，必须先让悬浮菜单与椅侧双面板退出，避免两套捕获面同时吃掉输入。
         bridge.closeSession(player);
-        if (chairPanelDisplay != null) {
-            chairPanelDisplay.close(player.getUniqueId());
-        }
+        // 语音面板是独立实体；椅侧双面板保持常驻，不再跟着关。
         return bar.openVoicePanel(player) ? Status.OK : Status.VOICE_UNAVAILABLE;
     }
 
@@ -318,6 +318,12 @@ public class GadgetPanelService {
         panelTableNames.remove(player.getUniqueId());
         // 已应用的锚点随之作废：否则下次 sync 会误判「位置没变」而不重开。
         appliedAnchors.remove(player.getUniqueId());
+    }
+
+    /** 该玩家的椅侧面板是否仍在渲染（纯内存查询，任意 lane 安全）。 */
+    public boolean chairPanelsVisible(UUID playerId) {
+        ChairPanelDisplayService display = chairPanelDisplay;
+        return display != null && display.isOpen(playerId);
     }
 
     /** 八个槽位的物品快照（0-based，空槽为 {@code null}），供内置渲染逐个画图标。 */

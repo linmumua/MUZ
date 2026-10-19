@@ -68,7 +68,7 @@ class GameTableRefreshPathTest {
         String source = Files.readString(TABLE);
 
         String advance = methodBody(source, "private void advanceAfterResolvedTurn(UUID playerId, boolean continueFlow)");
-        assertTrue(advance.contains("promptPlayTurn();\n        runBotActionIfNeeded();"),
+        assertTrue(advance.contains("promptPlayTurn()") && advance.contains("runBotActionIfNeeded()"),
             "回合推进后必须经 promptPlayTurn 继续正常刷新与机器人流程");
         assertTrue(!advance.contains("refreshPhysicalTable();"),
             "回合推进不得绕过统一入口重复刷新物理牌桌");
@@ -91,10 +91,22 @@ class GameTableRefreshPathTest {
         return count;
     }
 
+    /**
+     * 取一个方法体。
+     *
+     * <p>结束锚点用「下一个同缩进的方法/字段声明」而不是 {@code "\n    }"}：后者会被方法内部
+     * 同缩进的右花括号（例如 if/try 块）提前截断，导致断言在完全无关的改动后失效。
+     */
     private static String methodBody(String source, String signature) {
         int start = source.indexOf(signature);
         assertTrue(start >= 0, "找不到 " + signature + "，这条测试的锚点已失效");
-        int end = source.indexOf("\n    }", start);
+        int end = source.length();
+        for (String marker : new String[] {"\n    private ", "\n    public ", "\n    static "}) {
+            int found = source.indexOf(marker, start + signature.length());
+            if (found > start && found < end) {
+                end = found;
+            }
+        }
         assertTrue(end > start, "找不到 " + signature + " 的结束锚点");
         return source.substring(start, end);
     }

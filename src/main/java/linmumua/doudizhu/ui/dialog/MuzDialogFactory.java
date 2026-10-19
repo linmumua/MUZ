@@ -52,6 +52,14 @@ public final class MuzDialogFactory {
     ) {
         DialogBase base = DialogBase.builder(title == null ? Component.empty() : title)
             .canCloseWithEscape(canCloseWithEscape)
+            // 【必须显式 pause(false)：这是实服「管理菜单打不开」的真实根因】
+            // DialogBase 的 pause 默认是 true（暂停游戏），而 Paper 有一条硬校验：
+            // pause=true 时 after_action 必须能解除暂停（CLOSE / WAIT_FOR_RESPONSE），
+            // 否则 build() 直接抛 IllegalArgumentException:
+            //   "Dialogs that pause the game must use after_action values that unpause it after user action!"
+            // 本插件刻意用 NONE（按钮回调自己决定开/关，不靠客户端 after_action），
+            // 所以 pause 必须一起关掉；否则**任何** Dialog 都构建失败，表现为「点了没反应」。
+            .pause(false)
             .afterAction(DialogBase.DialogAfterAction.NONE)
             .body(body == null ? List.of() : body)
             .inputs(inputs == null ? List.of() : inputs)
@@ -84,14 +92,60 @@ public final class MuzDialogFactory {
         return ActionButton.builder(label == null ? Component.text("关闭") : label).build();
     }
 
+    /**
+     * 按钮默认宽度。
+     *
+     * <p>【必须给足：1 会让按钮渲染成一条竖线】Paper 的 {@code ActionButton} 宽度以**对话框宽度的
+     * 1024 分之一**为单位（1..1024）。旧代码全部传 1，实服表现为「正文和关闭按钮都在，按钮区只剩
+     * 一条竖线」——按钮其实存在，只是宽度接近 0，玩家点不到也看不见文字。取 150 约等于 15% 宽，
+     * 与底部退出按钮视觉量级一致。
+     */
+    public static final int DEFAULT_BUTTON_WIDTH = 150;
+
     /** 原始按钮：直接给定 DialogAction（一般用 {@code ctx.action(...)} 而不是这个）。 */
     public static ActionButton button(Component label, Component tooltip, int width, DialogAction action) {
         return ActionButton.create(
             label == null ? Component.empty() : label,
             tooltip,
-            width <= 0 ? 1 : width,
+            width <= 0 ? DEFAULT_BUTTON_WIDTH : width,
             action
         );
+    }
+
+    /**
+     * 数值滑块。
+     *
+     * <p>用于音量、音高这类「连续可调、需要边调边听」的参数：原生 Dialog 的
+     * {@code numberRange} 客户端就是滑块，比让人手写 `0.45` 更不容易填错，
+     * 也不用管理员记格式。
+     *
+     * <p>{@code step} 与存储精度保持一致：配置里的音效规格统一格式化为一位小数
+     * （见 {@code DoudizhuPlugin.normalizeSoundSpec}），因此滑块步长取 0.1，
+     * 避免「界面上显示 0.45、存下来变成 0.5」的错觉。
+     *
+     * @param key     输入键名，回调里用同一个 key 读取
+     * @param label   显示在滑块上方的标题
+     * @param min     下界
+     * @param max     上界
+     * @param step    步长；非正数时退化为 0.1
+     * @param initial 初值，超出范围时钳到区间内
+     */
+    public static DialogInput numberRange(
+        String key,
+        Component label,
+        float min,
+        float max,
+        float step,
+        float initial
+    ) {
+        float low = Math.min(min, max);
+        float high = Math.max(min, max);
+        float clamped = Math.clamp(initial, low, high);
+        return DialogInput.numberRange(key, label == null ? Component.empty() : label, low, high)
+            .step(step <= 0.0f ? 0.1f : step)
+            .initial(clamped)
+            .labelFormat("%.1f")
+            .build();
     }
 
     /** 单行文本输入。 */
