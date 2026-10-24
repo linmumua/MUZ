@@ -131,8 +131,7 @@ public class ChairPanelAnchorService {
         if (seat == null) {
             return List.of();
         }
-        List<ChairPanelAnchor> anchors =
-            ChairPanelGeometry.panels(pose.worldId(), seat, settings);
+        List<ChairPanelAnchor> anchors = ChairPanelGeometry.panels(pose, seat, settings);
         return anchors.isEmpty() ? List.of() : List.copyOf(anchors);
     }
 }

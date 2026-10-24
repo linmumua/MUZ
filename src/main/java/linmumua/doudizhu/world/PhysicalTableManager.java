@@ -241,13 +241,46 @@ public final class PhysicalTableManager {
     static final double CHAIR_PLACEMENT_RADIUS = 0.55;
     static final double CHAIR_PLACEMENT_MIN_Y = -0.10;
     static final double CHAIR_PLACEMENT_MAX_Y = 1.05;
-    // 叫分阶段只保留四个叫分按钮；明牌按钮仅在独立 REVEALING 窗口出现。
+    // 叫分阶段（bidRound == 1）只保留四个叫分按钮；抢地主加赛（bidRound == 2）且明牌资格仍在时，
+    // 当前叫分者看到「四个叫分 + 明牌」五个按钮，非当前叫分者只看到自己的明牌按钮。
+    // 【1.10.73】下面两组偏移抽成常量 + 静态工厂，是为了让 ButtonHitboxSpacingTest 拿到
+    // **生产真正使用的那一份** ActionButtonState（而不是测试里另抄一遍数字）来做碰撞断言。
     private static final List<ActionButtonState> BIDDING_BUTTONS_ONLY = List.of(
         new ActionButtonState("bid", "不叫", ButtonAction.BID_0, -0.96),
         new ActionButtonState("bid", "叫1分", ButtonAction.BID_1, -0.32),
         new ActionButtonState("bid", "叫2分", ButtonAction.BID_2, 0.32),
         new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, 0.96)
     );
+
+    /**
+     * 明牌资格延长期的五个按钮偏移。
+     *
+     * <p>两端明牌/不叫键外扩至 ±1.8，内侧叫分键位于 ±0.7/0；映射到生产默认弧线后，
+     * 最窄间距仍大于相邻文字判定框的半宽和。这是按默认文字缩放 0.4 与实际墨迹宽度算出的非均匀弧距，
+     * 若把五个 offset 等距铺开，最长的「明牌 ×1」会和「叫3分」判定框重叠。
+     */
+    static final double[] BIDDING_WITH_REVEAL_OFFSETS = {-1.80, -0.70, 0.0, 0.70, 1.80};
+
+    /** 首轮叫分的四个按钮；测试与生产共用这一份状态，避免测试手抄偏移。 */
+    static List<ActionButtonState> biddingFirstRoundStates() {
+        return BIDDING_BUTTONS_ONLY;
+    }
+
+    /** 抢地主加赛期、当前叫分者的按钮组：四个叫分 + 明牌（明牌**追加**，不替换叫分入口）。 */
+    static List<ActionButtonState> biddingWithRevealStates(String revealLabel) {
+        return List.of(
+            new ActionButtonState("bid", "不叫", ButtonAction.BID_0, BIDDING_WITH_REVEAL_OFFSETS[0]),
+            new ActionButtonState("bid", "叫1分", ButtonAction.BID_1, BIDDING_WITH_REVEAL_OFFSETS[1]),
+            new ActionButtonState("bid", "叫2分", ButtonAction.BID_2, BIDDING_WITH_REVEAL_OFFSETS[2]),
+            new ActionButtonState("bid", "叫3分", ButtonAction.BID_3, BIDDING_WITH_REVEAL_OFFSETS[3]),
+            new ActionButtonState("inspect", revealLabel, ButtonAction.REVEAL_HAND, BIDDING_WITH_REVEAL_OFFSETS[4])
+        );
+    }
+
+    /** 抢地主加赛期、非当前叫分者的按钮组：只有自己的明牌按钮。 */
+    static List<ActionButtonState> biddingRevealOnlyStates(String revealLabel) {
+        return List.of(new ActionButtonState("inspect", revealLabel, ButtonAction.REVEAL_HAND, 0.0));
+    }
     /** 每张牌桌独立记录桌边动态的刷新桶；owner tick 不能共享全局节流状态。 */
     private final Map<String, Long> playDetailLastRefreshBucketByTable = new LinkedHashMap<>();
     /**
@@ -2874,7 +2907,17 @@ public final class PhysicalTableManager {
             // 横向轴与按钮判定框同源：左/右对称面板由此取 ±，不会各自换算角度。
             // 注意这里的 Vector 是类内自有的纯 record（见文件末尾），不是 org.bukkit.util.Vector：
             // 本文件绝大多数几何都不持有 Bukkit 对象，新增代码沿用同一套。
-            Vector lateral = rotateVector(normalizeHorizontal(actionStep(seatIndex)), placed.yaw());
+            //
+            // 【1.10.73 修正：换回 seatLateralAxis，并把符号翻成「玩家右手边」】
+            // 旧实现用的是 actionStep：seat 0 与 seatLateralAxis 同向，但 seat 1/2 正好相反，
+            // 三把椅子因此手性不一致——按同一份配置摆出来的两块板，在 seat 1/2 上会左右互换。
+            // seatLateralAxis 才是「座位自身横向轴」的唯一定义处（与 handStep 同口径），
+            // 它的 +1 指向该座位玩家的**左手边**；而配置层 ChairSidePanelSettings.Side.RIGHT 的符号是 +1，
+            // 两者必须同向，所以这里取反一次，让 lateralX/lateralZ 的 +1 恒指向玩家右手边。
+            // 符号只在这一处翻转，面板层直接用 ± 即可，不会再多一套换算。
+            Vector lateralLeftHanded =
+                rotateVector(normalizeHorizontal(seatLateralAxis(seatIndex)), placed.yaw());
+            Vector lateral = new Vector(-lateralLeftHanded.x(), 0.0, -lateralLeftHanded.z());
             seats.add(new TableSeatPose.Seat(
                 seatIndex,
                 placed.seatAssignments().get(seatIndex),
@@ -7386,7 +7429,7 @@ public final class PhysicalTableManager {
      */
     private List<ActionButtonState> phaseButtonStates(GamePhase phase) {
         return switch (phase) {
-            case BIDDING -> BIDDING_BUTTONS_ONLY;
+            case BIDDING -> biddingFirstRoundStates();
             case REVEALING -> List.of();
             case DEALING -> List.of();
             case DOUBLING -> List.of(
@@ -7416,12 +7459,26 @@ public final class PhysicalTableManager {
             );
         }
         if (table.getPhase() == GamePhase.BIDDING) {
-            if (owner == null || !owner.equals(table.getCurrentTurn())) {
+            // 【1.10.73：抢地主加赛的明牌按钮必须真的出现】
+            // 窗口资格在 BIDDING && bidRound == 2 期间继续有效（见 GameTable.isRevealWindowOpen）。
+            // 旧实现这里直接「非当前叫分者 → 空表」「当前叫分者 → 四个叫分按钮」，
+            // 于是延长期里任何玩家都看不到明牌入口：状态机允许、UI 点不到。
+            // 现在：当前叫分者保留四个叫分按钮并**追加**明牌按钮；非当前叫分者只保留自己的明牌按钮。
+            // 判据仍由 GameTable 统一给出（isRevealWindowOpen + canRevealHand），这里只排布。
+            boolean currentBidder = owner != null && owner.equals(table.getCurrentTurn());
+            boolean revealAvailable = table.isRevealWindowOpen()
+                && owner != null && table.canRevealHand(owner);
+            if (revealAvailable) {
+                return currentBidder
+                    ? biddingWithRevealStates(table.openingRevealButtonLabel())
+                    : biddingRevealOnlyStates(table.openingRevealButtonLabel());
+            }
+            if (!currentBidder) {
                 return List.of();
             }
             return phaseStates;
         }
-        // 明牌按钮的判据是「窗口」而不是「阶段」：窗口在首批（每人 3 张）发完就打开，
+        // 明牌按钮的判据是「窗口」而不是「阶段」：窗口在第 3 批（每人 9 张）发完后限时打开，
         // 而阶段切换仍由翻转结束负责，所以窗口已开的事实会出现在 DEALING 期。
         // 若这里继续按 phase == REVEALING 判断，玩家在发牌期就看不到按钮，变成
         // 「状态机允许明牌、UI 根本点不到」。倍率 3→2→1 由 GameTable 的快照给出，
@@ -9229,7 +9286,7 @@ public final class PhysicalTableManager {
      * 这个字段现在只作为 actionSignature 的一部分参与重建判定，没有视觉作用。
      * 保留它是为了避免升级后所有已放置牌桌都重建一次按钮；要清理的话得单独做。
      */
-    private record ActionButtonState(String modelId, String label, ButtonAction action, double offsetX) {
+    record ActionButtonState(String modelId, String label, ButtonAction action, double offsetX) {
     }
 
     private record ActionWidgetSpec(

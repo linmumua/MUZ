@@ -12,10 +12,9 @@ import java.util.UUID;
  *
  * <p>协调器只改牌局数据并通知牌桌刷新；手牌实体的旋转、排序中点的视觉表现由渲染层读取牌桌快照完成。
  *
- * <p>【明牌窗口现在覆盖整个发牌期】：窗口在**首批（每人三张）发完那一刻**打开，而不是等翻转结束。
- * 倍率按已完成批数走 {@link RevealMultiplierLadder} 的阶梯（3 → 2 → 1，下限 1），
- * 因此「早明牌倍率高、晚明牌倍率低」是真实可点的选择，而不是一句话术。
- * 窗口直到「发牌结束 + 360° 翻转结束 + revealTicks 尾部」才关闭，倒计时贯穿全程。
+ * <p>【1.10.73 明牌窗口】：第 3 批（每人 9 张）发完时只开启一次 60 tick；归零只关闭限时资格，
+ * 不截断后续发牌、360° 翻转或 {@code revealTicks} 时间线。倍率按已完成批数走
+ * {@link RevealMultiplierLadder} 阶梯（第 3/4/5+ 批为 3/2/1，下限 1）。
  */
 final class RoundOpeningCoordinator {
     interface Support {
@@ -33,11 +32,11 @@ final class RoundOpeningCoordinator {
         void tickOpeningActionBar();
 
         /**
-         * 首批发完、明牌窗口刚打开时的一次性通知（此时 {@code phase} 仍是 DEALING）。
+         * 第 3 批（每人 9 张）发完、限时明牌窗口刚打开时的一次性通知（此时 {@code phase} 仍是 DEALING）。
          *
          * <p>与 {@link #onOpeningRevealWindowStarted()} 的区别：后者是「翻转结束、进入 REVEALING 阶段」的
-         * 阶段切换通知；本方法只表示「现在起可以明牌」。分成两个回调是因为过去的实现里
-         * 「可以明牌」和「进入 REVEALING」是同一时刻，现在不是了——把阶段切换提前到首批会把
+         * 阶段切换通知；本方法只表示「现在起可以明牌」。分成两个回调是因为「可以明牌」在第 3 批发完时成立，
+         * 而阶段切换仍要等翻转结束——把阶段切换提前到第 3 批会把
          * 发牌期的阶段语义（手牌锁、发牌文案、渲染分支）一起改坏。
          *
          * <p>默认空实现：既有夹具无需实现即可编译。
@@ -77,8 +76,34 @@ final class RoundOpeningCoordinator {
     private boolean flipping;
     private boolean sortedAtHalfTurn;
     private boolean active;
-    /** 明牌窗口是否已打开；打开后直到时间线结束都不再关闭（结束即整条时间线结束）。 */
+    /**
+     * 限时明牌窗口此刻是否开着。
+     *
+     * <p>【1.10.73 语义变更】它不再「打开后直到时间线结束都不关」，而是只在第 3 批发完后的
+     * 60 tick 内为真。整条发牌/翻转/尾部时间线由 {@link #revealRemainingTicks} 独立推进，
+     * 窗口关闭不影响它——两者是**两个**计数器，共用会互相掐死。
+     */
     private boolean revealWindowOpen;
+    /**
+     * 本局是否**曾经**开过明牌窗口（per-round one-shot 闩锁）。
+     *
+     * <p>【为什么需要它】窗口打开的条件是「已完成批数 >= 3」。第 4/5/6 批发完时条件仍然成立，
+     * 若只看条件，窗口会在每一批之后重新打开、每批都公告一次（间隔 >= 20 时尤其明显）。
+     * 闩锁一旦置位就再不开窗，只在 {@link #start} / {@link #cancel} 复位。
+     *
+     * <p>它同时是 {@code GameTable} 判断「抢地主加赛延长」是否合法的依据：
+     * 本局没开过窗口就不该在叫分阶段凭空给出明牌资格。
+     */
+    private boolean revealWindowAnnounced;
+
+    /**
+     * 明牌窗口的独立剩余 tick。
+     *
+     * <p>【为什么不复用 {@link #revealRemainingTicks}】那是「翻转结束后到关窗」的权威计数，
+     * 归零会让整条开局时间线 {@code active=false}。窗口现在开在发牌途中（第三批发完），
+     * 若共用它，3 秒一到就会把发牌直接掐死。因此窗口用自己的计数，只负责关窗。
+     */
+    private int revealWindowTicks;
     /** 51 张玩家手牌是否已全部发完并进入翻转；用于区分「发牌期」与「翻转/尾部」。 */
     private boolean dealingComplete;
 
@@ -86,6 +111,17 @@ final class RoundOpeningCoordinator {
     private static final int SEATS_PER_BATCH = 3;
     /** 发牌批次数：前五批每人三张、第六批每人两张，共 17 张。 */
     private static final int BATCH_COUNT = 6;
+
+    /**
+     * 第三批发完才开明牌窗口（用户要求）。
+     *
+     * <p>必须与 {@link RevealMultiplierLadder#FIRST_REVEALABLE_BATCH} 同值：一处决定「窗口何时开」，
+     * 一处决定「倍率从第几批起算」。错开就会出现「窗口开着但倍率 0」这类不可点窗口。
+     */
+    private static final int REVEAL_WINDOW_AFTER_BATCHES = RevealMultiplierLadder.FIRST_REVEALABLE_BATCH;
+
+    /** 窗口时长固定 3 秒；抢地主后的延长由 GameTable 负责。 */
+    private static final int REVEAL_WINDOW_TICKS = 60;
     /** 前五批每人三张；最后一批两张补齐 17，底牌三张另存。 */
     private static final int CARDS_PER_SEAT = 3;
     private static final int CARDS_PER_SEAT_IN_LAST_BATCH = 2;
@@ -123,6 +159,8 @@ final class RoundOpeningCoordinator {
         this.sortedAtHalfTurn = false;
         this.renderFailuresSinceLog = 0;
         this.revealWindowOpen = false;
+        this.revealWindowAnnounced = false;
+        this.revealWindowTicks = 0;
         this.dealingComplete = false;
         this.active = true;
         support.setOpeningPhase(GamePhase.DEALING);
@@ -150,6 +188,21 @@ final class RoundOpeningCoordinator {
     boolean tick() {
         if (!active || settings == null) {
             return true;
+        }
+        // 窗口计时独立递减：只负责关窗，绝不把发牌时间线置为结束。
+        if (revealWindowOpen && revealWindowTicks > 0) {
+            revealWindowTicks--;
+            if (revealWindowTicks == 0) {
+                revealWindowOpen = false;
+                // 【关窗这一 tick 必须显式刷新一次】世界明牌按钮的存在与否由
+                // GameTable.isRevealWindowOpen() 决定，而按钮重建只由 refreshPhysicalTable() 驱动。
+                // 窗口若在「批次之间的 waitingTicks」里归零，原来的路径只 tick ActionBar，
+                // 按钮签名不变 → 桌上会残留一个点了必然报错的「明牌 ×N」，
+                // 残留时长可达 batchInterval 上限（200 tick ≈ 10 秒）。
+                // 这里复用与发牌同一套隔离刷新（refresh() 内部走 safely），
+                // 渲染异常不会把发牌 timer 打死。
+                refresh();
+            }
         }
         if (flipping) {
             return tickFlip();
@@ -187,7 +240,7 @@ final class RoundOpeningCoordinator {
             if (seatIndex >= seats.size()) {
                 seatIndex = 0;
                 batchIndex++;
-                openRevealWindowAfterFirstBatch();
+                openRevealWindowAtThreshold();
                 if (batchIndex >= BATCH_COUNT) {
                     support.assignOpeningBottomCards(new ArrayList<>(deck.subList(
                         PLAYER_CARD_COUNT, PLAYER_CARD_COUNT + BOTTOM_CARD_COUNT)));
@@ -214,16 +267,24 @@ final class RoundOpeningCoordinator {
     }
 
     /**
-     * 首批（每人三张）完整发完的那一刻打开明牌窗口。
+     * 第三批（每人三张 × 3 批）完整发完的那一刻打开明牌窗口，且**每局只开一次**。
      *
      * <p>此时 {@code phase} 仍是 DEALING：阶段切换仍由翻转结束负责，本方法只让「可以明牌」这一事实成立，
      * 这样发牌期的锁手牌、发牌文案、渲染分支都不会被提前改坏。
+     *
+     * <p>【1.10.73：窗口改到「三次发牌全部发完」之后，并且只开一次】用户要求明牌窗口只在第三批发完后
+     * 出现、持续 3 秒；若误改为首批就开，会让玩家在还剩大半手牌时明牌，与预期不符。
+     * 「只开一次」由 {@link #revealWindowAnnounced} 闩锁保证：第 4/5/6 批发完时
+     * {@code batchIndex >= REVEAL_WINDOW_AFTER_BATCHES} 依然成立，若只看条件，
+     * 每批之后都会重开窗口并重复公告一次（间隔配到 20 以上时最明显）。
      */
-    private void openRevealWindowAfterFirstBatch() {
-        if (revealWindowOpen || batchIndex != 1) {
+    private void openRevealWindowAtThreshold() {
+        if (revealWindowAnnounced || batchIndex < REVEAL_WINDOW_AFTER_BATCHES) {
             return;
         }
+        revealWindowAnnounced = true;
         revealWindowOpen = true;
+        revealWindowTicks = REVEAL_WINDOW_TICKS;
         int multiplier = RevealMultiplierLadder.multiplierForCompletedBatches(batchIndex);
         // 通知本身也可能抛（发消息/播音效），不能让它把发牌 timer 打死。
         safely("onOpeningRevealBecameAvailable", () -> support.onOpeningRevealBecameAvailable(multiplier));
@@ -301,6 +362,10 @@ final class RoundOpeningCoordinator {
         flipping = false;
         sortedAtHalfTurn = false;
         revealWindowOpen = false;
+        // 【必须一起复位】漏掉这两个字段会让「上一局开过窗口」泄漏到新局：
+        // 闩锁为真 → 新局永不重开窗口；剩余 tick 非 0 → 新局一开始就显示倒计时。
+        revealWindowAnnounced = false;
+        revealWindowTicks = 0;
         dealingComplete = false;
     }
 
@@ -309,11 +374,22 @@ final class RoundOpeningCoordinator {
     }
 
     /**
-     * 明牌窗口是否开着。**语义已从「REVEALING 阶段内」扩宽为「首批发完之后的整个发牌+翻转+尾部」**，
+     * 明牌窗口是否开着。**语义已从「REVEALING 阶段内」扩宽为「第 3 批发完后的 60 tick 限时窗口」**，
      * 因此与 {@code GamePhase} 无关：发牌期同样为 true。
      */
     boolean isRevealWindowOpen() {
-        return active && revealWindowOpen;
+        return active && revealWindowOpen && revealWindowTicks > 0;
+    }
+
+    /**
+     * 本局是否**曾经**开过明牌窗口（per-round one-shot 闩锁）。
+     *
+     * <p>供 {@code GameTable} 判定「抢地主加赛延长」是否成立：只有本局真的走到过第三批、
+     * 拿到过明牌资格，才允许在 {@code BIDDING && bidRound == 2} 期间继续明牌。
+     * 否则叫分阶段会凭空多出一个明牌入口。
+     */
+    boolean revealWindowEverOpened() {
+        return revealWindowAnnounced;
     }
 
     /** 已完整发完的批次数（0..6）；明牌倍率由它决定，而不是由已流逝的秒数决定。 */
@@ -336,18 +412,15 @@ final class RoundOpeningCoordinator {
     /**
      * 窗口剩余 tick。
      *
-     * <p>翻转结束后由 {@link #revealRemainingTicks} 权威计数（与改造前完全一致：翻转结束那 tick 置为
-     * revealTicks，之后每 tick 减一，减到 0 就地关闭窗口）；发牌与翻转期间返回**预测值**，
-     * 让倒计时覆盖整个合法窗口而不是等翻转结束才开始。
+     * <p>【1.10.73 语义变更】窗口有**自己的**计时器 {@link #revealWindowTicks}（第 3 批发完时置 60，
+     * 之后每 tick 减一，归零即关窗）。它不再与 {@link #revealRemainingTicks} 共用计数，
+     * 也不再需要「按剩余发牌 tick 预测」——预测值是为「窗口横跨整条时间线」那套旧机制服务的，
+     * 现在窗口只有 60 tick，显示值与真实关闭点必须完全一致，多一层推演只会制造 ±1 的错位。
+     *
+     * <p>因此这里只返回窗口自己的计数：窗口没开就是 0，开着就是剩余 tick（60 递减到 1）。
      */
     int openingRemainingTicks() {
-        if (!isRevealWindowOpen()) {
-            return 0;
-        }
-        if (revealRemainingTicks > 0) {
-            return revealRemainingTicks;
-        }
-        return predictedRemainingTicks();
+        return isRevealWindowOpen() ? revealWindowTicks : 0;
     }
 
     /**
@@ -466,7 +539,7 @@ final class RoundOpeningCoordinator {
             progress = "";
         }
         if (!isRevealWindowOpen()) {
-            // 窗口未开（首批未发完）或已关闭：只说进度，不谎报可以明牌。
+            // 窗口未开（尚未到第 3 批）或已关闭：只说进度，不谎报可以明牌。
             return progress.isEmpty() ? settings.messages().dealing() : progress;
         }
         String reveal = RevealMultiplierLadder.withMultiplier(

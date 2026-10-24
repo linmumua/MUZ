@@ -714,7 +714,15 @@ public final class WorldTableInteractionListener implements Listener {
         if (panels == null || !panels.ownsPanelEntity(clicked.getUniqueId())) {
             return false;
         }
-        UUID playerId = player.getUniqueId();
+        // 【1.10.73：必须再比对 owner】面板是**逐玩家私有**的（visibleByDefault(false) + 只对 owner
+        // showEntity），但事件层只看得到"某个实体被点了"。只判 ownsPanelEntity 会把**别人**的面板实体
+        // 也当成"这是面板点击"而消费掉——既吞掉对方的点击，也会让我们用错的面板去算命中格。
+        // 因此这里要求实体归属 == 点击者，否则完全放行（return false，事件继续按普通交互处理）。
+        UUID clickingId = player.getUniqueId();
+        if (!clickingId.equals(panels.ownerOf(clicked.getUniqueId()))) {
+            return false;
+        }
+        UUID playerId = clickingId;
         long now = System.nanoTime();
         Long previous = consumedChairPanelClicks.get(playerId);
         if (previous != null && now - previous < CHAIR_PANEL_CLICK_DEBOUNCE_NANOS) {
@@ -728,9 +736,14 @@ public final class WorldTableInteractionListener implements Listener {
         if (click == null || gadgetPanels == null) {
             return true;
         }
-        GadgetPanelService.Status status = click.cell() == linmumua.doudizhu.game.ChairPanelSurface.VOICE_CELL
-            ? gadgetPanels.openVoice(player)
-            : gadgetPanels.selectSlot(player, click.cell() + 1);
+        // 【1.10.73：两块板同构，取消「右板任意位置 = 语音」特例】
+        // 现在左右都是 MuMenu muz-chair-gadget 同款九宫格：格 0..7 选真实槽 1..8、格 8 打开语音。
+        // 旧实现把右板任何点击都当语音入口，会让右板的八张道具卡全都变成「打开语音」，
+        // 与左板行为不一致，也与「两块内容同构」的布局直接冲突。
+        GadgetPanelService.Status status =
+            click.cell() == linmumua.doudizhu.game.ChairPanelSurface.VOICE_CELL
+                ? gadgetPanels.openVoice(player)
+                : gadgetPanels.selectSlot(player, click.cell() + 1);
         if (status != GadgetPanelService.Status.OK) {
             hintChairPanel(player, gadgetPanels.hint(status));
         }

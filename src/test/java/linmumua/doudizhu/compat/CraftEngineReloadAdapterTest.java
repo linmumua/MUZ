@@ -142,6 +142,17 @@ class CraftEngineReloadAdapterTest {
         return CraftEngineHudResourceBridge.ReloadInvoker.resolve(engine, engine.getClass());
     }
 
+    /** 运行期成员枚举必须走项目约定的 TabooLib Reflex，不能再从 JDK Method API 旁路。 */
+    @Test
+    void methodDiagnosticsEnumerateThroughTabooLibReflex() throws Exception {
+        String source = Files.readString(Path.of(
+            "src/main/java/linmumua/doudizhu/compat/CraftEngineHudResourceBridge.java"));
+        assertFalse(source.contains("current.getDeclaredMethods()"),
+            "诊断枚举不得绕过 TabooLib 直接读取 java.lang.reflect.Method");
+        assertTrue(source.contains("analyse(current).getStructure().getMethodsMap().values()"),
+            "零参诊断清单必须从已缓存的 TabooLib ClassMethod 结构生成");
+    }
+
     /**
      * 0.0.67 现场：必须命中 3 参重载，并把 (ioExecutor, mainExecutor, false) 原样传下去。
      *

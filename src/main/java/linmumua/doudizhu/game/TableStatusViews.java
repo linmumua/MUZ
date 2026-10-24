@@ -34,6 +34,15 @@ final class TableStatusViews {
             String revealLine = revealWindowText(revealWindow);
             return revealLine != null ? revealLine : "明牌窗口已结束 · 等待叫分";
         }
+        // 【1.10.73：抢地主加赛延长必须出现在 ActionBar】BIDDING 期间 highestBid 可能仍 <= 0，
+        // 旧实现因此直接掉进「等待叫分结果」，完全没消费明牌窗口快照——加赛期玩家看得到明牌按钮、
+        // 却看不到任何「现在能明牌、倍率多少」的说明。这里在早退之前先拼上快照行。
+        if (phase == GamePhase.BIDDING && revealWindow != null && revealWindow.open()) {
+            String revealLine = revealWindowText(revealWindow);
+            if (revealLine != null) {
+                return revealLine;
+            }
+        }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? "等待本局开局" : "等待叫分结果";
         }
@@ -69,6 +78,13 @@ final class TableStatusViews {
             Component revealLine = revealWindowComponent(revealWindow);
             return revealLine != null ? revealLine : MuzTheme.muted("明牌窗口已结束 · 等待叫分");
         }
+        // @see 上面纯文本版本的同一处说明：BIDDING 加赛延长也必须被消费，不能掉进「等待叫分结果」。
+        if (phase == GamePhase.BIDDING && revealWindow != null && revealWindow.open()) {
+            Component revealLine = revealWindowComponent(revealWindow);
+            if (revealLine != null) {
+                return revealLine;
+            }
+        }
         if (highestBid <= 0 || landlord == null) {
             return phase == GamePhase.LOBBY ? MuzTheme.muted("等待本局开局") : MuzTheme.muted("等待叫分结果");
         }
@@ -91,12 +107,12 @@ final class TableStatusViews {
      * 明牌窗口的一行纯文本；窗口未开时返回 {@code null}，由调用方按阶段给保底文案。
      *
      * <p>【唯一数据源】倍率与剩余秒都来自 {@link GameTable.RevealWindowSnapshot}（服务端已算好），
-     * 这里只负责措辞。明牌倍率自 1.10.63 起是「首批发完 ×3、第二批 ×2、之后固定 ×1」的递减阶梯
+     * 这里只负责措辞。明牌倍率阶梯是「第 3 批发完 ×3、第 4 批 ×2、第 5 批及以后固定 ×1」
      * （见 {@code RevealMultiplierLadder}），因此**不允许**再在视图里写死一个固定的整局上限：
      * 那会让每一次明牌提示都在误导玩家。
      *
-     * <p>【为什么 DEALING 也要看它】明牌窗口不再只在 REVEALING 打开：首批（每人 3 张）发完窗口就开，
-     * 而阶段切换仍由翻转结束负责，所以「窗口已开」的事实会出现在 DEALING 期。
+     * <p>【为什么 DEALING 也要看它】明牌窗口在第 3 批（每人 9 张）发完后打开，而阶段切换仍由翻转结束负责，
+     * 因此「窗口已开」的事实仍可能出现在 DEALING 期。
      */
     private static String revealWindowText(GameTable.RevealWindowSnapshot revealWindow) {
         if (revealWindow == null || !revealWindow.open()) {
@@ -105,8 +121,12 @@ final class TableStatusViews {
         if (revealWindow.youRevealed()) {
             return "已明牌 · 本局明牌 x" + Math.max(1, revealWindow.appliedMultiplier());
         }
-        return "明牌窗口 · 现在明牌 x" + revealWindow.currentMultiplier()
-            + " · 剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒";
+        // 【1.10.73：延长期不写「剩 0 秒」】抢地主加赛的资格延长没有倒计时（remainingSeconds = -1），
+        // 这里必须换一种说法，否则玩家会看到「剩 0 秒」却仍然可以点明牌，自相矛盾。
+        String tail = revealWindow.extendedIntoBidding()
+            ? " · 抢地主结束前"
+            : " · 剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒";
+        return "明牌窗口 · 现在明牌 x" + revealWindow.currentMultiplier() + tail;
     }
 
     /** @see #revealWindowText(GameTable.RevealWindowSnapshot) 同一份事实的富文本版本 */
@@ -119,11 +139,14 @@ final class TableStatusViews {
                 .append(MuzTheme.divider(" · "))
                 .append(MuzTheme.hotMetric("本局明牌", "x" + Math.max(1, revealWindow.appliedMultiplier())));
         }
+        Component tail = revealWindow.extendedIntoBidding()
+            ? MuzTheme.warning("抢地主结束前")
+            : MuzTheme.warning("剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒");
         return MuzTheme.accent("明牌窗口")
             .append(MuzTheme.divider(" · "))
             .append(MuzTheme.hotMetric("现在明牌", "x" + revealWindow.currentMultiplier()))
             .append(MuzTheme.divider(" · "))
-            .append(MuzTheme.warning("剩 " + Math.max(0, revealWindow.remainingSeconds()) + " 秒"));
+            .append(tail);
     }
 
     static String currentTrickPreviewText(
@@ -227,11 +250,23 @@ final class TableStatusViews {
                 Component revealLine = revealWindowComponent(revealWindow);
                 yield revealLine != null ? revealLine : Component.text("明牌窗口已结束 · 等待叫分。", NamedTextColor.GRAY);
             }
-            case BIDDING -> viewerId.equals(currentTurn)
-                ? Component.text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主") + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
-                : Component.text("当前由 ", NamedTextColor.GRAY)
-                    .append(identity.apply(currentTurn))
-                    .append(Component.text((bidRound == 1 ? " 正在定叫分" : " 正在抢地主") + countdown, NamedTextColor.GRAY));
+            case BIDDING -> {
+                // 【1.10.73：抢地主加赛延长必须出现在 ActionBar】BIDDING 的默认输出是叫分提示，
+                // 但加赛期明牌资格仍在（GameTable.isRevealWindowOpen 的延长分支）。若这里只拼叫分提示，
+                // 玩家会看到桌边「明牌 ×1」按钮却没有任何状态说明——按钮与文案脱节。
+                // 因此窗口开着时先把快照行放在前面，再保留叫分提示，两者都可见。
+                Component bidPrompt = viewerId.equals(currentTurn)
+                    ? Component.text((bidRound == 1 ? "轮到你定叫分" : "轮到你抢地主")
+                        + " · 点桌边按钮确认" + countdown, NamedTextColor.AQUA)
+                    : Component.text("当前由 ", NamedTextColor.GRAY)
+                        .append(identity.apply(currentTurn))
+                        .append(Component.text((bidRound == 1 ? " 正在定叫分" : " 正在抢地主") + countdown,
+                            NamedTextColor.GRAY));
+                Component revealLine = revealWindowComponent(revealWindow);
+                yield revealLine == null
+                    ? bidPrompt
+                    : revealLine.append(MuzTheme.divider(" · ")).append(bidPrompt);
+            }
             case DOUBLING -> viewerId.equals(currentTurn)
                 ? Component.text("轮到你决定加倍或不加倍 · 6 秒内点桌边按钮" + countdown, NamedTextColor.AQUA)
                 : Component.text("当前由 ", NamedTextColor.GRAY)

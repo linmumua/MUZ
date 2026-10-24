@@ -150,6 +150,35 @@ class GadgetPanelServiceTest {
     }
 
 
+    /**
+     * 跨 region 投递后才失败的创建，必须在下一次守护时被消费并进入退避，而不是每 2 秒重建并刷 SEVERE。
+     *
+     * <p>失败条件：失败标记只读不清（退避到期后被误判为持续失败）或完全不读（异步失败绕过退避）。
+     */
+    @Test
+    void 异步创建失败只消费一次且触发退避() throws Exception {
+        RecordingDisplay display = display();
+        UUID playerId = UUID.randomUUID();
+        openFailures(display).put(playerId, Boolean.TRUE);
+        assertTrue(display.openFailed(playerId), "夹具应模拟已投递任务晚到的失败");
+        assertTrue(display.consumeOpenFailure(playerId), "第一次读取必须拿到失败");
+        assertFalse(display.openFailed(playerId), "消费后不得残留旧失败");
+        assertFalse(display.consumeOpenFailure(playerId), "同一失败只能触发一次退避");
+
+        String source = Files.readString(Path.of("src/main/java/linmumua/doudizhu/game/GadgetPanelService.java"));
+        String open = source.substring(source.indexOf("public Status openChairPanels"), source.indexOf("public boolean refreshChairPanels"));
+        int consume = open.indexOf("display.consumeOpenFailure(playerId)");
+        assertTrue(consume >= 0, "开面板入口必须消费异步失败");
+        assertTrue(consume < open.indexOf("chairAnchors.capture(playerId"), "必须在再次重建前进入退避");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<UUID, Boolean> openFailures(ChairPanelDisplayService display) throws Exception {
+        Field field = ChairPanelDisplayService.class.getDeclaredField("openFailures");
+        field.setAccessible(true);
+        return (Map<UUID, Boolean>) field.get(display);
+    }
+
     /** 行为用例之外钉住真正的入口，防止只写出从未被调用的清理方法。 */
     @Test
     void 清理必须接入离桌关局与玩家生命周期() throws Exception {

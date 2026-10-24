@@ -43,8 +43,8 @@ public record TableSeatPose(
      * @param seatIndex   座位号 0..2，与牌桌座位表、椅子几何、按钮偏移用的是同一套编号
      * @param occupantId  该座位当前占位玩家；空座为 {@code null}
      * @param chair       椅面基准点姿态，{@code yaw} 已经是就座者朝向
-     * @param lateralX    座位横向轴（归一化、水平面内）的 X 分量
-     * @param lateralZ    座位横向轴的 Z 分量
+     * @param lateralX    座位横向轴（归一化、水平面内）的 X 分量；**+1 指向该座位玩家的右手边**
+     * @param lateralZ    座位横向轴的 Z 分量；符号语义同 {@code lateralX}
      */
     public record Seat(
         int seatIndex,

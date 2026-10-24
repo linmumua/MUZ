@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 「发牌期就能明牌」必须在**世界层**也成立：状态机允许、按钮不产出 = 玩家点不到。
  *
- * <p>1.10.63 起明牌窗口在首批（每人 3 张）发完就打开，而阶段切换仍由翻转结束负责，
+ * <p>1.10.73 起明牌窗口在第 3 批（每人 9 张）发完后只开 60 tick，而阶段切换仍由翻转结束负责，
  * 因此「窗口已开」的事实会出现在 {@code GamePhase.DEALING} 期。按钮判据若继续写
  * {@code phase == REVEALING}，玩家在整个发牌期都看不到按钮——这正是本轮要修的真实缺陷。
  *
@@ -106,6 +106,60 @@ class RevealButtonWindowWiringContractTest {
             "剩余秒必须读快照，不能在视图里另算");
         assertEquals(0, count(source, "Math.min("),
             "视图不该再对明牌倍率做上限钳制（上限归 RevealMultiplierLadder）");
+    }
+
+    /**
+     * 【1.10.73 抢地主加赛】BIDDING 阶段也必须能产出明牌按钮。
+     *
+     * <p>旧实现这里先按「当前叫分者」分流：非当前叫分者直接返回空表、当前叫分者只给四个叫分键。
+     * 于是明牌资格在 {@code BIDDING && bidRound == 2} 期间虽然成立，玩家却**永远看不到入口**——
+     * 状态机允许、UI 点不到，是本轮要修的真实缺陷。
+     *
+     * <p>这里锁三件事：判据仍由 {@code GameTable} 统一给出（window + canRevealHand）、
+     * 明牌动作仍是 {@code REVEAL_HAND}、且当前叫分者的四个叫分键**不被明牌键挤掉**。
+     */
+    @Test
+    void biddingPhaseOffersRevealButtonWithoutDroppingBidButtons() throws IOException {
+        String body = actionStatesBody(Files.readString(MANAGER));
+
+        int bidding = body.indexOf("if (table.getPhase() == GamePhase.BIDDING)");
+        assertTrue(bidding >= 0, "BIDDING 分支必须存在");
+        int biddingEnd = body.indexOf("// 明牌按钮的判据是「窗口」而不是「阶段」", bidding);
+        assertTrue(biddingEnd > bidding, "找不到 BIDDING 分支的结束边界");
+        String branch = body.substring(bidding, biddingEnd);
+
+        assertTrue(branch.contains("table.isRevealWindowOpen()"),
+            "BIDDING 分支必须用统一的窗口判据（含抢地主加赛延长），不能只看阶段");
+        assertTrue(branch.contains("table.canRevealHand(owner)"),
+            "是否可以点仍由 canRevealHand 统一决定（已明牌/机器人/离线都不给按钮）");
+        // 【1.10.73】五按钮布局已抽成「生产/测试共用」的静态工厂（ButtonHitboxSpacingTest 直接拿它的
+        // 真实 ActionButtonState 做碰撞断言），因此这里断言 BIDDING 分支**委托给工厂**，
+        // 再在工厂体内核对四个叫分键与 REVEAL_HAND 一个不少。
+        assertTrue(branch.contains("biddingWithRevealStates("),
+            "当前叫分者必须委托 biddingWithRevealStates（五按钮的唯一来源）");
+        assertTrue(branch.contains("biddingRevealOnlyStates("),
+            "非当前叫分者必须委托 biddingRevealOnlyStates（只有自己的明牌按钮）");
+        assertTrue(branch.contains("table.openingRevealButtonLabel()"),
+            "按钮文案必须取 GameTable 的当刻倍率文案（明牌 ×3/×2/×1）");
+
+        String source = Files.readString(MANAGER);
+        int factory = source.indexOf("static List<ActionButtonState> biddingWithRevealStates(");
+        assertTrue(factory >= 0, "找不到 biddingWithRevealStates 工厂");
+        String factoryBody = source.substring(factory,
+            source.indexOf("static List<ActionButtonState> biddingRevealOnlyStates(", factory));
+        assertTrue(factoryBody.contains("ButtonAction.REVEAL_HAND"),
+            "五按钮工厂必须真的产出 REVEAL_HAND 动作");
+        // 当前叫分者：四个叫分键一个都不能少（明牌是**追加**，不是替换）。
+        for (String bidAction : new String[] {
+            "ButtonAction.BID_0", "ButtonAction.BID_1", "ButtonAction.BID_2", "ButtonAction.BID_3"}) {
+            assertTrue(factoryBody.contains(bidAction),
+                "当前叫分者必须保留 " + bidAction + "（明牌按钮不得挤掉叫分入口）");
+        }
+        // 非当前叫分者仍要能拿到自己的明牌按钮：empty 早退必须排在明牌分支之后。
+        int revealBranch = branch.indexOf("revealAvailable");
+        int emptyReturn = branch.indexOf("if (!currentBidder)");
+        assertTrue(revealBranch >= 0 && emptyReturn > revealBranch,
+            "非当前叫分者的空表早退必须排在明牌分支之后，否则加赛期看不到自己的明牌按钮");
     }
 
     private static int count(String source, String token) {

@@ -48,17 +48,18 @@ public final class ChairPanelGeometry {
      * @return 顺序固定为 {@code [left, right]}；未启用或姿态缺失时为空列表
      */
     public static List<ChairPanelAnchor> panels(
-        UUID worldId,
+        TableSeatPose pose,
         TableSeatPose.Seat seat,
         ChairSidePanelSettings settings
     ) {
-        if (worldId == null || seat == null || seat.chair() == null
+        if (pose == null || pose.worldId() == null || pose.anchor() == null
+            || seat == null || seat.chair() == null
             || settings == null || !settings.enabled()) {
             return List.of();
         }
         return List.of(
-            panelOf(worldId, seat, settings, ChairSidePanelSettings.Side.LEFT),
-            panelOf(worldId, seat, settings, ChairSidePanelSettings.Side.RIGHT));
+            panelOf(pose, seat, settings, ChairSidePanelSettings.Side.LEFT),
+            panelOf(pose, seat, settings, ChairSidePanelSettings.Side.RIGHT));
     }
 
     /**
@@ -70,36 +71,55 @@ public final class ChairPanelGeometry {
      * 那是「左右是哪边」的唯一定义处，重复推导一次就会在偏航角上悄悄错位。
      */
     static ChairPanelAnchor panelOf(
-        UUID worldId,
+        TableSeatPose pose,
         TableSeatPose.Seat seat,
         ChairSidePanelSettings settings,
         ChairSidePanelSettings.Side side
     ) {
+        UUID worldId = pose.worldId();
         ChairSidePanelSettings.PanelLayout layout =
             side == ChairSidePanelSettings.Side.LEFT ? settings.left() : settings.right();
-        double yawRadians = Math.toRadians(seat.facingYaw());
-        // 面朝轴（朝桌子）：forward = (-sin yaw, 0, cos yaw)
-        double forwardX = -Math.sin(yawRadians);
-        double forwardZ = Math.cos(yawRadians);
-        // 右手轴：世界层给的归一化横向轴；退化（0,0）时按 yaw 兜底，避免面板全叠在椅子上。
+        // 【1.10.73：左右改按**每把椅子自己的**横向轴】旧实现取桌子 yaw 的右轴，
+        // 对三把椅子都用同一个世界方向——seat 1/2 会因此把「左右」投到椅子前后方向上，
+        // 两块板叠在椅子正前/正后而不是分列两侧。
+        // 现在直接用世界层快照里的座位横向轴（+1 = 该座位玩家的右手边，与 Side.RIGHT=+1 同符号），
+        // 它由 PhysicalTableManager.seatLateralAxis 按座位局部轴算出、再随桌子 yaw 旋转到世界，
+        // 因此恒垂直于「椅子 → 桌心」，且三把椅子各自正确。
         double rightX = seat.lateralX();
         double rightZ = seat.lateralZ();
-        if (Math.abs(rightX) < 1.0e-9 && Math.abs(rightZ) < 1.0e-9) {
-            rightX = -Math.cos(yawRadians);
-            rightZ = -Math.sin(yawRadians);
+
+        // 朝桌心：**统一用「椅子 → 桌心」这一条方向**给两块板做 depth 前移。
+        // 若各自用「自己 → 桌心」，两侧的方向不平行，会让两块板一近一远、破坏左右对称
+        // （本地几何测试就是靠「到桌心等距」这条不变量发现的）。
+        double towardX = pose.anchor().x() - seat.chair().x();
+        double towardZ = pose.anchor().z() - seat.chair().z();
+        double towardLength = Math.hypot(towardX, towardZ);
+        if (towardLength < 1.0e-9) {
+            // 椅子正好在桌心（异常配置）：退回就座者正前方，避免除零后整桌面板消失。
+            towardX = -Math.sin(Math.toRadians(seat.facingYaw()));
+            towardZ = Math.cos(Math.toRadians(seat.facingYaw()));
+        } else {
+            towardX /= towardLength;
+            towardZ /= towardLength;
         }
 
-        double x = seat.chair().x() + rightX * layout.lateral() + forwardX * layout.depth();
-        double z = seat.chair().z() + rightZ * layout.lateral() + forwardZ * layout.depth();
+        double x = seat.chair().x() + rightX * layout.lateral() + towardX * layout.depth();
+        double z = seat.chair().z() + rightZ * layout.lateral() + towardZ * layout.depth();
         double y = seat.chair().y() + layout.vertical();
 
+        // 朝向：面板正面朝桌心。
+        // `viewerYawToward(dx, dz)` 返回「观察者朝该 yaw 看时 forward 指向 (dx,dz)」，
+        // 而面板法线 = -forward。要让**法线**指向桌心，就要让 forward 指向**背离**桌心的方向，
+        // 因此这里传「面板 - 桌心」而不是「桌心 - 面板」（差一个 180°，实服会看到板子背面）。
+        double toTableX = x - pose.anchor().x();
+        double toTableZ = z - pose.anchor().z();
         return new ChairPanelAnchor(
             panelIdOf(side),
             worldId,
             x,
             y,
             z,
-            anchorYawDegrees(x - seat.chair().x(), z - seat.chair().z(), layout.yaw()),
+            anchorYawDegrees(toTableX, toTableZ, layout.yaw()),
             (float) layout.pitch(),
             (float) layout.roll(),
             settings.width(),

@@ -100,7 +100,8 @@ class TableSeatPoseTest {
 
         assertTrue(body.contains("chairLocation(placed,"), "椅子坐标必须复用既有 chairLocation");
         assertTrue(body.contains("handCardYaw(placed.yaw()"), "就座朝向必须复用既有 handCardYaw");
-        assertTrue(body.contains("actionStep(seatIndex)"), "横向轴必须复用座位横向轴口径");
+        assertTrue(body.contains("seatLateralAxis(seatIndex)"),
+            "横向轴必须复用座位自身的横向轴 seatLateralAxis（actionStep 对 seat 1/2 手性相反）");
         assertTrue(body.contains("placed.seatAssignments()"), "占位玩家必须取自放置快照");
 
         assertFalse(body.contains("Bukkit.getEntity"), "快照不得解析 Bukkit 实体");

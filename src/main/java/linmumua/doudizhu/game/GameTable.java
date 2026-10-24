@@ -868,7 +868,7 @@ public final class GameTable {
      * 明牌窗口内自愿公开手牌；不再绑定叫分回合。
      *
      * <p>【倍率不再是常量】：以前这里是 {@code revealMultiplier = 2;}，即「一局最多 ×2」。
-     * 现在明牌窗口从首批发完就开始，倍率随已完成批数递减（3 → 2 → 1，见
+     * 现在明牌窗口在第 3 批（每人 9 张）发完后只开 60 tick，倍率随已完成批数递减（3 → 2 → 1，见
      * {@link RevealMultiplierLadder}），所以**点击当刻冻结**阶梯给出的倍率。
      */
     public void revealHand(Player player) {
@@ -935,26 +935,66 @@ public final class GameTable {
     }
 
     /**
-     * 明牌窗口是否开着。
+     * 明牌窗口是否开着——**本类内关于「能不能明牌」的唯一状态源**。
      *
-     * <p>【判据变化】：以前要求 {@code phase == REVEALING}，因为窗口本来就只在翻转结束时才开。
-     * 现在窗口从首批发完就打开（此时 phase 仍是 DEALING），所以阶段判据必须同时接受 DEALING 与
-     * REVEALING；否则 {@link #canRevealHand} 在发牌期恒为 false，第一批的 ×3 永远点不到。
-     * 真正的「开没开」由协调器决定，这里的阶段判断只用于挡掉 BIDDING 之后的迟到查询。
+     * <p>【判据变化】旧实现要求 {@code phase == REVEALING}，因为窗口只在翻转结束时才开。
+     * 现在窗口是「第 3 批发完后的 60 tick 限时窗口」（此时 phase 仍是 DEALING），
+     * 所以阶段判据必须同时接受 DEALING 与 REVEALING；真正的「开没开」由协调器决定。
+     *
+     * <p>【1.10.73：抢地主期间资格延长】用户要求「三次发牌后开 3 秒，抢地主则保留到叫分结束」。
+     * 限时窗口归零后，若本局进入抢地主加赛（{@code BIDDING && bidRound == 2}），资格延续到叫分结束。
+     * 延长的前提是**本局确实开过窗口**（协调器的 per-round 闩锁），否则叫分阶段会凭空多出明牌入口。
+     *
+     * <p>延长之所以放在这里而不是协调器里：协调器只管发牌时间线，叫分是牌桌的阶段；
+     * 但**只有这一处**做判断，{@link #canRevealHand}、{@link #currentRevealMultiplier}、
+     * {@link #getRevealWindowSnapshot}、{@link #revealHand} 二次复核与按钮生成全部读它，
+     * 不允许任何调用方自己再判一次阶段。
      */
-    public boolean isOpeningRevealWindow() {
-        if (roundOpeningCoordinator == null || !roundOpeningCoordinator.isRevealWindowOpen()) {
-            return false;
-        }
-        return phase == GamePhase.DEALING || phase == GamePhase.REVEALING;
+    public boolean isRevealWindowOpen() {
+        // 明牌资格 = 开局限时窗口 ∪ 抢地主加赛的资格延长。这是**唯一**的资格判据，
+        // canRevealHand / currentRevealMultiplier / 快照 / revealHand / 世界按钮都读它。
+        return isOpeningRevealWindow() || isRevealExtendedIntoBidding();
     }
 
-    public boolean isRevealWindowOpen() {
-        return isOpeningRevealWindow();
+    /**
+     * **开局时间线（DEALING / REVEALING）内的限时明牌窗口**。
+     *
+     * <p>【1.10.73 收口：不再 alias 到 {@link #isRevealWindowOpen()}】这两个概念必须分开：
+     * <ul>
+     *   <li>本方法只回答「发牌/翻转这段开局动画里，限时窗口是否开着」——它是
+     *       {@link OpeningPresentationSnapshot#revealWindowOpen()} 的取值来源，
+     *       而该快照被 {@code PhysicalTableManager} 用来驱动手牌翻转/发牌动画；</li>
+     *   <li>{@link #isRevealWindowOpen()} 还包含 {@code BIDDING && bidRound == 2} 的资格延长。</li>
+     * </ul>
+     * 若这里继续 alias，叫分加赛期 {@code phase == BIDDING} 会被 {@code getOpeningPresentationSnapshot()}
+     * 误报成「开局动画还在进行」——表现出来就是叫分期手牌重新摆成发牌/翻转姿态。
+     * 延长只允许经 {@link #isRevealWindowOpen()} 与 {@link #getRevealWindowSnapshot} 暴露。
+     */
+    public boolean isOpeningRevealWindow() {
+        if (roundOpeningCoordinator == null) {
+            return false;
+        }
+        return roundOpeningCoordinator.isRevealWindowOpen()
+            && (phase == GamePhase.DEALING || phase == GamePhase.REVEALING);
+    }
+
+    /**
+     * 是否处于「抢地主加赛的明牌资格延长」期。
+     *
+     * <p>三个条件缺一不可：本局开过窗口（不是凭空给资格）、当前阶段是 BIDDING、且已进入第 2 轮叫分。
+     * 叫分结束切到 DOUBLING/PLAYING 后 {@code phase} 不再等于 BIDDING，本方法立即为 false，
+     * 窗口随之关闭——不需要额外的关闭钩子，也就不存在「忘了关」的状态。
+     */
+    private boolean isRevealExtendedIntoBidding() {
+        return phase == GamePhase.BIDDING
+            && bidRound >= 2
+            && roundOpeningCoordinator != null
+            && roundOpeningCoordinator.revealWindowEverOpened();
     }
 
     public boolean canRevealHand(UUID playerId) {
-        if (!isOpeningRevealWindow() || playerId == null || !contains(playerId)
+        if (!isRevealWindowOpen()
+            || playerId == null || !contains(playerId)
             || isBot(playerId) || revealedHandPlayers.contains(playerId)) {
             return false;
         }
@@ -966,12 +1006,21 @@ public final class GameTable {
     }
 
     /**
-     * 此刻点明牌会冻结到的倍率；窗口未开时返回 0（不可明牌）。
+     * 此刻点明牌会冻结到的倍率；窗口不可用（含延长不成立）时返回 0（不可明牌）。
      *
-     * <p>UI/面板应据此决定是否显示、显示多少；不要自己按剩余秒数推算批次。
+     * <p>【唯一来源】限时窗口直接向协调器要值；抢地主延长期沿用同一个
+     * {@link RevealMultiplierLadder} 纯函数，按「已发完批数」取值（叫分阶段必为 6 → 下限 1）。
+     * 不允许在这里另写一个算式——那正是「canReveal=true 但倍率 0」的来源。
      */
     public int currentRevealMultiplier() {
-        return roundOpeningCoordinator == null ? 0 : roundOpeningCoordinator.currentRevealMultiplier();
+        if (!isRevealWindowOpen()) {
+            return 0;
+        }
+        if (isRevealExtendedIntoBidding()) {
+            return RevealMultiplierLadder.multiplierForCompletedBatches(
+                Math.max(openingCompletedDealBatches(), RevealMultiplierLadder.FIRST_REVEALABLE_BATCH));
+        }
+        return roundOpeningCoordinator.currentRevealMultiplier();
     }
 
     /** 已完整发完的批次数（0..6），用于展示「第 N 批」这类信息。 */
@@ -988,9 +1037,13 @@ public final class GameTable {
     }
 
     /**
-     * 明牌按钮文案：模板来自配置，{@code %multiplier%} 换成**当刻**可冻结倍率。
+     * 明牌按钮/窗口文案：模板来自配置，{@code %multiplier%} 换成**当刻**可冻结倍率。
      *
      * <p>窗口关闭时按下限 1 替换，避免出现「明牌 ×0」这种既不可点又难看的文案。
+     *
+     * <p>【1.10.73：延长期不写「剩余 0 秒」】抢地主加赛延长期间没有倒计时可言
+     * （限时窗口早已归零），因此这里改用不含 {@code %seconds%} 的按钮模板，
+     * 只报当刻倍率；否则 {@code revealing} 模板会把「还剩 0 秒」原样甩给玩家。
      */
     public String openingRevealButtonLabel() {
         int multiplier = Math.max(
@@ -1010,23 +1063,27 @@ public final class GameTable {
      * @param playerId 视角玩家，可为 null（此时 {@code youRevealed} 恒为 false）
      */
     public RevealWindowSnapshot getRevealWindowSnapshot(UUID playerId) {
+        boolean extended = isRevealExtendedIntoBidding();
         return new RevealWindowSnapshot(
             isRevealWindowOpen(),
-            openingRemainingSeconds(),
+            // 延长期没有剩余秒数：用 -1 明确表达「不是倒计时」，而不是伪装成 0 秒。
+            extended ? -1 : openingRemainingSeconds(),
             currentRevealMultiplier(),
             revealMultiplier,
             openingCompletedDealBatches(),
-            isHandRevealed(playerId)
+            isHandRevealed(playerId),
+            extended
         );
     }
 
     /**
-     * @param open            窗口是否开着
-     * @param remainingSeconds 整个合法窗口的剩余秒数（已含发牌期预测，不是只看尾部）
+     * @param open            窗口是否可用（限时窗口开着，或本局抢地主加赛的资格延长中）
+     * @param remainingSeconds 剩余秒数；{@code -1} 表示延长期（无倒计时，UI 不得显示「剩余 0 秒」）
      * @param currentMultiplier 此刻点击会冻结的倍率；0 表示不可明牌
      * @param appliedMultiplier 本局已生效的表级明牌倍率（单调不减）
      * @param completedDealBatches 已完整发完的批次数
      * @param youRevealed     该玩家这一局是否已经明牌
+     * @param extendedIntoBidding 是否处于抢地主加赛的资格延长（限时窗口已归零，仅剩资格）
      */
     public record RevealWindowSnapshot(
         boolean open,
@@ -1034,7 +1091,8 @@ public final class GameTable {
         int currentMultiplier,
         int appliedMultiplier,
         int completedDealBatches,
-        boolean youRevealed
+        boolean youRevealed,
+        boolean extendedIntoBidding
     ) {
     }
 
@@ -1511,7 +1569,7 @@ public final class GameTable {
     }
 
     /**
-     * 首批发完、明牌窗口刚打开：此刻 phase 仍是 DEALING，所以这里只做提示，<b>不改阶段</b>。
+     * 第三批（每人 9 张）发完、明牌窗口刚打开：此刻 phase 仍是 DEALING，所以这里只做提示，<b>不改阶段</b>。
      *
      * <p>阶段切换仍然由翻转结束的 {@link #onOpeningRevealWindowStarted()} 负责——把 DEALING 提前切走
      * 会连带改坏发牌期的手牌锁、发牌文案与渲染分支。
@@ -1524,7 +1582,7 @@ public final class GameTable {
 
     private void onOpeningRevealWindowStarted() {
         phase = GamePhase.REVEALING;
-        // 窗口开启的公告已在首批完成时发过；这里只做阶段切换，避免同一件事提示两遍。
+        // 窗口开启的公告已在第三批完成时发过；这里只做阶段切换，避免同一件事提示两遍。
         tickActionBar();
     }
 

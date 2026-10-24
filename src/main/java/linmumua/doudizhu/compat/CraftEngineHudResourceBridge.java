@@ -784,9 +784,11 @@ public final class CraftEngineHudResourceBridge implements HudResourcePackBridge
         java.util.TreeSet<String> names = new java.util.TreeSet<>();
         Class<?> current = target.getClass();
         while (current != null && current != Object.class) {
-            for (java.lang.reflect.Method method : current.getDeclaredMethods()) {
-                if (method.getParameterCount() == 0) {
-                    names.add(method.getName() + "()");
+            for (List<ClassMethod> overloads : analyse(current).getStructure().getMethodsMap().values()) {
+                for (ClassMethod method : overloads) {
+                    if (method.getParameterTypes().length == 0) {
+                        names.add(method.getName() + "()");
+                    }
                 }
             }
             current = current.getSuperclass();

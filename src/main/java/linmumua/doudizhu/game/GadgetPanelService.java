@@ -100,6 +100,21 @@ public class GadgetPanelService {
      */
     private final Map<UUID, String> panelTableNames = new ConcurrentHashMap<>();
 
+    /**
+     * 面板打开失败后的退避截止时间（nanoTime）。
+     *
+     * <p>【为什么需要退避】PLAYING 阶段有一个每 2 秒最多一次的常驻守护，它只看
+     * {@code chairPanelsVisible}：只要面板没开出来就会再调一次 {@link #openChairPanels}。
+     * 若失败是**持续性**的（例如世界/region 异常、锚点算不出来），守护就会每 2 秒重试一次，
+     * 每次都在 {@code ChairPanelDisplayService.failAttempt} 里记一条 SEVERE——
+     * 既刷屏又没有意义（同一份输入必然同样失败）。因此失败后 30 秒内直接返回失败状态、
+     * 不再重复创建实体；成功一次即清除退避。
+     */
+    private static final long CHAIR_PANEL_FAILURE_BACKOFF_NANOS = 30_000_000_000L;
+
+    /** 玩家 → 失败退避截止（nanoTime）；并发容器，任意 lane 只读快照。 */
+    private final Map<UUID, Long> chairPanelRetryAfter = new ConcurrentHashMap<>();
+
     public GadgetPanelService(
         DoudizhuPlugin plugin,
         TableGadgetBarHudService bar,
@@ -262,23 +277,51 @@ public class GadgetPanelService {
         if (display == null) {
             return Status.PANEL_OPEN_FAILED;
         }
+        UUID playerId = player.getUniqueId();
+        // 【1.10.73：正在创建中就不要重开】open() 的第一步是 close()，而 close() 会摘掉
+        // 进行中的 OpenAttempt。守护每 2 秒来一次，若这里不判 pending，就会把上一次投递
+        // 到锚点 region 的创建任务作废（其回调发现 attempt 已被取代 → 拆掉刚建好的实体），
+        // 面板永远开不出来且每 2 秒重建一次。
+        if (display.isOpenPending(playerId)) {
+            return Status.OK;
+        }
+        // 【失败退避】持续性失败时守护每 2 秒重试只会重复刷 SEVERE；退避期内直接返回失败，
+        // 不创建任何实体、也不再记日志。调用方（命令/守护）仍能拿到明确的失败状态。
+        Long retryAfter = chairPanelRetryAfter.get(playerId);
+        if (retryAfter != null && System.nanoTime() < retryAfter) {
+            return Status.PANEL_OPEN_FAILED;
+        }
+        // 【跨 region 的异步失败也必须进入退避】上一次 open 若是投递到锚点 region、之后才失败，
+        // 当时这里已按「已受理」返回 OK，退避没有生效；失败标记只会在下一次 open 开头被清掉。
+        // 若不在这里先消费它，守护每 2 秒就会重开一次并再记一条 SEVERE。
+        if (display.consumeOpenFailure(playerId)) {
+            chairPanelRetryAfter.put(playerId, System.nanoTime() + CHAIR_PANEL_FAILURE_BACKOFF_NANOS);
+            return Status.PANEL_OPEN_FAILED;
+        }
         // 每次开面板都按当前配置重拍一次：配置可能在 /muz reload 后变过，冻结旧几何会摆错位置。
-        java.util.List<ChairPanelAnchor> anchors =
-            chairAnchors.capture(player.getUniqueId(), chairSettings);
+        java.util.List<ChairPanelAnchor> anchors = chairAnchors.capture(playerId, chairSettings);
         if (anchors.isEmpty()) {
             return Status.ANCHORS_NOT_READY;
         }
-        if (!display.open(player, anchors, chairSlots(player.getUniqueId()), chairSelected(player.getUniqueId()))) {
+        boolean accepted = display.open(player, anchors, chairSlots(playerId), chairSelected(playerId));
+        // 【异步失败必须可观察】open() 返回 true 只代表"已受理"（可能是跨 region 投递）。
+        // 真正的结果要么已登记（isOpen），要么仍在进行（isOpenPending），要么已失败（openFailed）。
+        if (!accepted || display.openFailed(playerId)) {
+            chairPanelRetryAfter.put(playerId, System.nanoTime() + CHAIR_PANEL_FAILURE_BACKOFF_NANOS);
             return Status.PANEL_OPEN_FAILED;
         }
-        panelTableNames.put(player.getUniqueId(), tableNameOf(player));
+        chairPanelRetryAfter.remove(playerId);
+        panelTableNames.put(playerId, tableNameOf(player));
         return Status.OK;
     }
 
     /**
      * 按最新的冻结快照就地刷新两块椅侧面板的位置与朝向（Dialog 改完几何后应用）。
      *
-     * <p>只用 {@code updatePanelAnchor}，不重建会话：重建会丢点击态与动画，且会闪一下。
+     * <p>【1.10.73 勘误：这里实际是"先拆后建"】内置渲染没有 {@code updatePanelAnchor} 这种
+     * 就地更新入口：{@link ChairPanelDisplayService#open} 会先 {@code close} 再按新锚点重建两块板。
+     * 因此本方法**会**丢点击态并有一帧闪烁——但 Dialog 保存布局是低频操作，重建能保证
+     * 几何、图标与选中态一次到位，比"位置更新了但图标还是旧槽"的半更新更可接受。
      * 面板尚未打开时返回 false（由调用方决定是否改走 {@link #openChairPanels}）。
      *
      * <p>IMPORTANT LANE: 必须在 player lane 调用。
@@ -318,6 +361,24 @@ public class GadgetPanelService {
         panelTableNames.remove(player.getUniqueId());
         // 已应用的锚点随之作废：否则下次 sync 会误判「位置没变」而不重开。
         appliedAnchors.remove(player.getUniqueId());
+    }
+
+    /** 该玩家的面板创建是否仍在进行（跨 region 投递未收口）；任意 lane 安全。 */
+    public boolean chairPanelOpenPending(UUID playerId) {
+        ChairPanelDisplayService display = chairPanelDisplay;
+        return display != null && display.isOpenPending(playerId);
+    }
+
+    /** 该玩家最近一次面板创建是否失败（异步失败也能观察到）；任意 lane 安全。 */
+    public boolean chairPanelOpenFailed(UUID playerId) {
+        ChairPanelDisplayService display = chairPanelDisplay;
+        return display != null && display.openFailed(playerId);
+    }
+
+    /** 该玩家是否处于失败退避期（用于诊断与测试，不改变任何行为）。 */
+    public boolean chairPanelRetryBlocked(UUID playerId) {
+        Long retryAfter = playerId == null ? null : chairPanelRetryAfter.get(playerId);
+        return retryAfter != null && System.nanoTime() < retryAfter;
     }
 
     /** 该玩家的椅侧面板是否仍在渲染（纯内存查询，任意 lane 安全）。 */
@@ -482,13 +543,15 @@ public class GadgetPanelService {
         UUID playerId = player.getUniqueId();
         java.util.List<ChairPanelAnchor> anchors = chairAnchors.capture(playerId, chairSettings);
         if (anchors.isEmpty()) {
-            if (bridge.panelIds(player).isEmpty()) {
+            if (!chairPanelsVisible(playerId)) {
                 return false;
             }
             closeChairPanels(player);
             return true;
         }
-        if (bridge.panelIds(player).isEmpty()) {
+        // 【1.10.73】判据改成**内置渲染器自己的**状态，不再问 MuMenu 的 panelIds：
+        // 面板由 MUZ 自己绘制，MuMenu 装没装、支不支持锚定面板，与这里的重绘没有关系。
+        if (!chairPanelsVisible(playerId)) {
             return false;
         }
         refreshChairPanels(player);
@@ -549,7 +612,11 @@ public class GadgetPanelService {
             return false;
         }
         UUID playerId = player.getUniqueId();
-        if (shouldHideChairPanels(player) || !bridge.supportsAnchoredPanels()) {
+        // 【1.10.73：不再以 MuMenu 锚定面板能力为前置条件】面板由 MUZ 内置渲染
+        // （ChairPanelDisplayService），MuMenu 的 supportsAnchoredPanels() 只描述**那个插件**
+        // 能不能开锚定面，与本插件自己画的两块板无关。这里继续拿它当门禁，会把
+        // 「没装 MuMenu / 版本不带锚定 API」的服务器变成「椅侧面板永远不出现」。
+        if (shouldHideChairPanels(player)) {
             return closeChairPanelsIfPresent(player);
         }
         // 换桌是**合法**的状态变化，不是「跨桌违规」：先丢掉旧桌记录，避免 openChairPanels 里的
@@ -637,9 +704,12 @@ public class GadgetPanelService {
         return !tablePresent || !playingAndHuman;
     }
 
-    /** 只在确实有面板可关时才调 closePanels，避免对每个边界都白跑一次反射调用。 */
+    /** 只在确实有面板可关时才收口，避免对每个边界都白跑一次清理。 */
     private boolean closeChairPanelsIfPresent(Player player) {
-        if (bridge.panelIds(player).isEmpty() && !chairAnchors.hasSnapshot(player.getUniqueId())) {
+        // 【1.10.73】「有没有面板」只问内置渲染器：MuMenu 的 panelIds 描述的是**它自己**的面板，
+        // 与本插件的两块世界体无关。拿它当判据会导致「面板明明开着却关不掉」。
+        boolean visible = chairPanelDisplay != null && chairPanelDisplay.isOpen(player.getUniqueId());
+        if (!visible && !chairAnchors.hasSnapshot(player.getUniqueId())) {
             return false;
         }
         closeChairPanels(player);
@@ -660,6 +730,7 @@ public class GadgetPanelService {
         }
         panelTableNames.remove(playerId);
         appliedAnchors.remove(playerId);
+        chairPanelRetryAfter.remove(playerId);
         chairAnchors.forget(playerId);
     }
 
@@ -678,6 +749,14 @@ public class GadgetPanelService {
     public void shutdown() {
         panelTableNames.clear();
         chairAnchors.shutdown();
+        chairPanelRetryAfter.clear();
+        // 【关闭期清理缺口】内置渲染持有真实世界实体（底板/边框/卡片/图标/文字/判定盒）。
+        // 之前 shutdown 只清单据，实体只能靠 persistent=false 在重启后自然消失；
+        // reload 场景下插件不重启、旧实体就会留在世界里。这里显式收口。
+        ChairPanelDisplayService display = chairPanelDisplay;
+        if (display != null) {
+            display.shutdown();
+        }
     }
 
     /** 结果对应的玩家提示文本。 */

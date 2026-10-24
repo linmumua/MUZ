@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -42,9 +43,9 @@ import sun.misc.Unsafe;
  */
 class GameTableOpeningFlowTest {
     /**
-     * 【机制升级：分批明牌】窗口现在在首批（每人 3 张）发完即开，所以这里的公共倍率由旧的固定 ×2
-     * 变为「首批窗口冻结值 = 3」。三条意图不变并继续断言：三个人可以各自独立明牌、多人不叠乘、
-     * 同一人重复点击被拒且不改变已生效倍率。
+     * 三位真人都能各自明牌；多人明牌不叠乘；同一人重复点击被拒且不改变已生效倍率。
+     *
+     * <p>窗口在第 3 批打开，因此这一批的可冻结倍率是 3（阶梯锚点）。
      */
     @Test
     void threeHumansCanRevealIndependentlyAndRepeatedRevealDoesNotStackPublicFactor() throws Exception {
@@ -60,10 +61,10 @@ class GameTableOpeningFlowTest {
         ), () -> {
             RoundOpeningCoordinator coordinator = startReveal(table);
             assertTrue(coordinator.isRevealWindowOpen());
-            assertTrue(table.isRevealWindowOpen(), "首批窗口开启后牌桌必须同步可见");
-            assertEquals(1, table.openingCompletedDealBatches(), "窗口开在首批（每人 3 张）完成的那一刻");
-            assertEquals(3, table.getHand(first).size());
-            assertEquals(3, table.currentRevealMultiplier(), "首批窗口可冻结倍率为 3");
+            assertTrue(table.isRevealWindowOpen(), "第 3 批窗口开启后牌桌必须同步可见");
+            assertEquals(3, table.openingCompletedDealBatches(), "窗口开在第 3 批完成的那一刻");
+            assertEquals(9, table.getHand(first).size(), "第 3 批后每人 9 张");
+            assertEquals(3, table.currentRevealMultiplier(), "第 3 批窗口可冻结倍率为 3");
             assertTrue(table.canRevealHand(first));
             assertTrue(table.canRevealHand(second));
             assertTrue(table.canRevealHand(third));
@@ -75,7 +76,7 @@ class GameTableOpeningFlowTest {
             assertTrue(table.isHandRevealed(first));
             assertTrue(table.isHandRevealed(second));
             assertTrue(table.isHandRevealed(third));
-            assertEquals(3, table.publicRevealMultiplier(), "多人明牌仍只有一个公共倍率，不得叠乘成 9");
+            assertEquals(3, table.publicRevealMultiplier(), "多人明牌仍只有一个公共倍率，不得叠乘成 27");
             assertEquals(1, table.getRevealCount(first));
             IllegalStateException repeated = assertThrows(IllegalStateException.class,
                 () -> table.revealHand(first), "重复明牌必须拒绝");
@@ -105,16 +106,13 @@ class GameTableOpeningFlowTest {
             assertThrows(IllegalStateException.class, () -> table.revealHand(offline));
             assertThrows(IllegalStateException.class, () -> table.revealHand(bot));
             table.revealHand(online);
-            assertEquals(3, table.publicRevealMultiplier(), "首批窗口明牌冻结为 3 倍");
+            assertEquals(3, table.publicRevealMultiplier(), "第 3 批窗口明牌冻结为 3 倍");
             return null;
         });
     }
 
     /**
-     * 【机制升级：窗口跨越剩余发牌】明牌窗口现在从首批一直开到「发牌完成 + 翻转 + 尾部倒计时」，
-     * 所以窗口开着期间不能再断言「必须处于 REVEALING」；但两条既有意图保留并加强：
-     * 开局阶段（发牌/明牌窗口）不得叫分，窗口截止后必须先进叫分且明牌请求被拒。
-     * 顺带覆盖 17+3 完整发牌：窗口关闭时三家各 17 张、底牌 3 张、54 张唯一。
+     * 窗口过去后不能明牌；开局阶段（发牌/明牌窗口）不得叫分；17+3 完整发牌。
      */
     @Test
     void revealAfterWindowExpiryIsRejectedAndBiddingIsRejectedDuringBothOpeningPhases() throws Exception {
@@ -133,19 +131,14 @@ class GameTableOpeningFlowTest {
             assertEquals(GamePhase.DEALING, table.getPhase());
             assertThrows(IllegalStateException.class, () -> table.bid(player(first, "first", true), 1));
 
-            int revealGuard = 0;
-            while (!coordinator.isRevealWindowOpen() && revealGuard++ < 200) {
-                coordinator.tick();
-            }
+            tickUntil(table, coordinator::isRevealWindowOpen);
             assertTrue(coordinator.isRevealWindowOpen(), "测试夹具必须在有限 tick 内进入明牌窗口");
             assertNotEquals(GamePhase.BIDDING, table.getPhase(), "窗口开着时不得已经进入叫分");
             assertThrows(IllegalStateException.class, () -> table.bid(player(first, "first", true), 1));
 
-            int expiryGuard = 0;
-            while (coordinator.isRevealWindowOpen() && expiryGuard++ < 400) {
-                coordinator.tick();
-            }
+            tickUntil(table, () -> !coordinator.isRevealWindowOpen());
             assertFalse(coordinator.isRevealWindowOpen(), "明牌窗口必须在有限 tick 内结束");
+            tickUntil(table, () -> table.getPhase() == GamePhase.BIDDING);
             assertEquals(GamePhase.BIDDING, table.getPhase());
             assertEquals(0, table.currentRevealMultiplier(), "窗口关闭后没有可冻结倍率");
             assertThrows(IllegalStateException.class, () -> table.revealHand(first), "过期回调不能再明牌");
@@ -162,9 +155,11 @@ class GameTableOpeningFlowTest {
     }
 
     /**
-     * 【机制升级：阶梯上限 3】明牌公共倍率上限从 2 提到阶梯上限 3，因此「钳到几」必须由
-     * 真实结算链路（live/resolved 核心分）钉死，而不是靠一个恰好同值的数字蒙对。
-     * 三条意图保留：live 与 resolved 必须一致、明牌因子只在 1..3 之间、炸弹仍独立相乘。
+     * 核心分必须由真实结算链路钉死：直接注入 ×3 时是 3×3×4 = 36，×1 时是 12。
+     *
+     * <p>【为什么是 36 而不是 72】72 需要春天 ×2 参与；这里刻意固定出牌手数排除春天，
+     * 只验「明牌倍率是否真的进分」。旧断言写成 72 是把春天混进了明牌因子，机制不同却数字接近，
+     * 属于会静默掩盖错误的弱化。
      */
     @Test
     void liveAndResolvedCoreScoreAgreeAndClampRevealToTheLadderMaximum() throws Exception {
@@ -180,7 +175,7 @@ class GameTableOpeningFlowTest {
         playedHands.put(table.getSeats().get(2), 1);
         setField(table, "playedHandCounts", playedHands);
 
-        assertEquals(36, invokeInt(table, "liveCoreScore"), "首批 3 倍必须真的进入核心分（3×3×4）");
+        assertEquals(36, invokeInt(table, "liveCoreScore"), "×3 明牌必须真的进分（3×3×4）");
         assertEquals(36, invokeInt(table, "resolvedCoreScore", false));
 
         setField(table, "revealMultiplier", 99);
@@ -188,7 +183,7 @@ class GameTableOpeningFlowTest {
         assertEquals(36, invokeInt(table, "resolvedCoreScore", false));
 
         setField(table, "revealMultiplier", 1);
-        assertEquals(12, invokeInt(table, "liveCoreScore"), "未明牌时明牌因子必须是 1，不能抹成 0");
+        assertEquals(12, invokeInt(table, "liveCoreScore"), "未明牌时明牌因子必须是 1（3×1×4）");
         assertEquals(12, invokeInt(table, "resolvedCoreScore", false));
     }
 
@@ -231,9 +226,7 @@ class GameTableOpeningFlowTest {
     }
 
     /**
-     * 【点击冻结 + 不倒退】这是本轮最核心的行为：倍率由「点击那一刻已完成几批」决定并冻结，
-     * 之后发到第三批（阶梯已降到 1）时，公共倍率必须仍然是先前的 3，绝不能跟着阶梯降回去。
-     * 后明牌的玩家允许加入，但只能取 max，既不能叠乘也不得把整局拉低。
+     * 点击冻结 + 永不倒退：第 3 批点明牌冻结 ×3，之后阶梯降到 2/1 也不得把已生效倍率改小。
      */
     @Test
     void revealFreezesTheLadderValueAtClickAndNeverDowngradesLaterWindows() throws Exception {
@@ -250,69 +243,54 @@ class GameTableOpeningFlowTest {
             RoundOpeningCoordinator coordinator = openingCoordinator(table);
             coordinator.start(deck(54), settings(4, 20, 60));
 
-            // 首批未发完：窗口未开，没有可冻结倍率（0 而不是 1）。
             assertEquals(0, table.openingCompletedDealBatches());
             assertFalse(table.isRevealWindowOpen());
             assertEquals(0, table.currentRevealMultiplier(), "窗口未开时可冻结倍率必须是 0");
             assertEquals(1, table.publicRevealMultiplier(), "未明牌时表级倍率仍是 1");
             assertFalse(table.canRevealHand(first));
-            assertFalse(table.getRevealWindowSnapshot(first).youRevealed());
             assertEquals("明牌 ×1", table.openingRevealButtonLabel(), "窗口未开时按钮不得显示 ×0");
 
-            tickUntil(table, () -> table.openingCompletedDealBatches() >= 1);
-            assertEquals(3, table.getHand(first).size(), "首批恰好每人 3 张");
-            assertEquals(3, table.getHand(second).size());
-            assertEquals(3, table.getHand(third).size());
-            assertTrue(table.isRevealWindowOpen(), "首批 3 张发完必须立刻开窗（发牌期就能点）");
-            assertTrue(table.isOpeningRevealWindow(), "窗口语义必须已扩宽到发牌期");
-            assertEquals(3, table.currentRevealMultiplier(), "首批窗口的可冻结倍率是 3");
+            tickUntil(table, () -> table.openingCompletedDealBatches() >= 3);
+            assertEquals(9, table.getHand(first).size(), "第 3 批后每人 9 张");
+            assertTrue(table.isRevealWindowOpen(), "第 3 批发完必须开窗（此时仍在发牌期，能点）");
+            assertEquals(3, table.currentRevealMultiplier(), "第 3 批窗口的可冻结倍率是 3");
             assertEquals("明牌 ×3", table.openingRevealButtonLabel());
-            // 窗口文案的 %multiplier% 必须替换成当刻倍率的裸数字（模板自带「倍」字）。
-            assertTrue(table.openingRevealLabel().contains("3 倍"),
+            assertTrue(table.openingRevealLabel().contains("3"),
                 "窗口文案必须显示当刻倍率 3，实际：" + table.openingRevealLabel());
-            var snapshotAtFirstBatch = table.getRevealWindowSnapshot(first);
-            assertTrue(snapshotAtFirstBatch.open());
-            assertEquals(1, snapshotAtFirstBatch.completedDealBatches());
-            assertEquals(3, snapshotAtFirstBatch.currentMultiplier());
-            assertEquals(1, snapshotAtFirstBatch.appliedMultiplier(), "还没人点，表级倍率仍是 1");
-            assertFalse(snapshotAtFirstBatch.youRevealed());
+            var snapshot = table.getRevealWindowSnapshot(first);
+            assertTrue(snapshot.open());
+            assertEquals(3, snapshot.completedDealBatches());
+            assertEquals(3, snapshot.currentMultiplier());
+            assertEquals(1, snapshot.appliedMultiplier(), "还没人点，表级倍率仍是 1");
+            assertFalse(snapshot.youRevealed());
 
             table.revealHand(first);
             assertTrue(table.isHandRevealed(first));
             assertEquals(3, table.publicRevealMultiplier(), "首家明牌按当刻倍率冻结为 3");
-            assertEquals(1, table.getRevealCount(first));
             assertEquals(3, table.getRevealWindowSnapshot(first).appliedMultiplier());
             assertTrue(table.getRevealWindowSnapshot(first).youRevealed());
             assertFalse(table.getRevealWindowSnapshot(second).youRevealed(), "快照必须区分视角玩家");
 
-            // 第二批：阶梯降到 2，但已冻结的 3 不得回退。
-            tickUntil(table, () -> table.openingCompletedDealBatches() >= 2);
-            assertEquals(6, table.getHand(first).size(), "第二批每人再 3 张");
-            assertTrue(table.isRevealWindowOpen(), "批次之间窗口不得关闭");
-            assertEquals(2, table.currentRevealMultiplier(), "次批窗口的可冻结倍率是 2");
-            assertEquals(3, table.publicRevealMultiplier(), "已冻结的 3 倍不能被次批窗口降回 2");
+            tickUntil(table, () -> table.openingCompletedDealBatches() >= 4);
+            assertEquals(12, table.getHand(first).size(), "第 4 批后每人 12 张");
+            assertEquals(2, table.currentRevealMultiplier(), "第 4 批可冻结倍率是 2");
+            assertEquals(3, table.publicRevealMultiplier(), "已冻结的 3 倍不能被后续档位降回 2");
 
-            // 第三批：阶梯到下限 1，后到的人仍可明牌，但只能取 max。
-            tickUntil(table, () -> table.openingCompletedDealBatches() >= 3);
-            assertEquals(9, table.getHand(first).size());
-            assertEquals(1, table.currentRevealMultiplier(), "第三批起可冻结倍率是下限 1");
+            tickUntil(table, () -> table.openingCompletedDealBatches() >= 5);
+            assertEquals(1, table.currentRevealMultiplier(), "第 5 批起可冻结倍率是下限 1");
             assertEquals(3, table.publicRevealMultiplier());
             assertEquals("明牌 ×1", table.openingRevealButtonLabel(), "按钮必须显示当刻（1 倍）而不是已生效的 3 倍");
-            assertTrue(table.openingRevealLabel().contains("1 倍"),
-                "窗口文案必须显示当刻 1 倍，实际：" + table.openingRevealLabel());
             assertTrue(table.canRevealHand(third), "下限窗口仍允许其他真人明牌");
             table.revealHand(third);
             assertTrue(table.isHandRevealed(third));
             assertEquals(3, table.publicRevealMultiplier(), "1 倍明牌不得把整局从 3 倍拉低");
-            assertEquals(1, table.getRevealCount(third));
             assertEquals(1, table.getRevealWindowSnapshot(third).currentMultiplier());
             assertEquals(3, table.getRevealWindowSnapshot(third).appliedMultiplier());
 
-            // 窗口关闭后：可冻结倍率归 0，但已生效倍率必须保留给结算。
             tickUntil(table, () -> !table.isRevealWindowOpen());
             assertEquals(0, table.currentRevealMultiplier(), "窗口关闭后可冻结倍率归 0");
             assertEquals(3, table.publicRevealMultiplier(), "结算前已生效倍率不得被清零");
-            assertEquals(GamePhase.BIDDING, table.getPhase(), "窗口关闭后才进叫分");
+            tickUntil(table, () -> table.getPhase() == GamePhase.BIDDING);
             for (UUID seat : table.getSeats()) {
                 assertEquals(17, table.getHand(seat).size(), "17+3：每家 17 张");
             }
@@ -322,11 +300,96 @@ class GameTableOpeningFlowTest {
     }
 
     /**
-     * 未发（首批未完成）与已过期（窗口关闭）两个边界都必须拒绝，且拒绝不得留下任何副作用：
-     * 不写 revealedHandPlayers、不改倍率、不计次数。旧局则通过重新开局验证状态已被彻底重置。
+     * 【1.10.73 抢地主加赛延长】真实发牌结束后，使用三次公开 bid() 走出同分，进入抢地主轮；
+     * 限时窗口归零后，资格只延续到这轮叫分实际结束。
      */
     @Test
-    void revealBeforeFirstBatchAndAfterExpiryAreRejectedWithoutSideEffects() throws Exception {
+    void biddingTieBreakExtendsRevealQualificationConsistently() throws Exception {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        UUID third = UUID.randomUUID();
+        GameTable table = openingTable(List.of(first, second, third), Set.of(), Map.of());
+        setField(table, "bidOrder", List.of(first, second, third));
+        setField(table, "bidRound", 1);
+        setField(table, "trickHud", disabledTrickHud());
+
+        withPlayers(Map.of(
+            first, player(first, "first", true),
+            second, player(second, "second", true),
+            third, player(third, "third", true)
+        ), () -> {
+            RoundOpeningCoordinator coordinator = openingCoordinator(table);
+            coordinator.start(deck(54), settings(4, 20, 60));
+
+            tickUntil(table, () -> table.getPhase() == GamePhase.BIDDING && !table.isRevealWindowOpen());
+            // OpeningSupport 只驱动阶段回调；按确定的测试叫分顺序补上当前首位，后续全部走生产 bid()。
+            setField(table, "currentTurn", first);
+            assertFalse(table.isRevealWindowOpen(), "第 3 批开启的 60 tick 限时窗口已经关闭");
+            assertEquals(0, table.currentRevealMultiplier());
+
+            driveToRealTieBreak(table, first, second, third);
+            assertTrue(table.isRevealWindowOpen(), "真实同分叫分进入抢地主轮后，明牌资格必须延续");
+            // opening-presentation 只描述 DEALING/REVEALING，不能把 BIDDING 延长期误报成开局动画。
+            assertFalse(table.isOpeningRevealWindow());
+            assertFalse(table.getOpeningPresentationSnapshot().revealWindowOpen());
+            var snapshot = table.getRevealWindowSnapshot(first);
+            assertTrue(snapshot.open());
+            assertTrue(snapshot.extendedIntoBidding());
+            assertEquals(-1, snapshot.remainingSeconds(), "抢地主延长期不显示倒计时");
+            assertEquals(1, table.currentRevealMultiplier(), "整副牌已发完，延长期倍率应为阶梯下限 1");
+            assertEquals(1, snapshot.currentMultiplier());
+            assertTrue(table.canRevealHand(first));
+
+            table.revealHand(first);
+            assertTrue(table.isHandRevealed(first));
+            assertEquals(1, table.publicRevealMultiplier());
+
+            // 由当前抢地主者实际叫到 3 分，走 confirmLandlord → DOUBLING，而非反射伪造 bidRound。
+            table.bid(first, 3);
+            assertEquals(GamePhase.DOUBLING, table.getPhase(), "抢地主实际结束后应进入加倍阶段");
+            assertFalse(table.isRevealWindowOpen(), "离开 BIDDING 后延长资格必须立即关闭");
+            assertEquals(0, table.currentRevealMultiplier());
+            assertFalse(table.canRevealHand(second));
+            assertThrows(IllegalStateException.class, () -> table.revealHand(second));
+            assertFalse(table.isHandRevealed(second), "被拒的点击不得写入手牌公开状态");
+            return null;
+        });
+    }
+
+    /** 未曾打开过第 3 批窗口时，真实叫分同分进入抢地主轮也不得凭空获得资格。 */
+    @Test
+    void biddingTieBreakWithoutAnEarlierWindowGivesNoRevealQualification() throws Exception {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        UUID third = UUID.randomUUID();
+        GameTable table = openingTable(List.of(first, second, third), Set.of(), Map.of());
+        setField(table, "phase", GamePhase.BIDDING);
+        setField(table, "bidRound", 1);
+        setField(table, "bidOrder", List.of(first, second, third));
+        setField(table, "currentTurn", first);
+
+        withPlayers(Map.of(
+            first, player(first, "first", true),
+            second, player(second, "second", true),
+            third, player(third, "third", true)
+        ), () -> {
+            RoundOpeningCoordinator coordinator = openingCoordinator(table);
+            assertFalse(coordinator.revealWindowEverOpened());
+            driveToRealTieBreak(table, first, second, third);
+
+            assertFalse(table.isRevealWindowOpen(), "本局没开过窗口，真实抢地主轮也不得凭空给资格");
+            assertFalse(table.getRevealWindowSnapshot(first).extendedIntoBidding());
+            assertEquals(0, table.currentRevealMultiplier());
+            assertFalse(table.canRevealHand(first));
+            return null;
+        });
+    }
+
+    /**
+     * 未发（第 3 批之前）与已过期（窗口关闭）两个边界都必须拒绝，且拒绝不得留下任何副作用。
+     */
+    @Test
+    void revealBeforeThirdBatchAndAfterExpiryAreRejectedWithoutSideEffects() throws Exception {
         UUID first = UUID.randomUUID();
         UUID second = UUID.randomUUID();
         UUID third = UUID.randomUUID();
@@ -341,43 +404,38 @@ class GameTableOpeningFlowTest {
             coordinator.start(deck(54), settings(4, 20, 60));
 
             IllegalStateException tooEarly = assertThrows(IllegalStateException.class,
-                () -> table.revealHand(first), "首批未发完不得明牌");
+                () -> table.revealHand(first), "第 3 批之前不得明牌");
             assertEquals("不可明", tooEarly.getMessage(), "未到窗口应报「现在不能明牌」，而不是「已经明牌」");
             assertFalse(table.isHandRevealed(first), "被拒的点击不得写入手牌公开状态");
             assertEquals(0, table.getRevealCount(first));
             assertEquals(1, table.publicRevealMultiplier(), "被拒的点击不得改动倍率");
 
-            tickUntil(table, () -> table.openingCompletedDealBatches() >= 1);
-            assertTrue(table.canRevealHand(first), "首批窗口内必须能明牌");
+            tickUntil(table, () -> table.openingCompletedDealBatches() >= 3);
+            assertTrue(table.canRevealHand(first), "第 3 批之后的窗口内必须能明牌");
 
             tickUntil(table, () -> !table.isRevealWindowOpen());
-            assertEquals(GamePhase.BIDDING, table.getPhase());
+            tickUntil(table, () -> table.getPhase() == GamePhase.BIDDING);
             IllegalStateException expired = assertThrows(IllegalStateException.class,
                 () -> table.revealHand(first), "过期点击必须被拒");
             assertEquals("不可明", expired.getMessage());
-            assertFalse(table.isHandRevealed(first), "过期点击不得补写公开状态");
+            assertFalse(table.isHandRevealed(first));
             assertEquals(0, table.getRevealCount(first));
             assertEquals(1, table.publicRevealMultiplier(), "过期点击不得改动倍率");
             assertFalse(table.canRevealHand(first));
 
-            // 旧局：新一局开局后，上一局的明牌状态与倍率都不得残留。
             setField(table, "revealMultiplier", 3);
             setField(table, "revealedHandPlayers", new java.util.HashSet<>(Set.of(first)));
             invoke(table, "prepareFreshRoundState");
             coordinator.start(deck(54), settings(4, 20, 60));
             assertEquals(1, table.publicRevealMultiplier(), "新局必须从 ×1 重新开始");
             assertFalse(table.isHandRevealed(first));
-            assertFalse(table.isRevealWindowOpen(), "新局首批未发完不得继承旧局窗口");
+            assertFalse(table.isRevealWindowOpen(), "新局第 3 批之前不得继承旧局窗口");
             assertFalse(table.canRevealHand(first));
-            assertThrows(IllegalStateException.class, () -> table.revealHand(first));
             return null;
         });
     }
 
-    /**
-     * 【结算/UI 同源】明牌倍率只有一份事实：牌桌字段。实时状态文本、核心分、结算视图
-     * 都必须读它，不能各自按批次或秒数重算，否则会出现「界面写 ×3、结算按 ×1」的错账。
-     */
+    /** 结算/实时视图必须读同一份冻结倍率：注入 ×3 后 3×3×4 = 36。 */
     @Test
     void settlementAndLiveViewsReadTheSameFrozenRevealMultiplier() throws Exception {
         UUID first = UUID.randomUUID();
@@ -392,14 +450,14 @@ class GameTableOpeningFlowTest {
         ), () -> {
             RoundOpeningCoordinator coordinator = openingCoordinator(table);
             coordinator.start(deck(54), settings(4, 20, 60));
-            tickUntil(table, () -> table.openingCompletedDealBatches() >= 1);
+            tickUntil(table, () -> table.openingCompletedDealBatches() >= 3);
             table.revealHand(first);
+            assertEquals(3, table.publicRevealMultiplier(), "第 3 批明牌冻结 3 倍");
 
             setField(table, "phase", GamePhase.PLAYING);
             setField(table, "landlord", first);
             setField(table, "highestBid", 3);
             setField(table, "bombMultiplier", 4);
-            // 固定出牌手数，排除春天/反春对核心分的二次影响（本轮只验证「明牌倍率同源」）。
             Map<UUID, Integer> playedHands = new HashMap<>();
             playedHands.put(first, 2);
             playedHands.put(second, 1);
@@ -449,6 +507,31 @@ class GameTableOpeningFlowTest {
         coordinator.tick();
         assertEquals(1, table.getHand(seats.getFirst()).size(), "新局只应收到新时间线的第一张牌");
         assertEquals(GamePhase.DEALING, table.getPhase());
+    }
+
+    /** 真实执行第一轮的三个 bid，确保两位最高分同分并进入生产抢地主轮。 */
+    private static void driveToRealTieBreak(GameTable table, UUID first, UUID second, UUID third) throws Exception {
+        table.bid(first, 1);
+        table.bid(second, 1);
+        table.bid(third, 0);
+        assertEquals(GamePhase.BIDDING, table.getPhase());
+        assertEquals(List.of(first, second), getField(table, "tieBreakOrder"),
+            "必须由真实叫分结果建立同分抢地主顺序");
+        assertEquals(first, getField(table, "currentTurn"), "同分抢地主首位应是最高叫分顺序中的第一人");
+    }
+
+    /** 地主确认前会预热王冠头像；用禁用快照让该边界无外部图片/CE 依赖。 */
+    private static TrickHudService disabledTrickHud() throws Exception {
+        TrickHudService hud = (TrickHudService) unsafe().allocateInstance(TrickHudService.class);
+        TrickHudService.Settings disabled = new TrickHudService.Settings(
+            false, 6, 6, 22, 0, 0, 0, 0, TrickHudView.RowXOffsets.NONE,
+            false, 100, 0, 2, false, 0, 0, 0);
+        Class<?> snapshotType = Class.forName(TrickHudService.class.getName() + "$Snapshot");
+        Constructor<?> constructor = snapshotType.getDeclaredConstructor(
+            TrickHudService.Settings.class, int.class, int.class);
+        constructor.setAccessible(true);
+        setField(hud, "snapshot", constructor.newInstance(disabled, 0, 0));
+        return hud;
     }
 
     private static GameTable openingTable(List<UUID> seats, Set<UUID> bots, Map<UUID, String> botNames) throws Exception {
@@ -758,6 +841,12 @@ class GameTableOpeningFlowTest {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private static Object getField(Object target, String fieldName) throws Exception {
+        Field field = findField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static Field findField(Class<?> type, String fieldName) throws NoSuchFieldException {

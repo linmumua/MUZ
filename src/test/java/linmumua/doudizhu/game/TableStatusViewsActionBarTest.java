@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
  * 当前出牌 HUD 固定显示在 sendActionBar 所在的经验条正上方。
  *
  * <p>明牌相关断言自 1.10.63 起一律以 {@link GameTable.RevealWindowSnapshot} 为准：
- * 倍率是「首批发完 ×3、第二批 ×2、之后固定 ×1」的递减阶梯，窗口在**首批发完**就开
+ * 倍率是「第 3 批发完 ×3、第 4 批 ×2、第 5 批及以后固定 ×1」的递减阶梯，窗口在**第 3 批发完后只开 60 tick**
  * （此时阶段仍是 DEALING），因此视图既不能再写死「整局最多 ×2」，也不能只在 REVEALING
  * 才播报窗口。这里锁的正是这两条，而不是某一句具体措辞。
  */
@@ -24,19 +24,33 @@ class TableStatusViewsActionBarTest {
     private static final UUID TURN = UUID.fromString("c2b73fa8-6703-3d89-943d-7cc09d51fc9a");
     private static final UUID VIEWER = UUID.fromString("0d88ac75-df02-466d-a59c-19f8384e4732");
 
-    /** 窗口已开、还没明牌：现在点会冻结 ×3，整个窗口还剩 15 秒。 */
-    private static GameTable.RevealWindowSnapshot windowOpenAtFirstBatch() {
-        return new GameTable.RevealWindowSnapshot(true, 15, 3, 1, 1, false);
+    /**
+     * 窗口刚在第 3 批发完时打开、还没明牌：现在点会冻结 ×3，限时窗口还剩 15 秒。
+     *
+     * <p>【1.10.73】窗口与倍率阶梯同锚在第 3 批（每人 9 张），因此「批次 = 3」与「倍率 = 3」必须同时成立；
+     * 把批数写成 1/2 是旧「首批即开」语义的残留，会让断言在看不出错的情况下继续变绿。
+     */
+    private static GameTable.RevealWindowSnapshot windowOpenAtThirdBatch() {
+        return new GameTable.RevealWindowSnapshot(true, 15, 3, 1, 3, false, false);
     }
 
-    /** 窗口已开、倍率降到 ×2（第二批已发完）。 */
-    private static GameTable.RevealWindowSnapshot windowOpenAtSecondBatch() {
-        return new GameTable.RevealWindowSnapshot(true, 9, 2, 1, 2, false);
+    /** 同一限时窗口内发到第 4 批：阶梯降到 ×2，窗口还剩 9 秒。 */
+    private static GameTable.RevealWindowSnapshot windowOpenAtFourthBatch() {
+        return new GameTable.RevealWindowSnapshot(true, 9, 2, 1, 4, false, false);
     }
 
-    /** 窗口已开但本人已明牌，此时表级倍率已经冻结为 ×3。 */
+    /** 窗口已开但本人已明牌：当刻倍率已是下限 ×1，本局已生效倍率冻结为 ×3。 */
     private static GameTable.RevealWindowSnapshot windowOpenAndRevealed() {
-        return new GameTable.RevealWindowSnapshot(true, 6, 1, 3, 4, true);
+        return new GameTable.RevealWindowSnapshot(true, 6, 1, 3, 5, true, false);
+    }
+
+    /**
+     * 抢地主加赛的资格延长：限时窗口早已归零（remainingSeconds = -1），但资格仍在。
+     *
+     * <p>UI 绝不能把 -1 当成「剩 0 秒」写出来——那正是本轮要修的自相矛盾文案。
+     */
+    private static GameTable.RevealWindowSnapshot extendedIntoBidding() {
+        return new GameTable.RevealWindowSnapshot(true, -1, 1, 1, 6, false, true);
     }
 
     /**
@@ -120,8 +134,8 @@ class TableStatusViewsActionBarTest {
     }
 
     /**
-     * 首批发完窗口就开，而阶段仍是 DEALING：这段时间必须播报窗口，否则玩家只知道在发牌，
-     * 不知道「现在可以明牌、还能拿 ×3」——正是「状态机允许、UI 不可见」的那类缺陷。
+     * 第 3 批发完窗口后仍处于 DEALING：这段时间必须播报窗口，否则玩家只知道在发牌，
+     * 不知道当前可以明牌、更不知道倍率。
      */
     @Test
     void dealingPhaseAdvertisesRevealWindowAsSoonAsFirstBatchIsDealt() {
@@ -137,12 +151,43 @@ class TableStatusViewsActionBarTest {
             id -> Component.text("当前出牌 · NativeProbe"),
             Component.empty(),
             20,
-            windowOpenAtFirstBatch()
+            windowOpenAtThirdBatch()
         );
 
         String plain = PLAIN.serialize(line);
         assertEquals("明牌窗口 · 现在明牌 x3 · 剩 15 秒", plain);
         assertFalse(plain.contains("正在发牌"), "窗口已开时不能再显示纯发牌文案");
+    }
+
+    /**
+     * 抢地主加赛的资格延长：**不得**出现「剩 0 秒」。
+     *
+     * <p>延长期限时窗口早已归零，快照用 remainingSeconds = -1 明确表达「没有倒计时」。
+     * 若视图把 -1 钳成 0 再拼上「剩 %s 秒」，玩家会看到「剩 0 秒」却仍然能点明牌——
+     * 这条断言就是防那种自相矛盾（本轮真实缺陷之一）。
+     */
+    @Test
+    void extendedIntoBiddingNeverRendersZeroSecondsCountdown() {
+        Component line = TableStatusViews.persistentActionBar(
+            GamePhase.BIDDING,
+            VIEWER,
+            TURN,
+            false,
+            1,
+            0,
+            0,
+            id -> Component.text("普通身份"),
+            id -> Component.text("当前出牌 · NativeProbe"),
+            Component.empty(),
+            20,
+            extendedIntoBidding()
+        );
+
+        String plain = PLAIN.serialize(line);
+        assertTrue(plain.contains("现在明牌 x1"), "延长期仍必须报告当刻可冻结倍率，实际：" + plain);
+        assertTrue(plain.contains("抢地主结束前"), "延长期必须说明资格延续到叫分结束，实际：" + plain);
+        assertFalse(plain.contains("剩 0 秒"), "延长期不得写「剩 0 秒」，实际：" + plain);
+        assertFalse(plain.contains("剩 -1 秒"), "延长期不得把哨兵 -1 直接拼进文案，实际：" + plain);
     }
 
     @Test
@@ -159,7 +204,7 @@ class TableStatusViewsActionBarTest {
             id -> Component.text("当前出牌 · NativeProbe"),
             Component.empty(),
             20,
-            windowOpenAtSecondBatch()
+            windowOpenAtFourthBatch()
         );
 
         String plain = PLAIN.serialize(line);
@@ -184,7 +229,7 @@ class TableStatusViewsActionBarTest {
             id -> Component.text("当前出牌 · NativeProbe"),
             Component.empty(),
             20,
-            new GameTable.RevealWindowSnapshot(false, 0, 0, 1, 6, false)
+            new GameTable.RevealWindowSnapshot(false, 0, 0, 1, 6, false, false)
         );
 
         assertEquals("明牌窗口已结束 · 等待叫分。", PLAIN.serialize(line));
@@ -218,9 +263,9 @@ class TableStatusViewsActionBarTest {
     @Test
     void tableStatusShowsRevealWindowDuringDealing() {
         String text = TableStatusViews.multiplierStatusText(
-            GamePhase.DEALING, 0, null, 1, 1, 0, 2, null, "x1", windowOpenAtFirstBatch());
+            GamePhase.DEALING, 0, null, 1, 1, 0, 2, null, "x1", windowOpenAtThirdBatch());
         String rich = PLAIN.serialize(TableStatusViews.multiplierStatusComponent(
-            GamePhase.DEALING, 0, null, 1, 1, 0, 2, null, "x1", windowOpenAtFirstBatch()));
+            GamePhase.DEALING, 0, null, 1, 1, 0, 2, null, "x1", windowOpenAtThirdBatch()));
 
         assertEquals("明牌窗口 · 现在明牌 x3 · 剩 15 秒", text);
         assertTrue(rich.contains("x3"), "富文本状态牌必须显示当刻倍率");
