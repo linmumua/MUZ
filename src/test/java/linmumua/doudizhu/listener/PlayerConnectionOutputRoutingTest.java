@@ -70,6 +70,33 @@ class PlayerConnectionOutputRoutingTest {
         assertTrue(coordinatorBody.contains("repairIncompleteTables("));
     }
 
+    @Test
+    void loadedNoticeIsOnlyForOperators() {
+        // 资源包加载完成提示在 CE 重载资源包时对每个在线玩家各触发一次，
+        // 普通玩家不该收到这条管理员向的播报（用户明确要求仅 op 显示）。
+        assertTrue(PlayerConnectionListener.showsLoadedNotice(true), "op 必须收到加载完成提示");
+        assertFalse(PlayerConnectionListener.showsLoadedNotice(false), "普通玩家不得收到加载完成提示");
+    }
+
+    @Test
+    void loadedNoticeBranchIsGatedButWarmupStillRuns() throws IOException {
+        String source = Files.readString(LISTENER);
+        String statusBody = methodBody(source, "public void onResourcePackStatus(PlayerResourcePackStatusEvent event)");
+
+        assertTrue(statusBody.contains("showsLoadedNotice(event.getPlayer().isOp())"),
+            "加载完成提示必须以 isOp() 门禁");
+        assertBefore(statusBody, "if (showsLoadedNotice(", "output.sendMessage(playerId, progressMessage(\"资源包加载完成");
+        // 反证：不得退回「无条件发给所有人」。
+        assertFalse(statusBody.contains("case SUCCESSFULLY_LOADED -> {\n                output.sendMessage("),
+            "加载完成提示不得再无条件发给所有玩家");
+        // 资源包应用后仍要为该玩家补一次视图重同步，门禁只挡提示、不挡功能。
+        assertTrue(statusBody.contains("scheduleViewerWarmup(event.getPlayer(), \"resource-pack\")"),
+            "门禁只应影响提示，warmup 必须照旧执行");
+        // 其余状态是玩家自己那次下载的结果，仍应逐人提示。
+        assertTrue(statusBody.contains("你拒绝了服务器资源包。"), "拒绝提示仍需逐人发送");
+        assertTrue(statusBody.contains("资源包下载失败"), "下载失败提示仍需逐人发送");
+    }
+
     private static void assertBefore(String body, String first, String second) {
         int firstIndex = body.indexOf(first);
         int secondIndex = body.indexOf(second);

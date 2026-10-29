@@ -39,7 +39,14 @@ public final class PlayerConnectionListener implements Listener {
             case ACCEPTED -> output.sendActionBar(playerId, progressMessage("资源包已接受，开始下载", 0.20, NamedTextColor.AQUA));
             case DOWNLOADED -> output.sendActionBar(playerId, progressMessage("资源包已下载，正在应用", 0.72, NamedTextColor.GOLD));
             case SUCCESSFULLY_LOADED -> {
-                output.sendMessage(playerId, progressMessage("资源包加载完成 | 作者 linmumua | QQ 356013496", 1.0, NamedTextColor.GREEN));
+                // 【仅 op 可见】CraftEngine 每次重载资源包，**全体在线玩家**都会重新下载一次，
+                // 于是这条「加载完成 | 作者 … | QQ …」会逐个弹给所有人——对普通玩家来说这是一条
+                // 与自己无关的播报（重载通常还是管理员操作的）。用户明确要求仅对 op 显示，
+                // 因此普通玩家只在客户端静默应用资源包，不再收到这条提示。
+                // 其余状态（拒绝/下载失败/地址无效等）是玩家自己那次下载的结果，仍然逐人提示。
+                if (showsLoadedNotice(event.getPlayer().isOp())) {
+                    output.sendMessage(playerId, progressMessage("资源包加载完成 | 作者 linmumua | QQ 356013496", 1.0, NamedTextColor.GREEN));
+                }
                 scheduleViewerWarmup(event.getPlayer(), "resource-pack");
             }
             case DECLINED -> output.sendMessage(playerId, progressMessage("你拒绝了服务器资源包。", 0.0, NamedTextColor.RED));
@@ -90,6 +97,17 @@ public final class PlayerConnectionListener implements Listener {
         if (service != null) {
             service.clearPlayer(player.getUniqueId());
         }
+    }
+
+    /**
+     * 「资源包加载完成」提示是否要发给该玩家。
+     *
+     * <p>为什么只有 op 看：这条提示在 CraftEngine 重载资源包时会对**每个在线玩家**各触发一次，
+     * 内容却是给管理员看的构建/作者信息。做成只接收布尔值的纯函数，便于在无 Bukkit 服务端的
+     * 单测里逐条验算判据，而不是只能读源码猜。
+     */
+    static boolean showsLoadedNotice(boolean operator) {
+        return operator;
     }
 
     private Component progressMessage(String text, double progress, NamedTextColor color) {
